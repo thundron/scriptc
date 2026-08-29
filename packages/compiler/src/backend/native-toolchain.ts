@@ -119,6 +119,44 @@ export function executableSectionEliminationFlags(platform: string): {
     default:
       return { compile: [], link: [] };
   }
+/* Phase 3 (nativetron): the runtime staging allocator (scr_wasm_alloc/free)
+ * compiled into the wasm reactor artifact so the browser host can hand inbound
+ * strings/bytes into guest linear memory. */
+export const WASM_REACTOR_RUNTIME_SOURCES = ["scr_wasm.c"] as const;
+
+/** Fixed function exports every wasm reactor surfaces regardless of the app's
+ * own exported functions: the two staging-allocator entries. Two other exports
+ * are surfaced WITHOUT an explicit `--export` and so are not listed here:
+ * `memory` (wasm-ld exports linear memory by default) and `_initialize` (the
+ * wasi reactor crt provides and exports the ctor hook). Passing `--export` for
+ * either errors (`symbol exported via --export not found`). */
+export const WASM_REACTOR_SUPPORT_EXPORTS = ["scr_wasm_alloc", "scr_wasm_free"] as const;
+
+/**
+ * Assemble the wasm-ld link arguments that turn the linked module into a
+ * browser reactor: the reactor exec-model (crt1-reactor: exports `_initialize`,
+ * runs ctors, no `_start`/`proc_exit`), no command entry, and an explicit
+ * export for each app function plus the fixed support set. Verified against
+ * `zig cc -target wasm32-wasi -mexec-model=reactor -Wl,--no-entry` (see
+ * backend/wasm-glue.test.ts and PHASE3_PROGRESS.md).
+ *
+ * `appExports` are the library-profile-declared exported symbols. Duplicates
+ * and any accidental overlap with the support set are de-duplicated so the
+ * link line never repeats `--export`.
+ */
+export function wasmReactorLinkArgs(appExports: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const exportsInOrder: string[] = [];
+  for (const sym of [...WASM_REACTOR_SUPPORT_EXPORTS, ...appExports]) {
+    if (sym.length === 0 || seen.has(sym)) continue;
+    seen.add(sym);
+    exportsInOrder.push(sym);
+  }
+  return [
+    "-mexec-model=reactor",
+    "-Wl,--no-entry",
+    ...exportsInOrder.map((sym) => `-Wl,--export=${sym}`),
+  ];
 }
 
 /** Environment variables consumed by clang, its linker/subtools, or the

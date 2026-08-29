@@ -2661,7 +2661,7 @@ async function compileLibraryTracked(
     // C-ABI contracts. wasm32-wasi executable modules are supported, but the
     // archive/reactor contract is not; refuse before emitting a host-width
     // LLVM TU or asking Zig to compile the native library runtime for WASI.
-    if (buildPlatform === "wasi") {
+    if (buildPlatform === "wasi" && profile.emission !== "llvm") {
       return fail([
         targetRefusalDiag(
           "wasm32-wasi",
@@ -2864,11 +2864,15 @@ async function compileLibraryTracked(
   let cPath: string;
   if (profile.emission === "llvm") {
     try {
-      const ll = emitLlvmModule(mod);
+      const ll = emitLlvmModule(mod, { wasi: buildPlatform === "wasi" });
       timing("llvm-emit", { output_bytes: Buffer.byteLength(ll) });
       cPath = join(opts.outDir, `${stem}.lib.ll`);
       await writeFile(cPath, ll);
       timing("llvm-write");
+      if (buildPlatform === "wasi") {
+        timing("complete");
+        return { ok: true, archivePath: cPath, cPath, backend: "llvm" };
+      }
     } catch (err) {
       if (!(err instanceof LlvmUnsupportedError)) throw err;
       // The profile PINS the emission — fail-loudly, never a lane change.

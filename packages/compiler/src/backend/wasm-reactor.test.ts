@@ -43,8 +43,6 @@ describe("wasmReactorLinkArgs (unit)", () => {
   });
 });
 
-// Verify the runtime staging allocator (scr_wasm.c) compiles for wasm32-wasi and
-// its exports round-trip through linear memory. Skipped without zig.
 function hasZig(): boolean {
   try {
     execFileSync("zig", ["version"], { stdio: "ignore" });
@@ -59,8 +57,6 @@ const RUNTIME_SRC = join(
   "../../../runtime/src/scr_wasm.c",
 );
 
-// A caller TU that exports a helper letting the test drive the allocator and
-// prove the returned pointer addresses writable guest memory.
 const DRIVER_C = `#include <stdint.h>
 void *scr_wasm_alloc(uint32_t);
 void scr_wasm_free(void *, uint32_t);
@@ -92,7 +88,6 @@ describe.runIf(hasZig())("scr_wasm.c staging allocator (end-to-end)", () => {
         { cwd: dir },
       );
       const bytes = readFileSync(join(dir, "app.wasm"));
-      // The compiler tsconfig lib does not surface WebAssembly as a value.
       const WA = (globalThis as unknown as { WebAssembly: any }).WebAssembly;
       const mod = new WA.Module(bytes);
       const exportNames = WA.Module.exports(mod).map((e: { name: string }) => e.name);
@@ -104,7 +99,6 @@ describe.runIf(hasZig())("scr_wasm.c staging allocator (end-to-end)", () => {
         _initialize?: () => void;
       };
       ex._initialize?.();
-      // sum of i&0xff for i in [0,16) = 0+1+...+15 = 120
       expect((ex.roundtrip as (n: number) => number)(16)).toBe(120);
     } finally {
       rmSync(dir, { recursive: true, force: true });

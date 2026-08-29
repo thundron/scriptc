@@ -46,9 +46,6 @@ describe("emitWasmGlue (unit)", () => {
   });
 });
 
-// End-to-end: build the proven reactor with zig, generate glue for its ABI,
-// import the generated ESM, and run the full host<->guest round-trip. Skipped
-// when zig is unavailable (source/CI hosts without the wasm toolchain).
 function hasZig(): boolean {
   try {
     execFileSync("zig", ["version"], { stdio: "ignore" });

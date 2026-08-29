@@ -1867,26 +1867,61 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
       ({ kind: "ternary", cond: bin("<", a, num("n.0"), BOOL), then: a, else_: num("n.0"), type: F64, loc } as IrExpr);
     const twoW = (): IrExpr => bin("*", num("w.0"), numLit(2, loc));
 
-    const mergeRun: IrStmt[] = [
-      set("mid.0", minOf(bin("+", num("lo.0"), num("w.0")))),
-      set("hi.0", minOf(bin("+", num("lo.0"), twoW()))),
-      set("i.0", num("lo.0")),
-      set("j.0", num("mid.0")),
-      set("k.0", num("lo.0")),
-      whileLt(num("i.0"), num("mid.0"), [
-        { kind: "if", cond: bin(">=", num("j.0"), num("hi.0"), BOOL), then: [{ kind: "break", loc }], else_: [], loc } as IrStmt,
-        {
-          kind: "if",
-          cond: takeRight,
-          then: [put(T(), num("k.0"), rightEl()), bump("j.0")],
-          else_: [put(T(), num("k.0"), leftEl()), bump("i.0")],
-          loc,
-        } as IrStmt,
-        bump("k.0"),
-      ]),
-      whileLt(num("i.0"), num("mid.0"), [put(T(), num("k.0"), leftEl()), bump("i.0"), bump("k.0")]),
-      whileLt(num("j.0"), num("hi.0"), [put(T(), num("k.0"), rightEl()), bump("j.0"), bump("k.0")]),
-      set("lo.0", bin("+", num("lo.0"), twoW())),
+    const mergeRun = (src: () => IrExpr, dst: () => IrExpr): IrStmt[] => {
+      const rightSrc = (): IrExpr => get(src(), num("j.0"));
+      const leftSrc = (): IrExpr => get(src(), num("i.0"));
+      const cmpRF = (): IrExpr =>
+        inlineCmp === "asc"
+          ? bin("<", rightSrc(), leftSrc(), BOOL)
+          : inlineCmp === "desc"
+          ? bin("<", leftSrc(), rightSrc(), BOOL)
+          : bin("<", {
+              kind: "callValue",
+              callee: ref("f.0", fnT),
+              args: [rightSrc(), leftSrc()].slice(0, arity),
+              type: F64,
+              loc,
+            } as IrExpr, numLit(0, loc), BOOL);
+      const rU = isUndefined(rightSrc());
+      const lU = isUndefined(leftSrc());
+      const take: IrExpr =
+        rU !== null && lU !== null
+          ? {
+              kind: "ternary",
+              cond: rU,
+              then: boolLit(false),
+              else_: { kind: "ternary", cond: lU, then: boolLit(true), else_: cmpRF(), type: BOOL, loc },
+              type: BOOL,
+              loc,
+            }
+          : cmpRF();
+      return [
+        set("mid.0", minOf(bin("+", num("lo.0"), num("w.0")))),
+        set("hi.0", minOf(bin("+", num("lo.0"), twoW()))),
+        set("i.0", num("lo.0")),
+        set("j.0", num("mid.0")),
+        set("k.0", num("lo.0")),
+        whileLt(num("i.0"), num("mid.0"), [
+          { kind: "if", cond: bin(">=", num("j.0"), num("hi.0"), BOOL), then: [{ kind: "break", loc }], else_: [], loc } as IrStmt,
+          {
+            kind: "if",
+            cond: take,
+            then: [put(dst(), num("k.0"), rightSrc()), bump("j.0")],
+            else_: [put(dst(), num("k.0"), leftSrc()), bump("i.0")],
+            loc,
+          } as IrStmt,
+          bump("k.0"),
+        ]),
+        whileLt(num("i.0"), num("mid.0"), [put(dst(), num("k.0"), leftSrc()), bump("i.0"), bump("k.0")]),
+        whileLt(num("j.0"), num("hi.0"), [put(dst(), num("k.0"), rightSrc()), bump("j.0"), bump("k.0")]),
+        set("lo.0", bin("+", num("lo.0"), twoW())),
+      ];
+    };
+
+    const pass = (src: () => IrExpr, dst: () => IrExpr): IrStmt[] => [
+      set("lo.0", numLit(0, loc)),
+      whileLt(num("lo.0"), num("n.0"), mergeRun(src, dst)),
+      set("w.0", twoW()),
     ];
 
     const body: IrStmt[] = [
@@ -1909,11 +1944,19 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
       { kind: "varDecl", localId: "k.0", init: numLit(0, loc), loc } as IrStmt,
       { kind: "varDecl", localId: "x.0", init: numLit(0, loc), loc } as IrStmt,
       whileLt(num("w.0"), num("n.0"), [
-        set("lo.0", numLit(0, loc)),
-        whileLt(num("lo.0"), num("n.0"), mergeRun),
-        set("x.0", numLit(0, loc)),
-        whileLt(num("x.0"), num("n.0"), [put(A(), num("x.0"), get(T(), num("x.0"))), bump("x.0")]),
-        set("w.0", twoW()),
+        ...pass(A, T),
+        {
+          kind: "if",
+          cond: bin(">=", num("w.0"), num("n.0"), BOOL),
+          then: [
+            set("x.0", numLit(0, loc)),
+            whileLt(num("x.0"), num("n.0"), [put(A(), num("x.0"), get(T(), num("x.0"))), bump("x.0")]),
+            { kind: "break", loc } as IrStmt,
+          ],
+          else_: [],
+          loc,
+        } as IrStmt,
+        ...pass(T, A),
       ]),
       { kind: "return", value: A(), loc },
     ];

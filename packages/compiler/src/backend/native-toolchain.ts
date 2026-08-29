@@ -144,6 +144,23 @@ export function wasmReactorLinkArgs(appExports: readonly string[]): string[] {
   ];
 }
 
+const WASM_OPT_FEATURES = [
+  "--enable-nontrapping-float-to-int",
+  "--enable-bulk-memory",
+  "--enable-sign-ext",
+  "--enable-mutable-globals",
+];
+
+async function wasmOptIfAvailable(wasmPath: string, buildDir: string): Promise<void> {
+  const staged = join(buildDir, "wasm-opt.wasm");
+  try {
+    await execFileAsync("wasm-opt", ["-Oz", ...WASM_OPT_FEATURES, wasmPath, "-o", staged]);
+  } catch {
+    return;
+  }
+  await copyFile(staged, wasmPath);
+}
+
 export interface WasmReactorBuild {
   programLlPath: string;
   outWasmPath: string;
@@ -180,6 +197,7 @@ export async function buildWasmReactor(opts: WasmReactorBuild): Promise<void> {
     ...objs, ...driver.linkArgs, ...wasiLibs,
     "-o", opts.outWasmPath,
   ]);
+  await wasmOptIfAvailable(opts.outWasmPath, opts.buildDir);
 }
 
 /** Environment variables consumed by clang, its linker/subtools, or the

@@ -66,6 +66,11 @@ fallback for `SCR_TRAP_ADDR` in `scr_library.c`.
   but the runtime is `(size_t=i32, ptr)`; a signature mismatch traps only the
   logging path. Fix = emit size_t-class runtime-ABI args as i32 under wasi.
 
+### DONE: size
+`buildWasmReactor` compiles/links with `-Oz -ffunction-sections -fdata-sections
+-Wl,--gc-sections -Wl,--strip-all`. The nativetron web renderer went
+1,882,337 -> 85,749 bytes (40,442 gzipped); the 1.8 MB was debug/name sections.
+
 ### DONE: host imports (PR2)
 Library callback channels lower to direct wasm imports on wasi
 (`"wasm-import-module"="host"` / `"wasm-import-name"=<channel>`) instead of

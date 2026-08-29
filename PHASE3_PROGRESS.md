@@ -51,16 +51,24 @@ produce (no scriptc changes needed for these to work):
   the real reactor, generates glue for its ABI, imports the ESM, and runs the
   host↔guest round-trip. All green.
 
+### TS -> reactor: PROVEN end-to-end
+`scriptc build --lib --profile p.json` on wasm32-wasi emits the reactor `.ll`;
+linking it with the library runtime (LIB set + `scr_wasm.c`, `-DSCR_LIB`, wasi
+emulation defines `_WASI_EMULATED_SIGNAL/PROCESS_CLOCKS/GETPID`) via
+`wasmReactorLinkArgs()` yields a `.wasm` whose compiled-TS exports run from JS:
+`kt_add(2,3)=5`, `passthrough`, `negZero=-0`, `isNan`, `invert`, `plumb`.
+Locked in `backend/wasm-reactor-e2e.test.ts` (zig-gated). Required a wasm
+fallback for `SCR_TRAP_ADDR` in `scr_library.c`.
+
 ## Remaining (from the spike plan)
 
-- **PR1 integration (the remaining rock)** — route the wasi library lane to LINK
-  a reactor `.wasm` instead of `ar`-ing a `.a`: in the library-native path,
-  when `buildPlatform==="wasi"`, compile the program TU + runtime +
-  `WASM_REACTOR_RUNTIME_SOURCES` and link with `wasmReactorLinkArgs(exports)`
-  (exports = the profile-declared `mod.lib.exports` symbols + `initSymbol`),
-  then un-gate the wasi refusal in `index.ts` (~L2625). Building blocks above are
-  done + verified; this is the wiring that connects them to a `scriptc build`.
-  Decide export-selection source (reuse the library profile).
+- **`console.log` on wasm**: the emitter declares `scr_console_log(i64, ptr)`
+  but the runtime is `(size_t=i32, ptr)`; a signature mismatch traps only the
+  logging path. Fix = emit size_t-class runtime-ABI args as i32 under wasi.
+- **Fold the reactor link into the compiler** (`compileLibraryNative` wasi
+  branch) so `scriptc build` emits `.wasm`+`.mjs` directly, instead of the
+  external link the e2e test performs.
+
 - **PR2 host imports** — un-gate the wasi FFI refusal (`index.ts:1523`); attach
   `wasm-import-module`/`wasm-import-name` attributes to `mod.ffiImports`
   declares; restrict to FFI formats 1–3 (refuse retained/foreign on wasm).

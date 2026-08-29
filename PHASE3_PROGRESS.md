@@ -29,6 +29,17 @@ produce (no scriptc changes needed for these to work):
   string back. The DOM Host ABI ptr+len contract works verbatim over wasm.
 
 ### Landed compiler code
+- `packages/runtime/src/scr_wasm.c` — the wasm reactor staging allocator
+  (`scr_wasm_alloc`/`scr_wasm_free`, `export_name` under `__wasm__`). Lets the
+  browser host hand inbound strings/bytes into guest linear memory.
+- `packages/compiler/src/backend/native-toolchain.ts` — `wasmReactorLinkArgs()`
+  (pure): emits `-mexec-model=reactor -Wl,--no-entry` + one `-Wl,--export=` per
+  app export and per support export (`scr_wasm_alloc/free`); `memory` and
+  `_initialize` are surfaced implicitly (linker/crt) and must NOT be `--export`ed.
+  Plus `WASM_REACTOR_RUNTIME_SOURCES` / `WASM_REACTOR_SUPPORT_EXPORTS`.
+  `backend/wasm-reactor.test.ts`: 5 tests incl. an end-to-end zig build proving
+  `scr_wasm.c` compiles for wasm32-wasi, exports alloc/free, and its pointers
+  address writable guest memory (round-trip sum check).
 - `packages/compiler/src/backend/wasm-glue.ts` — `emitWasmGlue(mod)`: pure
   string emission of the `<stem>.mjs` ESM loader from the IR-derived
   import/export surface. Marshals string/bytes as (ptr,len) over linear memory,
@@ -42,15 +53,14 @@ produce (no scriptc changes needed for these to work):
 
 ## Remaining (from the spike plan)
 
-- **PR1 emitter/link wiring** — drive the above attributes/flags from scriptc:
-  when `wasi` + a reactor/export surface, emit `export_name` (LLVM
-  `wasm-export-name` attr or `-Wl,--export`) on exported fns + the allocator
-  shim, add `-mexec-model=reactor -Wl,--no-entry` to the wasm link
-  (`native-toolchain.ts`), and un-gate the wasi library/reactor refusal
-  (`index.ts` ~L2625). Decide export-selection source (library profile vs. a new
-  reactor manifest).
-- **`scr_wasm_alloc`/`scr_wasm_free` runtime shim** in the C runtime, gated to
-  the wasi reactor lane.
+- **PR1 integration (the remaining rock)** — route the wasi library lane to LINK
+  a reactor `.wasm` instead of `ar`-ing a `.a`: in the library-native path,
+  when `buildPlatform==="wasi"`, compile the program TU + runtime +
+  `WASM_REACTOR_RUNTIME_SOURCES` and link with `wasmReactorLinkArgs(exports)`
+  (exports = the profile-declared `mod.lib.exports` symbols + `initSymbol`),
+  then un-gate the wasi refusal in `index.ts` (~L2625). Building blocks above are
+  done + verified; this is the wiring that connects them to a `scriptc build`.
+  Decide export-selection source (reuse the library profile).
 - **PR2 host imports** — un-gate the wasi FFI refusal (`index.ts:1523`); attach
   `wasm-import-module`/`wasm-import-name` attributes to `mod.ffiImports`
   declares; restrict to FFI formats 1–3 (refuse retained/foreign on wasm).

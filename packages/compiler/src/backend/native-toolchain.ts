@@ -67,3 +67,23 @@ export {
   resolveCompilerStateRoot,
 } from "./build-cache.js";
 export { vendorCacheBuildIdentity, vendorCacheTargetFlavor } from "./native/vendor.js";
+
+/* Nativetron browser reactors always link a small host-staging allocator. */
+export const WASM_REACTOR_RUNTIME_SOURCES = ["scr_wasm_reactor.c"] as const;
+
+export const WASM_REACTOR_SUPPORT_EXPORTS = ["scr_wasm_alloc", "scr_wasm_free"] as const;
+
+export function wasmReactorLinkArgs(appExports: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const exportsInOrder: string[] = [];
+  for (const symbol of [...WASM_REACTOR_SUPPORT_EXPORTS, ...appExports]) {
+    if (symbol.length === 0 || seen.has(symbol)) continue;
+    seen.add(symbol);
+    exportsInOrder.push(symbol);
+  }
+  return [
+    "-mexec-model=reactor",
+    "-Wl,--no-entry",
+    ...exportsInOrder.map((symbol) => `-Wl,--export=${symbol}`),
+  ];
+}

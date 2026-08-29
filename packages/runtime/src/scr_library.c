@@ -114,7 +114,7 @@ void scr_library_callback_end(void) {
  * entry prologue below), and the remediation is the profile's for that
  * code when the program TU's overlay table declares one. */
 
-#if defined(__GNUC__) || defined(__clang__)
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__wasm__)
 #define SCR_TRAP_ADDR() ((uint64_t)(uintptr_t)__builtin_return_address(0))
 #else
 #define SCR_TRAP_ADDR() ((uint64_t)0)

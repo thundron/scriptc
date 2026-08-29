@@ -1676,7 +1676,8 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
       lowerer.badType(argNode, lowerer.typeOf(argNode));
     }
     const arity = fnArg.type.params.length;
-    const key = `${method}:${typeKey(elem)}:${arity}`;
+    const inlineCmp = elem.kind === "f64" ? numericComparatorShape(argNode) : null;
+    const key = `${method}:${typeKey(elem)}:${arity}:${inlineCmp ?? ""}`;
     let helper = lowerer.arrHofHelpers.get(key);
     if (!helper) {
       helper = `%arr.${method}.${lowerer.arrHofHelpers.size}`;
@@ -1691,10 +1692,17 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
           copyFirst,
           undefinedTag >= 0 ? undefinedTag : null,
           loc,
+          inlineCmp,
         ),
       );
     }
-    return { kind: "call", callee: helper, args: [receiver, fnArg], type: arrT, loc };
+    return {
+      kind: "call",
+      callee: helper,
+      args: inlineCmp !== null ? [receiver] : [receiver, fnArg],
+      type: arrT,
+      loc,
+    };
   }
 
 /** JS's default sort comparator for STRING elements, interned once:
@@ -1759,6 +1767,31 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
    *   }
    *   return a;
    */
+  function numericComparatorShape(node: ts.Node): "asc" | "desc" | null {
+    if (!ts.isArrowFunction(node) || node.parameters.length !== 2) return null;
+    const p0 = node.parameters[0]!.name;
+    const p1 = node.parameters[1]!.name;
+    if (!ts.isIdentifier(p0) || !ts.isIdentifier(p1)) return null;
+    if (node.parameters.some((p) => p.initializer !== undefined || p.dotDotDotToken !== undefined)) return null;
+    let expr: ts.Expression | undefined;
+    if (ts.isBlock(node.body)) {
+      const only = node.body.statements.length === 1 ? node.body.statements[0]! : null;
+      if (only === null || !ts.isReturnStatement(only) || only.expression === undefined) return null;
+      expr = only.expression;
+    } else {
+      expr = node.body;
+    }
+    while (expr !== undefined && ts.isParenthesizedExpression(expr)) expr = expr.expression;
+    if (expr === undefined || !ts.isBinaryExpression(expr)) return null;
+    if (expr.operatorToken.kind !== ts.SyntaxKind.MinusToken) return null;
+    const l = expr.left;
+    const r = expr.right;
+    if (!ts.isIdentifier(l) || !ts.isIdentifier(r)) return null;
+    if (l.text === p0.text && r.text === p1.text) return "asc";
+    if (l.text === p1.text && r.text === p0.text) return "desc";
+    return null;
+  }
+
   function buildArraySortFn(
     name: string,
     elem: IrType,
@@ -1766,6 +1799,7 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
     copyFirst: boolean,
     undefinedTag: number | null,
     loc: SrcLoc,
+    inlineCmp: "asc" | "desc" | null = null,
   ): IrFunction {
     const arrT = arrayOf(elem);
     const fnT = funcOf([elem, elem].slice(0, arity), F64);
@@ -1803,7 +1837,11 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
     const rightEl = (): IrExpr => get(A(), num("j.0"));
     const leftEl = (): IrExpr => get(A(), num("i.0"));
     const cmpRightFirst = (): IrExpr =>
-      bin("<", {
+      inlineCmp === "asc"
+        ? bin("<", rightEl(), leftEl(), BOOL)
+        : inlineCmp === "desc"
+        ? bin("<", leftEl(), rightEl(), BOOL)
+        : bin("<", {
         kind: "callValue",
         callee: ref("f.0", fnT),
         args: [rightEl(), leftEl()].slice(0, arity),
@@ -1884,12 +1922,12 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
       name,
       params: [
         { localId: "a.0", name: "a", type: arrT },
-        { localId: "f.0", name: "f", type: fnT },
+        ...(inlineCmp !== null ? [] : [{ localId: "f.0", name: "f", type: fnT }]),
       ],
       returnType: arrT,
       locals: [
         { id: "a.0", name: "a", type: arrT, mutable: true },
-        { id: "f.0", name: "f", type: fnT, mutable: true },
+        ...(inlineCmp !== null ? [] : [{ id: "f.0", name: "f", type: fnT, mutable: true }]),
         { id: "t.0", name: "t", type: arrT, mutable: true },
         { id: "n.0", name: "n", type: F64, mutable: false },
         { id: "w.0", name: "w", type: F64, mutable: true },

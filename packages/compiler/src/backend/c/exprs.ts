@@ -473,6 +473,25 @@ function dynPromiseAdapter(
 
 
 
+/** Array receivers borrow under the same proof as bytes receivers: a direct,
+ * unboxed binding whose owner outlives the access, with operands that cannot
+ * overwrite it. Kills retain/release traffic around every indexed access. */
+export function emitArrayReceiver(emitter: CEmitter, receiver: IrExpr, following: IrExpr[]): Temp {
+  if (
+    receiver.kind === "varRef" &&
+    following.every((operand) => isStableBytesOperand(operand, receiver.localId))
+  ) {
+    const local = emitter.currentLocals.get(receiver.localId);
+    if (local && !local.boxed) {
+      return emitter.newBorrowedTemp(receiver.type, mangleLocal(receiver.localId));
+    }
+    if (!local && emitter.globalsById.has(receiver.localId)) {
+      return emitter.newBorrowedTemp(receiver.type, mangleGlobal(receiver.localId));
+    }
+  }
+  return emitter.emitExpr(receiver);
+}
+
 /** Evaluate a bytes receiver as a borrow when it is a direct, unboxed
  * binding and all later operands are stable. The binding's scope/global
  * owner then keeps the value alive, avoiding retain/release traffic around
@@ -1541,7 +1560,7 @@ function emitContainerExpr(
         return arr;
       }
       case "arrayGet": {
-        const arr = emitter.emitExpr(e.arr);
+        const arr = emitArrayReceiver(emitter, e.arr, [e.index]);
         const idx = emitter.emitExpr(e.index);
         if (e.arr.type.kind !== "array") throw new InternalCompilerError("emitter bug: arrayGet on non-array");
         // Ref-element reads return +1 (the runtime retains); newTemp
@@ -1550,7 +1569,9 @@ function emitContainerExpr(
         return emitter.newTemp(e.type, `scr_arr_get_${acc}(${arr.name}, ${idx.name})`);
       }
       case "arrIntrinsic": {
-        const r = emitter.emitExpr(e.receiver);
+        const r = e.method === "length"
+          ? emitArrayReceiver(emitter, e.receiver, e.args)
+          : emitter.emitExpr(e.receiver);
         if (e.receiver.type.kind !== "array") throw new InternalCompilerError("emitter bug: arrIntrinsic on non-array");
         const acc = elemAccess(e.receiver.type.elem);
         const method = e.method;

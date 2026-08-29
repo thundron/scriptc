@@ -100,6 +100,12 @@ export function isStableBytesOperand(e: IrExpr, receiverLocalId: string): boolea
       return (e.method === "get" || e.method === "length" || e.method === "byteLength") &&
         e.receiver.kind === "varRef" &&
         e.args.every((arg) => isStableBytesOperand(arg, receiverLocalId));
+    case "arrayGet":
+      return e.arr.kind === "varRef" && isStableBytesOperand(e.index, receiverLocalId);
+    case "arrIntrinsic":
+      return e.method === "length" &&
+        e.receiver.kind === "varRef" &&
+        e.args.every((arg) => isStableBytesOperand(arg, receiverLocalId));
     default:
       return false;
   }

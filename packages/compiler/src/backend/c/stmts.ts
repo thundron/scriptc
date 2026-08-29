@@ -9,7 +9,7 @@ import { mangleField, mangleGlobal, mangleLocal, mangleRawParam } from "../mangl
 import { BOOL, CAUGHT, IrExpr, IrStmt, RUNTIME_ERROR_CLASSES, isRefCounted } from "../../ir/ir.js";
 import { boxAccess, cDecl, cStringLiteral, elemAccess, vAdapters } from "./types.js";
 import { OVERFLOW_MEMBER } from "./shapes.js";
-import { emitBytesReceiver } from "./exprs.js";
+import { emitArrayReceiver, emitBytesReceiver } from "./exprs.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { endsWithJump, matchStringSelfConcat } from "../../ir/analysis.js";
 
@@ -404,7 +404,7 @@ export function emitStmt(emitter: CEmitter, s: IrStmt): void {
         // Evaluation order matches JS: array, index, then value. Ownership
         // of a refcounted value moves into the array (the runtime releases
         // the replaced element itself).
-        const arr = emitter.emitExpr(s.arr);
+        const arr = emitArrayReceiver(emitter, s.arr, [s.index, s.value]);
         const idx = emitter.emitExpr(s.index);
         const v = emitter.emitExpr(s.value);
         if (s.arr.type.kind !== "array") throw new InternalCompilerError("emitter bug: arraySet on non-array");

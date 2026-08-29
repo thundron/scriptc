@@ -65,9 +65,16 @@ fallback for `SCR_TRAP_ADDR` in `scr_library.c`.
 - **`console.log` on wasm**: the emitter declares `scr_console_log(i64, ptr)`
   but the runtime is `(size_t=i32, ptr)`; a signature mismatch traps only the
   logging path. Fix = emit size_t-class runtime-ABI args as i32 under wasi.
-- **Host imports (PR2)**: un-gate the wasi FFI refusal (`index.ts:1523`) and
-  attach `wasm-import-module`/`wasm-import-name` to FFI declares so compiled TS
-  can call host JS (the DOM). Glue import wiring already exists.
+
+### DONE: host imports (PR2)
+Library callback channels lower to direct wasm imports on wasi
+(`"wasm-import-module"="host"` / `"wasm-import-name"=<channel>`) instead of
+`scr_library_cb_require` + indirect dispatch; the glue supplies them from the
+`host` object. Also fixed string/bytes callback marshalling to use
+`host.sizeType`/`abiOffset` (was hardcoded i64/24, wrong on wasm32).
+Verified: compiled TS calls host JS with bytes and strings and consumes return
+values (`cb_stream(2,3)=10`, `cb_ask_host(5)=23`). Native callbacks unchanged
+(library-callbacks harness 30/30). Locked in `backend/wasm-host-imports.test.ts`.
 
 ### DONE: `scriptc build --lib` on wasm32-wasi emits `.wasm` + `.mjs` directly
 `buildWasmReactor()` (native-toolchain) compiles the `.ll` + library runtime +

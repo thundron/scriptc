@@ -203,7 +203,7 @@ function llStrBytes(text: string): string {
 class LlEmitter {
   readonly sizeType: "i32" | "i64";
   readonly cycleColorOffset: number;
-  private readonly wasi: boolean;
+  readonly wasi: boolean;
   private readonly emitLibraryIdentity: boolean;
   private readonly runtimeAbiMarker: boolean;
   /** Interned string literals: UTF-8 text → { symbol, byte length } —

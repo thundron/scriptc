@@ -99,10 +99,10 @@ export function emitCallExpr(host: LlvmEmitterContext, e: ExprOf<"call" | "ffiCa
                 const len = B.tmp();
                 const data = B.tmp();
                 B.line(`${lenPtr} = getelementptr inbounds %ScrStr, ptr ${arg.name}, i64 0, i32 1`);
-                B.line(`${len} = load i64, ptr ${lenPtr}`);
-                B.line(`${data} = getelementptr inbounds i8, ptr ${arg.name}, i64 24`);
-                natTypes.push("ptr", "i64");
-                natArgs.push(`ptr ${data}`, `i64 ${len}`);
+                B.line(`${len} = load ${host.sizeType}, ptr ${lenPtr}`);
+                B.line(`${data} = getelementptr inbounds i8, ptr ${arg.name}, i64 ${host.abiOffset(24, 12)}`);
+                natTypes.push("ptr", host.sizeType);
+                natArgs.push(`ptr ${data}`, `${host.sizeType} ${len}`);
                 break;
               }
               case "bytes": {
@@ -110,26 +110,36 @@ export function emitCallExpr(host: LlvmEmitterContext, e: ExprOf<"call" | "ffiCa
                 const len = B.tmp();
                 const dataPtr = B.tmp();
                 const data = B.tmp();
-                B.line(`${lenPtr} = getelementptr inbounds i8, ptr ${arg.name}, i64 8`);
-                B.line(`${len} = load i64, ptr ${lenPtr}`);
-                B.line(`${dataPtr} = getelementptr inbounds i8, ptr ${arg.name}, i64 24`);
+                B.line(`${lenPtr} = getelementptr inbounds i8, ptr ${arg.name}, i64 ${host.abiOffset(8, 4)}`);
+                B.line(`${len} = load ${host.sizeType}, ptr ${lenPtr}`);
+                B.line(`${dataPtr} = getelementptr inbounds i8, ptr ${arg.name}, i64 ${host.abiOffset(24, 12)}`);
                 B.line(`${data} = load ptr, ptr ${dataPtr}`);
-                natTypes.push("ptr", "i64");
-                natArgs.push(`ptr ${data}`, `i64 ${len}`);
+                natTypes.push("ptr", host.sizeType);
+                natArgs.push(`ptr ${data}`, `${host.sizeType} ${len}`);
                 break;
               }
             }
           });
-          host.declare(`declare ptr @scr_library_cb_require(${host.sizeType}, ptr)`);
-          host.declare(`declare ptr @scr_library_cb_ctx(${host.sizeType})`);
           host.declare(`declare void @scr_library_callback_begin()`);
           host.declare(`declare void @scr_library_callback_end()`);
-          const fn = B.tmp();
-          B.line(`${fn} = call ptr @scr_library_cb_require(${host.sizeType} ${libCb.slot}, ptr @sc_lib_cb_trap_${libCb.slot})`);
-          const ctx = B.tmp();
-          B.line(`${ctx} = call ptr @scr_library_cb_ctx(${host.sizeType} ${libCb.slot})`);
           const retTy = ffiNativeTypeLl(libCb.returns);
-          const call = `call ${retTy} ${fn}(${[`ptr ${ctx}`, ...natArgs].join(", ")})`;
+          let call: string;
+          if (host.wasi) {
+            const sym = `sc_lib_cbimp_${libCb.slot}`;
+            host.declare(
+              `declare ${retTy} @${sym}(${natTypes.slice(1).join(", ")}) ` +
+                `"wasm-import-module"="host" "wasm-import-name"="${libCb.name}"`,
+            );
+            call = `call ${retTy} @${sym}(${natArgs.join(", ")})`;
+          } else {
+            host.declare(`declare ptr @scr_library_cb_require(${host.sizeType}, ptr)`);
+            host.declare(`declare ptr @scr_library_cb_ctx(${host.sizeType})`);
+            const fn = B.tmp();
+            B.line(`${fn} = call ptr @scr_library_cb_require(${host.sizeType} ${libCb.slot}, ptr @sc_lib_cb_trap_${libCb.slot})`);
+            const ctx = B.tmp();
+            B.line(`${ctx} = call ptr @scr_library_cb_ctx(${host.sizeType} ${libCb.slot})`);
+            call = `call ${retTy} ${fn}(${[`ptr ${ctx}`, ...natArgs].join(", ")})`;
+          }
           if (libCb.returns === "void") {
             B.line(`call void @scr_library_callback_begin()`);
             B.line(call);

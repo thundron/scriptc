@@ -2889,7 +2889,12 @@ async function compileLibraryTracked(
           c === "f64" ? "f64" : c === "void" ? "void" : c === "string" ? "string" : c === "bytes" ? "bytes" : "i32";
         const glue = emitWasmGlue({
           stem,
-          imports: [],
+          imports: (lib.callbacks ?? []).map((c) => ({
+            module: "host",
+            name: c.name,
+            params: c.params.map(wvc),
+            result: wvc(c.returns),
+          })),
           exports: lib.exports.map((e) => ({
             name: e.symbol,
             params: e.params.map(wvc),

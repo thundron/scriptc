@@ -65,9 +65,16 @@ fallback for `SCR_TRAP_ADDR` in `scr_library.c`.
 - **`console.log` on wasm**: the emitter declares `scr_console_log(i64, ptr)`
   but the runtime is `(size_t=i32, ptr)`; a signature mismatch traps only the
   logging path. Fix = emit size_t-class runtime-ABI args as i32 under wasi.
-- **Fold the reactor link into the compiler** (`compileLibraryNative` wasi
-  branch) so `scriptc build` emits `.wasm`+`.mjs` directly, instead of the
-  external link the e2e test performs.
+- **Host imports (PR2)**: un-gate the wasi FFI refusal (`index.ts:1523`) and
+  attach `wasm-import-module`/`wasm-import-name` to FFI declares so compiled TS
+  can call host JS (the DOM). Glue import wiring already exists.
+
+### DONE: `scriptc build --lib` on wasm32-wasi emits `.wasm` + `.mjs` directly
+`buildWasmReactor()` (native-toolchain) compiles the `.ll` + library runtime +
+`scr_wasm.c` and links the reactor; `index.ts` wires it and writes the
+`emitWasmGlue` loader (with a built-in WASI shim, so `console.log` works). The
+generated glue runs compiled TS: `kt_add(2,3)=5`, etc. Locked in
+`backend/wasm-reactor-build.test.ts` (zig-gated).
 
 - **PR2 host imports** — un-gate the wasi FFI refusal (`index.ts:1523`); attach
   `wasm-import-module`/`wasm-import-name` attributes to `mod.ffiImports`

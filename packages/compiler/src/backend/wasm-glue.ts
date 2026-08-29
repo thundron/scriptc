@@ -130,7 +130,7 @@ function bindHost(host, getExports) {
   let exports;
   const mem = () => new Uint8Array(exports.memory.buffer);
   const readStr = (ptr, len) => td.decode(mem().subarray(ptr, ptr + len));
-  const readBytes = (ptr, len) => mem().slice(ptr, ptr + len);
+  const readBytes = (ptr, len) => mem().subarray(ptr, ptr + len);
   const passStr = (s) => {
     const b = te.encode(s);
     const p = exports.scr_wasm_alloc(b.length);

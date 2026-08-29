@@ -163,18 +163,20 @@ export async function buildWasmReactor(opts: WasmReactorBuild): Promise<void> {
   const wasiLibs = ["-lwasi-emulated-getpid"];
   await mkdir(opts.buildDir, { recursive: true });
 
+  const sizeFlags = ["-Oz", "-ffunction-sections", "-fdata-sections"];
   const objs: string[] = [];
   const progObj = join(opts.buildDir, "prog.o");
-  await execFileAsync(cc, [...pre, ...driver.targetArgs, "-O2", "-c", opts.programLlPath, "-o", progObj]);
+  await execFileAsync(cc, [...pre, ...driver.targetArgs, ...sizeFlags, "-c", opts.programLlPath, "-o", progObj]);
   objs.push(progObj);
   for (const src of [...LIB_RUNTIME_SOURCES, ...WASM_REACTOR_RUNTIME_SOURCES]) {
     const obj = join(opts.buildDir, src.replace(/\.c$/, ".o"));
-    await execFileAsync(cc, [...pre, ...driver.targetArgs, ...wasiDefs, "-O2", "-DSCR_LIB", "-I", rtDir, "-c", join(rtDir, src), "-o", obj]);
+    await execFileAsync(cc, [...pre, ...driver.targetArgs, ...wasiDefs, ...sizeFlags, "-DSCR_LIB", "-I", rtDir, "-c", join(rtDir, src), "-o", obj]);
     objs.push(obj);
   }
   await execFileAsync(cc, [
-    ...pre, ...driver.targetArgs, "-O2",
+    ...pre, ...driver.targetArgs, "-Oz",
     ...wasmReactorLinkArgs(opts.exports),
+    "-Wl,--gc-sections", "-Wl,--strip-all",
     ...objs, ...driver.linkArgs, ...wasiLibs,
     "-o", opts.outWasmPath,
   ]);

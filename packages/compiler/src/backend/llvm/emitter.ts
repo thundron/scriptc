@@ -371,14 +371,15 @@ class LlEmitter {
   private logArgSlots = 0;
 
   constructor(private readonly mod: IrModule, options: LlvmTargetOptions) {
-    this.sizeType = options.pointerBits === 32 ? "i32" : "i64";
     this.wasi = options.wasi === true;
+    const bits32 = options.pointerBits === 32 || (options.pointerBits === undefined && this.wasi);
+    this.sizeType = bits32 ? "i32" : "i64";
     this.emitLibraryIdentity = options.emitLibraryIdentity !== false;
     this.runtimeAbiMarker = options.runtimeAbiMarker === true;
     // ScrCycHdr is { ptr trace; ptr free; i32 color; i16 buffered;
     // i16 gen; size_t buf_index }. The object follows it, so color is 12
     // bytes behind a wasm32 object and 16 bytes behind a 64-bit object.
-    this.cycleColorOffset = options.pointerBits === 32 ? 12 : 16;
+    this.cycleColorOffset = bits32 ? 12 : 16;
     this.ffiCallbackAdapters = allocateFfiCallbackAdapters(mod.ffiImports ?? []);
     this.ffiHasRetainedCallback = hasRetainedFfiCallback(mod.ffiImports ?? []);
     this.ffiHasForeignCallback = hasForeignFfiCallback(mod.ffiImports ?? []);

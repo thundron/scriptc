@@ -176,7 +176,7 @@ export async function buildWasmReactor(opts: WasmReactorBuild): Promise<void> {
   await execFileAsync(cc, [
     ...pre, ...driver.targetArgs, "-Oz",
     ...wasmReactorLinkArgs(opts.exports),
-    "-Wl,--gc-sections", "-Wl,--strip-all",
+    "-Wl,--gc-sections", "-Wl,--strip-all", "-Wl,-z,stack-size=1048576",
     ...objs, ...driver.linkArgs, ...wasiLibs,
     "-o", opts.outWasmPath,
   ]);

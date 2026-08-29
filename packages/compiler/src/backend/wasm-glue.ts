@@ -170,6 +170,7 @@ ${importGroups}
     exports._initialize && exports._initialize();
     ${initCall}
     return {
+      __memory: () => exports.memory.buffer,
 ${exportWrappers}
     };
   };

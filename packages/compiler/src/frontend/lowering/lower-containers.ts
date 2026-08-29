@@ -1770,134 +1770,116 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
     const arrT = arrayOf(elem);
     const fnT = funcOf([elem, elem].slice(0, arity), F64);
 
-    const j = varRef("j.0", F64, loc);
-    const at = (index: IrExpr): IrExpr => ({ kind: "arrayGet", arr: varRef("a.0", arrT, loc), index, type: elem, loc });
-    const jPlus1: IrExpr = { kind: "bin", op: "+", left: j, right: numLit(1, loc), type: F64, loc };
+    const ref = (id: string, t: IrType): IrExpr => varRef(id, t, loc);
+    const A = (): IrExpr => ref("a.0", arrT);
+    const T = (): IrExpr => ref("t.0", arrT);
+    const num = (id: string): IrExpr => ref(id, F64);
+    const bin = (op: string, left: IrExpr, right: IrExpr, type: IrType = F64): IrExpr =>
+      ({ kind: "bin", op, left, right, type, loc } as IrExpr);
+    const get = (arr: IrExpr, index: IrExpr): IrExpr =>
+      ({ kind: "arrayGet", arr, index, type: elem, loc } as IrExpr);
+    const put = (arr: IrExpr, index: IrExpr, value: IrExpr): IrStmt =>
+      ({ kind: "arraySet", arr, index, value, loc } as IrStmt);
+    const set = (localId: string, value: IrExpr): IrStmt =>
+      ({ kind: "assign", localId, value, loc } as IrStmt);
+    const bump = (id: string): IrStmt => set(id, bin("+", num(id), numLit(1, loc)));
+    const whileLt = (a: IrExpr, b: IrExpr, body: IrStmt[]): IrStmt =>
+      ({ kind: "while", cond: bin("<", a, b, BOOL), body, loc } as IrStmt);
+    const boolLit = (value: boolean): IrExpr => ({ kind: "boolLit", value, type: BOOL, loc } as IrExpr);
     const isUndefined = (value: IrExpr): IrExpr | null => {
       if (elem.kind === "union" && undefinedTag !== null) {
-        return {
-          kind: "unionIsTag",
-          unionId: elem.unionId,
-          tag: undefinedTag,
-          negated: false,
-          value,
-          type: BOOL,
-          loc,
-        };
+        return { kind: "unionIsTag", unionId: elem.unionId, tag: undefinedTag, negated: false, value, type: BOOL, loc };
       }
       if (elem.kind === "jsval") {
         return {
-          kind: "jsOp",
-          op: "eq",
-          args: [
-            value,
-            { kind: "jsOp", op: "undefLit", args: [], type: JSVAL, loc },
-          ],
-          type: BOOL,
-          loc,
+          kind: "jsOp", op: "eq",
+          args: [value, { kind: "jsOp", op: "undefLit", args: [], type: JSVAL, loc }],
+          type: BOOL, loc,
         };
       }
       return null;
     };
-    const compareGreater: IrExpr = {
-      kind: "bin",
-      op: ">",
-      left: {
+
+    const rightEl = (): IrExpr => get(A(), num("j.0"));
+    const leftEl = (): IrExpr => get(A(), num("i.0"));
+    const cmpRightFirst = (): IrExpr =>
+      bin("<", {
         kind: "callValue",
-        callee: varRef("f.0", fnT, loc),
-        args: [at(j), varRef("v.0", elem, loc)].slice(0, arity),
+        callee: ref("f.0", fnT),
+        args: [rightEl(), leftEl()].slice(0, arity),
         type: F64,
         loc,
-      },
-      right: numLit(0, loc),
-      type: BOOL,
-      loc,
-    };
-    const leftUndefined = isUndefined(at(j));
-    const valueUndefined = isUndefined(varRef("v.0", elem, loc));
-    // CompareArrayElements: undefined always sinks and never reaches the
-    // user comparator. Ternaries preserve that callback suppression.
-    const shouldShift: IrExpr =
-      leftUndefined !== null && valueUndefined !== null
+      } as IrExpr, numLit(0, loc), BOOL);
+
+    const rightUndefined = isUndefined(rightEl());
+    const leftUndefined = isUndefined(leftEl());
+    const takeRight: IrExpr =
+      rightUndefined !== null && leftUndefined !== null
         ? {
             kind: "ternary",
-            cond: leftUndefined,
-            then: {
-              kind: "unary",
-              op: "!",
-              operand: valueUndefined,
-              type: BOOL,
-              loc,
-            },
-            else_: {
-              kind: "ternary",
-              cond: valueUndefined,
-              then: { kind: "boolLit", value: false, type: BOOL, loc },
-              else_: compareGreater,
-              type: BOOL,
-              loc,
-            },
+            cond: rightUndefined,
+            then: boolLit(false),
+            else_: { kind: "ternary", cond: leftUndefined, then: boolLit(true), else_: cmpRightFirst(), type: BOOL, loc },
             type: BOOL,
             loc,
           }
-        : compareGreater;
-    const shiftLoop: IrStmt = {
-      kind: "while",
-      cond: { kind: "bin", op: ">=", left: j, right: numLit(0, loc), type: BOOL, loc },
-      body: [
+        : cmpRightFirst();
+
+    const minOf = (a: IrExpr): IrExpr =>
+      ({ kind: "ternary", cond: bin("<", a, num("n.0"), BOOL), then: a, else_: num("n.0"), type: F64, loc } as IrExpr);
+    const twoW = (): IrExpr => bin("*", num("w.0"), numLit(2, loc));
+
+    const mergeRun: IrStmt[] = [
+      set("mid.0", minOf(bin("+", num("lo.0"), num("w.0")))),
+      set("hi.0", minOf(bin("+", num("lo.0"), twoW()))),
+      set("i.0", num("lo.0")),
+      set("j.0", num("mid.0")),
+      set("k.0", num("lo.0")),
+      whileLt(num("i.0"), num("mid.0"), [
+        { kind: "if", cond: bin(">=", num("j.0"), num("hi.0"), BOOL), then: [{ kind: "break", loc }], else_: [], loc } as IrStmt,
         {
           kind: "if",
-          cond: shouldShift,
-          then: [
-            { kind: "arraySet", arr: varRef("a.0", arrT, loc), index: jPlus1, value: at(j), loc },
-            { kind: "assign", localId: "j.0", value: { kind: "bin", op: "-", left: j, right: numLit(1, loc), type: F64, loc }, loc },
-          ],
-          else_: [{ kind: "break", loc }],
+          cond: takeRight,
+          then: [put(T(), num("k.0"), rightEl()), bump("j.0")],
+          else_: [put(T(), num("k.0"), leftEl()), bump("i.0")],
           loc,
-        },
-      ],
-      loc,
-    };
+        } as IrStmt,
+        bump("k.0"),
+      ]),
+      whileLt(num("i.0"), num("mid.0"), [put(T(), num("k.0"), leftEl()), bump("i.0"), bump("k.0")]),
+      whileLt(num("j.0"), num("hi.0"), [put(T(), num("k.0"), rightEl()), bump("j.0"), bump("k.0")]),
+      set("lo.0", bin("+", num("lo.0"), twoW())),
+    ];
+
     const body: IrStmt[] = [
       ...(copyFirst
         ? [{
             kind: "assign" as const,
             localId: "a.0",
-            value: {
-              kind: "arrIntrinsic" as const,
-              method: "slice" as const,
-              receiver: varRef("a.0", arrT, loc),
-              args: [],
-              type: arrT,
-              loc,
-            },
+            value: { kind: "arrIntrinsic" as const, method: "slice" as const, receiver: A(), args: [], type: arrT, loc },
             loc,
           }]
         : []),
       readLenStmt(arrT, loc),
-      countedFor(
-        loc,
-        { kind: "bin", op: "-", left: varRef("n.0", F64, loc), right: numLit(1, loc), type: F64, loc },
-        (index) => [
-          {
-            kind: "varDecl",
-            localId: "v.0",
-            init: {
-              kind: "arrayGet",
-              arr: varRef("a.0", arrT, loc),
-              index: { kind: "bin", op: "+", left: index, right: numLit(1, loc), type: F64, loc },
-              type: elem,
-              loc,
-            },
-            loc,
-          },
-          { kind: "varDecl", localId: "j.0", init: index, loc },
-          shiftLoop,
-          { kind: "arraySet", arr: varRef("a.0", arrT, loc), index: jPlus1, value: varRef("v.0", elem, loc), loc },
-        ],
-      ),
-      { kind: "return", value: varRef("a.0", arrT, loc), loc },
+      { kind: "varDecl", localId: "t.0", init: { kind: "arrIntrinsic", method: "slice", receiver: A(), args: [], type: arrT, loc }, loc } as IrStmt,
+      { kind: "varDecl", localId: "w.0", init: numLit(1, loc), loc } as IrStmt,
+      { kind: "varDecl", localId: "lo.0", init: numLit(0, loc), loc } as IrStmt,
+      { kind: "varDecl", localId: "mid.0", init: numLit(0, loc), loc } as IrStmt,
+      { kind: "varDecl", localId: "hi.0", init: numLit(0, loc), loc } as IrStmt,
+      { kind: "varDecl", localId: "i.0", init: numLit(0, loc), loc } as IrStmt,
+      { kind: "varDecl", localId: "j.0", init: numLit(0, loc), loc } as IrStmt,
+      { kind: "varDecl", localId: "k.0", init: numLit(0, loc), loc } as IrStmt,
+      { kind: "varDecl", localId: "x.0", init: numLit(0, loc), loc } as IrStmt,
+      whileLt(num("w.0"), num("n.0"), [
+        set("lo.0", numLit(0, loc)),
+        whileLt(num("lo.0"), num("n.0"), mergeRun),
+        set("x.0", numLit(0, loc)),
+        whileLt(num("x.0"), num("n.0"), [put(A(), num("x.0"), get(T(), num("x.0"))), bump("x.0")]),
+        set("w.0", twoW()),
+      ]),
+      { kind: "return", value: A(), loc },
     ];
+
     return {
       name,
       params: [
@@ -1908,10 +1890,16 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
       locals: [
         { id: "a.0", name: "a", type: arrT, mutable: true },
         { id: "f.0", name: "f", type: fnT, mutable: true },
+        { id: "t.0", name: "t", type: arrT, mutable: true },
         { id: "n.0", name: "n", type: F64, mutable: false },
+        { id: "w.0", name: "w", type: F64, mutable: true },
+        { id: "lo.0", name: "lo", type: F64, mutable: true },
+        { id: "mid.0", name: "mid", type: F64, mutable: true },
+        { id: "hi.0", name: "hi", type: F64, mutable: true },
         { id: "i.0", name: "i", type: F64, mutable: true },
-        { id: "v.0", name: "v", type: elem, mutable: false },
         { id: "j.0", name: "j", type: F64, mutable: true },
+        { id: "k.0", name: "k", type: F64, mutable: true },
+        { id: "x.0", name: "x", type: F64, mutable: true },
       ],
       body,
       loc,

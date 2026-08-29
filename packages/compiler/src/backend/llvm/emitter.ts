@@ -2292,6 +2292,8 @@ export class LlEmitter {
     int32Analysis: Int32SlotAnalysis | null = null,
     previousIndex?: IrNodeIndex,
   ) {
+    if (options.wasi === true && options.pointerBits === undefined)
+      options = { ...options, pointerBits: 32 };
     this.targetOptions = options;
     this.journal = journal;
     this.journaled =

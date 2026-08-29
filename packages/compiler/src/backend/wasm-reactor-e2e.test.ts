@@ -17,7 +17,7 @@ const LIB_SOURCES = [
   "scr_closure", "scr_object", "scr_union", "scr_exception", "scr_error", "scr_console",
   "scr_lib", "scr_path", "scr_url", "scr_json", "scr_cycle", "scr_library", "scr_wasm",
 ];
-const APP_EXPORTS = ["kt_add", "kt_passthrough", "kt_neg_zero", "kt_is_nan", "kt_invert", "kt_plumb"];
+const APP_EXPORTS = ["kt_add", "kt_passthrough", "kt_neg_zero", "kt_is_nan", "kt_invert", "kt_plumb", "kt_init"];
 const WASI_DEFS = ["-D_GNU_SOURCE", "-D_WASI_EMULATED_SIGNAL", "-D_WASI_EMULATED_PROCESS_CLOCKS", "-D_WASI_EMULATED_GETPID"];
 const WASI_LIBS = ["-lwasi-emulated-signal", "-lwasi-emulated-process-clocks", "-lwasi-emulated-getpid"];
 
@@ -52,9 +52,27 @@ describe.runIf(hasZig())("TS -> wasm reactor (end-to-end)", () => {
 
       const WA = (globalThis as unknown as { WebAssembly: any }).WebAssembly;
       const mod = new WA.Module(readFileSync(join(dir, "reactor.wasm")));
-      const inst = new WA.Instance(mod, { wasi_snapshot_preview1: new Proxy({}, { get: () => () => 0 }) });
+      let inst: any;
+      const logged: string[] = [];
+      const wasi = new Proxy({
+        fd_write: (_fd: number, iov: number, cnt: number, nwritten: number) => {
+          const dv = new DataView(inst.exports.memory.buffer);
+          let total = 0;
+          for (let i = 0; i < cnt; i++) {
+            const p = dv.getUint32(iov + i * 8, true);
+            const l = dv.getUint32(iov + i * 8 + 4, true);
+            logged.push(Buffer.from(inst.exports.memory.buffer, p, l).toString());
+            total += l;
+          }
+          dv.setUint32(nwritten, total, true);
+          return 0;
+        },
+      }, { get: (t: any, k: string) => (k in t ? t[k] : () => 0) });
+      inst = new WA.Instance(mod, { wasi_snapshot_preview1: wasi });
       const ex = inst.exports;
       ex._initialize();
+      ex.kt_init();
+      expect(logged.join("").trim()).toBe("scalars ready");
 
       expect(ex.kt_add(2, 3)).toBe(5);
       expect(ex.kt_passthrough(7)).toBe(7);

@@ -2,7 +2,7 @@ import { InternalCompilerError } from "./errors.js";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { clearCcCaches, configuredTargetPlatform, type NativeArtifactDependency } from "./backend/native-toolchain.js";
+import { buildWasmReactor, clearCcCaches, configuredTargetPlatform, type NativeArtifactDependency } from "./backend/native-toolchain.js";
 import { buildCacheRoot, prepareBuildCacheRoot, pruneBuildCache } from "./backend/build-cache.js";
 import {
   assertLegacyCExecutablePipelineEnabled,
@@ -18,6 +18,7 @@ import {
 } from "./backend/external-c.js";
 import { emitCModule } from "./backend/c/c-emitter.js";
 import { emitLlvmModule, LlvmUnsupportedError } from "./backend/llvm/emitter.js";
+import { emitWasmGlue, type WasmValueClass } from "./backend/wasm-glue.js";
 import { emitNativeArtifact, NativeCodegenError } from "./backend/native-codegen.js";
 import { privateSiblingPath } from "./backend/build-cache.js";
 import { nativeCodegenTarget, nativeCodegenTargetRefusal } from "./backend/targets.js";
@@ -2870,8 +2871,36 @@ async function compileLibraryTracked(
       await writeFile(cPath, ll);
       timing("llvm-write");
       if (buildPlatform === "wasi") {
+        const lib = mod.lib!;
+        const exportSyms = [
+          ...lib.exports.map((e) => e.symbol),
+          lib.initSymbol,
+          lib.sinkRegisterSymbol,
+          ...(lib.collectSymbol !== null ? [lib.collectSymbol] : []),
+        ];
+        const wasmPath = join(opts.outDir, `${stem}.wasm`);
+        await buildWasmReactor({
+          programLlPath: cPath,
+          outWasmPath: wasmPath,
+          buildDir: join(opts.outDir, `.${stem}.reactor`),
+          exports: exportSyms,
+        });
+        const wvc = (c: string): WasmValueClass =>
+          c === "f64" ? "f64" : c === "void" ? "void" : c === "string" ? "string" : c === "bytes" ? "bytes" : "i32";
+        const glue = emitWasmGlue({
+          stem,
+          imports: [],
+          exports: lib.exports.map((e) => ({
+            name: e.symbol,
+            params: e.params.map(wvc),
+            result: wvc(e.returns),
+          })),
+        });
+        const gluePath = join(opts.outDir, `${stem}.mjs`);
+        await writeFile(gluePath, glue);
+        timing("wasm-reactor-link");
         timing("complete");
-        return { ok: true, archivePath: cPath, cPath, backend: "llvm" };
+        return { ok: true, archivePath: wasmPath, cPath, backend: "llvm" };
       }
     } catch (err) {
       if (!(err instanceof LlvmUnsupportedError)) throw err;

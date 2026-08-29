@@ -144,6 +144,42 @@ export function wasmReactorLinkArgs(appExports: readonly string[]): string[] {
   ];
 }
 
+export interface WasmReactorBuild {
+  programLlPath: string;
+  outWasmPath: string;
+  buildDir: string;
+  exports: readonly string[];
+}
+
+export async function buildWasmReactor(opts: WasmReactorBuild): Promise<void> {
+  const driver = resolveCc();
+  if (driver.target === null || !driver.target.includes("wasi")) {
+    throw new Error("buildWasmReactor requires a wasm32-wasi target (SCRIPTC_CC=zigcc SCRIPTC_TARGET=wasm32-wasi)");
+  }
+  const cc = driver.argv[0] ?? "zig";
+  const pre = driver.argv.slice(1);
+  const rtDir = runtimeSrcDir();
+  const wasiDefs = ["-D_WASI_EMULATED_GETPID"];
+  const wasiLibs = ["-lwasi-emulated-getpid"];
+  await mkdir(opts.buildDir, { recursive: true });
+
+  const objs: string[] = [];
+  const progObj = join(opts.buildDir, "prog.o");
+  await execFileAsync(cc, [...pre, ...driver.targetArgs, "-O2", "-c", opts.programLlPath, "-o", progObj]);
+  objs.push(progObj);
+  for (const src of [...LIB_RUNTIME_SOURCES, ...WASM_REACTOR_RUNTIME_SOURCES]) {
+    const obj = join(opts.buildDir, src.replace(/\.c$/, ".o"));
+    await execFileAsync(cc, [...pre, ...driver.targetArgs, ...wasiDefs, "-O2", "-DSCR_LIB", "-I", rtDir, "-c", join(rtDir, src), "-o", obj]);
+    objs.push(obj);
+  }
+  await execFileAsync(cc, [
+    ...pre, ...driver.targetArgs, "-O2",
+    ...wasmReactorLinkArgs(opts.exports),
+    ...objs, ...driver.linkArgs, ...wasiLibs,
+    "-o", opts.outWasmPath,
+  ]);
+}
+
 /** Environment variables consumed by clang, its linker/subtools, or the
  * platform SDK selection. They are implicit command-line inputs: changing one
  * must never reuse an artifact produced under the old toolchain posture. */

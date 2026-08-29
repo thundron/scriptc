@@ -141,7 +141,25 @@ function bindHost(host, getExports) {
   };
   const freeStaged = (p, l) => { exports.scr_wasm_free && exports.scr_wasm_free(p, l); };
 
+  const wasiShim = new Proxy({
+    fd_write: (fd, iov, cnt, nwritten) => {
+      const dv = new DataView(exports.memory.buffer);
+      let s = "", total = 0;
+      for (let i = 0; i < cnt; i++) {
+        const p = dv.getUint32(iov + i * 8, true), l = dv.getUint32(iov + i * 8 + 4, true);
+        s += readStr(p, l); total += l;
+      }
+      dv.setUint32(nwritten, total, true);
+      if (s.charCodeAt(s.length - 1) === 10) s = s.slice(0, -1);
+      (fd === 2 ? console.error : console.log)(s);
+      return 0;
+    },
+    random_get: (p, l) => { const b = mem().subarray(p, p + l); for (let i = 0; i < l; i++) b[i] = (Math.random() * 256) | 0; return 0; },
+    proc_exit: (c) => { throw new Error("wasm proc_exit(" + c + ")"); },
+  }, { get: (t, k) => (k in t ? t[k] : () => 0) });
+
   const importObject = {
+    wasi_snapshot_preview1: wasiShim,
 ${importGroups}
   };
   const finish = (instance) => {

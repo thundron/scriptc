@@ -1699,6 +1699,19 @@ function emitContainerExpr(
             const cnt = e.args[1] ? emitter.emitExpr(e.args[1]).name : "INFINITY";
             return emitter.newTemp(e.type, `scr_arr_splice(${r.name}, ${start.name}, ${cnt})`);
           }
+          case "fill": {
+            // Mutates in place and returns the receiver at +1. The value
+            // (args[0]) coerces to the element type; the ref variant
+            // BORROWS it (retains once per filled slot), so no moveTemp.
+            // Omitted start/end get the JS defaults 0 / +Infinity.
+            const value = emitter.emitExpr(e.args[0]!);
+            const start = e.args[1] ? emitter.emitExpr(e.args[1]).name : "0";
+            const end = e.args[2] ? emitter.emitExpr(e.args[2]).name : "INFINITY";
+            return emitter.newTemp(
+              e.type,
+              `scr_arr_fill_${acc}(${r.name}, ${value.name}, ${start}, ${end})`,
+            );
+          }
           case "shift": {
             // JS shift: undefined on an empty array, else the first
             // element out (ref ownership moves into the union box) with

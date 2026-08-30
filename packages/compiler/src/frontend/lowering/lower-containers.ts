@@ -322,13 +322,13 @@ function fenceProducedArrayElem(lowerer: Lowerer, node: ts.Node, producer: strin
     const arity = {
       push: [0, Number.MAX_SAFE_INTEGER], unshift: [0, Number.MAX_SAFE_INTEGER], pop: [0, 0], indexOf: [1, 1], includes: [1, 1], join: [1, 1],
       concat: [0, Number.MAX_SAFE_INTEGER],
-      slice: [0, 2], shift: [0, 0], splice: [1, 2], at: [1, 1],
+      slice: [0, 2], shift: [0, 0], splice: [1, 2], at: [1, 1], fill: [1, 3], flat: [0, 1],
       map: [1, 1], filter: [1, 1], forEach: [1, 1], find: [1, 1], findIndex: [1, 1], some: [1, 1],
       findLast: [1, 1], findLastIndex: [1, 1],
       every: [1, 1], flatMap: [1, 1], reduce: [1, 2], reduceRight: [1, 2],
     }[
       name as
-        | "push" | "unshift" | "pop" | "concat" | "indexOf" | "includes" | "join" | "slice" | "shift" | "splice" | "at" | "map" | "filter"
+        | "push" | "unshift" | "pop" | "concat" | "indexOf" | "includes" | "join" | "slice" | "shift" | "splice" | "at" | "fill" | "flat" | "map" | "filter"
         | "forEach" | "find" | "findIndex" | "findLast" | "findLastIndex" | "some" | "every" | "flatMap" | "reduce" | "reduceRight"
     ];
     if (call.arguments.length < arity[0]! || call.arguments.length > arity[1]!) {
@@ -496,6 +496,27 @@ function fenceProducedArrayElem(lowerer: Lowerer, node: ts.Node, producer: strin
         if (args[i]!.type.kind !== "f64") lowerer.badType(call.arguments[i]!, lowerer.typeOf(call.arguments[i]!));
       }
       return { kind: "arrIntrinsic", method: "slice", receiver, args, type: receiverIr, loc };
+    }
+    if (name === "fill") {
+      // `a.fill(value, start?, end?)` — mutate in place and return the
+      // receiver, JS-exact index handling (ToIntegerOrInfinity, negatives
+      // from the end, clamp to [0, len]; omitted start/end are omitted from
+      // the IR — the backend fills 0 / +Infinity). The value coerces to the
+      // element type; the ref variant retains the same reference per slot.
+      if (call.arguments.some(ts.isSpreadElement)) {
+        lowerer.unsupported("SC1090", call, "spread arguments to Array.fill");
+      }
+      const receiver = lowerer.lowerExpr(access.expression);
+      const value = lowerer.coerceInto(
+        call.arguments[0]!,
+        lowerer.lowerExpr(call.arguments[0]!),
+        elem,
+      );
+      const idxArgs = call.arguments.slice(1).map((a) => lowerer.lowerExprExpecting(a, F64));
+      return { kind: "arrIntrinsic", method: "fill", receiver, args: [value, ...idxArgs], type: receiverIr, loc };
+    }
+    if (name === "flat") {
+      return lowerArrayFlatCall(lowerer, call, access, elem, receiverIr);
     }
     if (name === "splice") {
       // The REMOVAL forms: splice(start) and splice(start, deleteCount) —
@@ -1463,6 +1484,164 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
         { id: "m.0", name: "m", type: F64, mutable: false },
         { id: "j.0", name: "j", type: F64, mutable: true },
       ],
+      body,
+      loc,
+    });
+    return name;
+  }
+
+/** The static flatten depth of a `.flat(d)` argument: a numeric literal (or
+   * a negated one) truncated toward zero per ToIntegerOrInfinity, or +∞ for
+   * the `Infinity` / `Number.POSITIVE_INFINITY` spellings. Null when the
+   * depth is not a compile-time constant — the flattened element type would
+   * then be unknowable, so the call is fenced. */
+  function staticFlatDepth(arg: ts.Expression): number | null {
+    if (ts.isNumericLiteral(arg)) return Math.trunc(Number(arg.text));
+    if (ts.isPrefixUnaryExpression(arg) && arg.operator === ts.SyntaxKind.MinusToken && ts.isNumericLiteral(arg.operand)) {
+      return Math.trunc(-Number(arg.operand.text));
+    }
+    if (ts.isIdentifier(arg) && arg.text === "Infinity") return Number.POSITIVE_INFINITY;
+    if (
+      ts.isPropertyAccessExpression(arg) &&
+      ts.isIdentifier(arg.expression) && arg.expression.text === "Number" &&
+      arg.name.text === "POSITIVE_INFINITY"
+    ) return Number.POSITIVE_INFINITY;
+    return null;
+  }
+
+/** `a.flat(depth?)` — flatten nested arrays one level (default) or `depth`
+   * levels. scriptc arrays are uniformly typed, so the flattened element
+   * type is fixed by peeling `depth` array levels off the element type; the
+   * depth must therefore be a compile-time constant. A depth that flattens
+   * nothing (≤0, or a non-nested receiver) is Node's shallow copy. */
+  function lowerArrayFlatCall(lowerer: Lowerer, call: ts.CallExpression,
+    access: ts.PropertyAccessExpression,
+    elem: IrType,
+    receiverIr: IrType,): IrExpr {
+    const loc = locOf(call);
+    let dReq = 1;
+    const arg = call.arguments[0];
+    if (arg !== undefined) {
+      if (ts.isSpreadElement(arg)) lowerer.unsupported("SC1090", call, "spread arguments to Array.flat");
+      const d = staticFlatDepth(arg);
+      if (d === null) {
+        lowerer.noLowering(
+          ".flat(depth) with a non-constant depth",
+          call,
+          "pass a numeric literal (or Infinity) so the flattened element type is fixed at compile time",
+        );
+      }
+      dReq = d!;
+    }
+    // Peel array levels off the element type to the effective depth.
+    let cur = elem;
+    let dEff = 0;
+    while (dEff < dReq && cur.kind === "array") {
+      cur = cur.elem;
+      dEff++;
+    }
+    const receiver = lowerer.lowerExpr(access.expression);
+    if (dEff === 0) {
+      // Nothing to flatten (depth ≤0 or a non-nested receiver): Node returns
+      // a fresh shallow copy — exactly slice() over the whole range.
+      return { kind: "arrIntrinsic", method: "slice", receiver, args: [], type: receiverIr, loc };
+    }
+    const resultElem = cur;
+    const helper = flatHelper(lowerer, elem, dEff, resultElem, loc);
+    return { kind: "call", callee: helper, args: [receiver], type: arrayOf(resultElem), loc };
+  }
+
+/** The flat loop nest, from existing IR nodes. `dEff` flatten levels expand
+   * to `dEff + 1` counted loops around a single `out.push(leaf)`, one per
+   * peeled array level:
+   *
+   *   out = []; n0 = a.length;
+   *   for (i0=0; i0<n0; i0++) { x0 = a[i0]; n1 = x0.length;
+   *     for (i1=0; ...) { ... out.push(leaf); } }
+   *   return out;
+   */
+  function flatHelper(lowerer: Lowerer, elem: IrType,
+    dEff: number,
+    resultElem: IrType,
+    loc: SrcLoc,): string {
+    const key = `flat:${typeKey(elem)}:${dEff}:${typeKey(resultElem)}`;
+    const existing = lowerer.arrHofHelpers.get(key);
+    if (existing) return existing;
+    const name = `%arr.flat.${lowerer.arrHofHelpers.size}`;
+    lowerer.arrHofHelpers.set(key, name);
+    const arrT = arrayOf(elem);
+    const outT = arrayOf(resultElem);
+    const locals: IrLocal[] = [
+      { id: "a.0", name: "a", type: arrT, mutable: true },
+      { id: "out.0", name: "out", type: outT, mutable: false },
+    ];
+
+    // buildLevel(container, childType, remaining, lvl): a counted loop over
+    // `container` (whose elements have type `childType`). With `remaining`
+    // flatten levels still to go the child is the next container (recurse);
+    // at remaining===0 the child is a leaf (type resultElem) pushed to out.
+    // dEff flatten levels expand to dEff+1 nested loops.
+    const buildLevel = (container: IrExpr, childType: IrType, remaining: number, lvl: number): IrStmt[] => {
+      const nId = `fn.${lvl}`;
+      const iId = `fi.${lvl}`;
+      const xId = `fx.${lvl}`;
+      locals.push({ id: nId, name: nId, type: F64, mutable: false });
+      locals.push({ id: iId, name: iId, type: F64, mutable: true });
+      locals.push({ id: xId, name: xId, type: childType, mutable: false });
+      const nRef = varRef(nId, F64, loc);
+      const iRef = varRef(iId, F64, loc);
+      const lenDecl: IrStmt = {
+        kind: "varDecl",
+        localId: nId,
+        init: { kind: "arrIntrinsic", method: "length", receiver: container, args: [], type: F64, loc },
+        loc,
+      };
+      const childDecl: IrStmt = {
+        kind: "varDecl",
+        localId: xId,
+        init: { kind: "arrayGet", arr: container, index: iRef, type: childType, loc },
+        loc,
+      };
+      const innerStmts: IrStmt[] = remaining === 0
+        ? [{
+            kind: "exprStmt",
+            expr: {
+              kind: "arrIntrinsic",
+              method: "push",
+              receiver: varRef("out.0", outT, loc),
+              args: [varRef(xId, childType, loc)],
+              type: F64,
+              loc,
+            },
+            loc,
+          }]
+        : buildLevel(
+            varRef(xId, childType, loc),
+            (childType as IrType & { kind: "array" }).elem,
+            remaining - 1,
+            lvl + 1,
+          );
+      const loop: IrStmt = {
+        kind: "for",
+        init: { kind: "varDecl", localId: iId, init: numLit(0, loc), loc },
+        cond: { kind: "bin", op: "<", left: iRef, right: nRef, type: BOOL, loc },
+        update: { kind: "assign", localId: iId, value: { kind: "bin", op: "+", left: iRef, right: numLit(1, loc), type: F64, loc }, loc },
+        body: [childDecl, ...innerStmts],
+        loc,
+      };
+      return [lenDecl, loop];
+    };
+
+    const body: IrStmt[] = [
+      { kind: "varDecl", localId: "out.0", init: { kind: "arrayLit", elems: [], type: outT, loc }, loc },
+      ...buildLevel(varRef("a.0", arrT, loc), elem, dEff, 0),
+      { kind: "return", value: varRef("out.0", outT, loc), loc },
+    ];
+    lowerer.liftedFns.push({
+      name,
+      params: [{ localId: "a.0", name: "a", type: arrT }],
+      returnType: outT,
+      locals,
       body,
       loc,
     });

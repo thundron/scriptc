@@ -991,6 +991,14 @@ double scr_arr_unshift_ref(ScrArr *a, void *v);
 double scr_arr_unshift_spread(ScrArr *a, const ScrArr *src);
 ScrArr *scr_arr_reverse(ScrArr *a);
 
+/* fill(value, start?, end?): mutate the receiver in place (the emitter fills
+ * the omitted defaults 0 / +Infinity) and return it at +1. The ref variant
+ * retains the same borrowed value into every filled slot and releases the
+ * overwritten elements. */
+ScrArr *scr_arr_fill_f64(ScrArr *a, double value, double start, double end);
+ScrArr *scr_arr_fill_bool(ScrArr *a, bool value, double start, double end);
+ScrArr *scr_arr_fill_ref(ScrArr *a, void *value, double start, double end);
+
 /* pop traps on an empty array; _ref transfers ownership out (+1 to the
  * caller, no release). */
 double scr_arr_pop_f64(ScrArr *a);

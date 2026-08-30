@@ -322,6 +322,8 @@ export const ARRAY_METHODS = new Set([
   "toSpliced",
   "toSorted",
   "with",
+  "fill",
+  "flat",
 ]);
 
 /** The lowered Map<K, V> method surface. Like ARRAY_METHODS, membership is
@@ -1485,10 +1487,6 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
         "const initialized with one (the group-name table is built at compile time) — and the " +
         "read is not an optional-chain step: narrow the match instead (if (m) { m.groups } or " +
         "m!.groups)";
-    } else if (recvIr?.kind === "array" && member === "flat") {
-      hint =
-        "flat has no lowering (flatMap does) — flatten into an accumulator instead: " +
-        "for (const x of xs) for (const y of x) out.push(y)";
     } else if (
       recvIr?.kind === "object" &&
       RUNTIME_ERROR_CLASSES.has(recvIr.className) &&

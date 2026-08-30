@@ -365,6 +365,21 @@ export function emitArrIntrinsic(host: LlvmEmitterContext, e: IrExpr & { kind: "
         B.line(`${t} = call ptr @scr_arr_splice(ptr ${r.name}, double ${start.name}, double ${cnt})`);
         return host.own({ name: t, type: e.type });
       }
+      case "fill": {
+        // Mutates in place and returns the receiver at +1. The value
+        // (args[0]) is BORROWED (retained once per filled slot). Omitted
+        // start/end get the JS defaults 0 / +Infinity.
+        const value = host.emitExpr(e.args[0]!);
+        const start = e.args[1] ? host.emitExpr(e.args[1]).name : f64Lit(0);
+        const end = e.args[2] ? host.emitExpr(e.args[2]).name : F64_INF;
+        host.declare(`declare ptr @scr_arr_fill_${acc}(ptr, ${accArg}, double, double)`);
+        const t = B.tmp();
+        B.line(
+          `${t} = call ptr @scr_arr_fill_${acc}(ptr ${r.name}, ${accTy} ${value.name}, ` +
+            `double ${start}, double ${end})`,
+        );
+        return host.own({ name: t, type: e.type });
+      }
       case "shift": {
         // JS shift: undefined on an empty array, else the first element
         // out (ref ownership moves into the union box) with the tail

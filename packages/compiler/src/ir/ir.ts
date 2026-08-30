@@ -1526,6 +1526,7 @@ export type IrArrIntrinsicMethod =
   | "slice"
   | "shift"
   | "splice"
+  | "fill"
   | "reverse"
   /** ES2023 copying methods. `toSpliced` receives [start, deleteCount,
    * itemsArray], with omitted arguments completed by the frontend;

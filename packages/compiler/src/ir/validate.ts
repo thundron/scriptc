@@ -2560,6 +2560,8 @@ function validateFunction(
                         ? { argTypes: [F64, elem], result: e.receiver.type }
                   : e.method === "splice"
                     ? { argTypes: [F64, F64], result: e.receiver.type }
+                      : e.method === "fill"
+                        ? { argTypes: [elem, F64, F64], result: e.receiver.type }
                         : e.method === "shift"
                           ? { argTypes: [], result: e.type } // union-checked below
                           : { argTypes: [], result: F64 }; // length
@@ -2601,7 +2603,7 @@ function validateFunction(
         // slice's indices and splice's count are optional (omitted args
         // omitted from the IR — backends fill the defaults); everything
         // else is exact.
-        const minArgs = e.method === "slice" ? 0 : e.method === "splice" ? 1 : sig.argTypes.length;
+        const minArgs = e.method === "slice" ? 0 : e.method === "splice" || e.method === "fill" ? 1 : sig.argTypes.length;
         if (e.args.length < minArgs || e.args.length > sig.argTypes.length) {
           err(`arrIntrinsic ${e.method}: ${e.args.length} args, expected ${sig.argTypes.length}`, e.loc);
         }

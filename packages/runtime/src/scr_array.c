@@ -324,6 +324,51 @@ ScrArr *scr_arr_reverse(ScrArr *a) {
   return scr_arr_retain(a);
 }
 
+/* `a.fill(value, start?, end?)` — mutate the receiver in place and return it
+ * at +1. start/end go through ToIntegerOrInfinity with negative-from-the-end
+ * resolution and clamp to [0, len] (the emitter fills the omitted defaults
+ * 0 / +Infinity). The ref variant writes the SAME borrowed reference into
+ * every filled slot (retaining once per slot) and releases each element it
+ * overwrites — retain-before-release, so a self-fill is safe. */
+static void scr_arr_fill_range(const ScrArr *a, double start, double end,
+                               size_t *from, size_t *to) {
+  double len = (double)a->len;
+  double s0 = isnan(start) ? 0 : trunc(start);
+  double e0 = isnan(end) ? 0 : trunc(end);
+  if (s0 < 0) s0 += len;
+  if (e0 < 0) e0 += len;
+  *from = s0 <= 0 ? 0 : s0 >= len ? a->len : (size_t)s0;
+  *to = e0 <= 0 ? 0 : e0 >= len ? a->len : (size_t)e0;
+}
+
+ScrArr *scr_arr_fill_f64(ScrArr *a, double value, double start, double end) {
+  size_t from, to;
+  scr_arr_fill_range(a, start, end, &from, &to);
+  uint64_t slot = scr_slot_from_f64(value);
+  for (size_t i = from; i < to; i++) a->data[i] = slot;
+  return scr_arr_retain(a);
+}
+
+ScrArr *scr_arr_fill_bool(ScrArr *a, bool value, double start, double end) {
+  size_t from, to;
+  scr_arr_fill_range(a, start, end, &from, &to);
+  for (size_t i = from; i < to; i++) a->data[i] = value ? 1 : 0;
+  return scr_arr_retain(a);
+}
+
+ScrArr *scr_arr_fill_ref(ScrArr *a, void *value, double start, double end) {
+  size_t from, to;
+  scr_arr_fill_range(a, start, end, &from, &to);
+  uint64_t incoming = scr_slot_from_ptr(value);
+  for (size_t i = from; i < to; i++) {
+    uint64_t retained = scr_elem_retain_slot(a, incoming);
+    uint64_t old = a->data[i];
+    a->data[i] = retained;
+    scr_elem_release(a, old);
+  }
+  return scr_arr_retain(a);
+}
+
 static uint64_t scr_arr_pop_slot(ScrArr *a) {
   if (a->len == 0) {
     scr_trap("scriptc: RangeError: pop() on an empty array\n");

@@ -559,6 +559,12 @@ export function ambientUndefReadType(lowerer: Lowerer, node: ts.Node): IrType | 
  * for overload signatures (an implementation exists), and for anything
  * declared in a .d.ts. */
 export function ambientUndefinedFnSymbolOf(lowerer: Lowerer, ident: ts.Identifier): ts.Symbol | null {
+  // A name the manifest or profile binds is DEFINED — by the host, not by
+  // the program — so the ambient-undefined stance never applies to it.
+  // Without this the trap-declaration claim swallows `const r = hostFn(x)`
+  // before the binding is recognised, and the call silently lowers to
+  // Node's ReferenceError instead of the host call.
+  if (lowerer.ffiImportsByName.has(ident.text)) return null;
   const sym = lowerer.resolveValueSymbol(ident);
   if (!sym || !(sym.flags & ts.SymbolFlags.Function)) return null;
   if (lowerer.isStdlibSymbol(sym)) return null;

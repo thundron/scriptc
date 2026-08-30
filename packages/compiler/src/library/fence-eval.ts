@@ -204,6 +204,14 @@ const ARR_DETECTABLE: Record<string, readonly string[] | undefined> = {
 const MAP_DETECTABLE = new Set(["get", "set", "has", "delete", "clear"]);
 const SET_DETECTABLE = new Set(["add", "has", "delete", "clear"]);
 
+/** Dedicated-path node-builtin members the manifest projects `static` even
+ * though they lower outside BUILTIN_MODULE_FNS. Each maps to the STABLE
+ * libCall spellings its supported shape emits, so a family fence covering it
+ * resolves to a real detector rather than refusing as unfenceable. */
+const COMPOSED_NODE_BUILTIN_DETECTORS: Record<string, readonly string[] | undefined> = {
+  "node-builtin.crypto.createHash": ["crypto.hashDigestStr", "crypto.hashDigestBytes"],
+};
+
 type SurfaceClass =
   | { kind: "detector"; detector: SurfaceDetector }
   | { kind: "refusal" }
@@ -270,6 +278,13 @@ function classifySurface(entry: SurfaceManifestEntry, tax: FenceTaxonomy): Surfa
       why: "it lowers to the same IR as its expanded spelling, so the compiled graph carries no distinct trace to police",
     };
   }
+  // Composed/dedicated-path node-builtin members promoted to `static` in the
+  // manifest (surface-manifest.ts's COMPOSED_STATIC_NODE_BUILTINS) still
+  // carry a detectable runtime trace: createHash's chain lowers to the two
+  // crypto.hashDigest* spellings. Policing those keeps the crypto family
+  // fence resolvable now that the member is honestly static.
+  const composed = COMPOSED_NODE_BUILTIN_DETECTORS[entry.id];
+  if (composed !== undefined) return { kind: "detector", detector: { libFns: composed } };
   if (entry.id.startsWith("node-builtin.")) {
     return {
       kind: "unfenceable",

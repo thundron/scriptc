@@ -321,12 +321,39 @@ export function generateSurfaceManifest(compilerVersion: string): SurfaceManifes
       });
     }
   }
+  // Some fence-hinted node-builtin members have a REAL supported shape that
+  // lowers through a dedicated code path (not the BUILTIN_MODULE_FNS table).
+  // Their FENCE_HINTS row guides the SC2020 refusal of the OTHER shapes;
+  // projecting that row as a blanket "unsupported" is the staleness fixed
+  // here. A member may be promoted to `static` ONLY when its supported shape
+  // lowers to STABLE libCall spellings a fence detector can witness (see
+  // fence-eval.ts's classifySurface) — otherwise a `node-builtin.<mod>.`
+  // determinism fence covering it would become unresolvable. createHash
+  // qualifies (crypto.hashDigestStr/Bytes); the desugared (util.inspect,
+  // util.format — dozens of insp.* spellings) and indirection/build-time
+  // surfaces (util.promisify, module.createRequire) do not, so they keep
+  // their fence-hint representation. This is the one place to update when a
+  // fence-hinted member gains a detectable dedicated-path lowering.
+  const COMPOSED_STATIC_NODE_BUILTINS = new Set<string>([
+    "crypto.createHash",
+  ]);
   for (const [mod, members] of Object.entries(BUILTIN_MODULE_FENCE_HINTS)) {
     for (const [member, hint] of Object.entries(members!)) {
+      const qualified = `${mod}.${member}`;
+      if (COMPOSED_STATIC_NODE_BUILTINS.has(qualified)) {
+        add({
+          id: `${moduleId(mod)}.${member}`,
+          kind: "node-builtin",
+          name: qualified,
+          status: "static",
+          ...(hint !== undefined ? { note: hint } : {}),
+        });
+        continue;
+      }
       add({
         id: `${moduleId(mod)}.${member}`,
         kind: "node-builtin",
-        name: `${mod}.${member}`,
+        name: qualified,
         status: "unsupported",
         code: "SC2020",
         ...(hint !== undefined ? { note: hint } : {}),

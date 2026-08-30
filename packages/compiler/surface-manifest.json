@@ -566,8 +566,7 @@
       "id": "node-builtin.crypto.createHash",
       "kind": "node-builtin",
       "name": "crypto.createHash",
-      "status": "unsupported",
-      "code": "SC2020",
+      "status": "static",
       "note": "the one lowered shape is the composed chain createHash(\"sha256\").update(data).digest(\"hex\") — the Hash handle itself has no lowering"
     },
     {
@@ -945,15 +944,33 @@
       "note": "recognized module (bare and node:-prefixed specifiers)"
     },
     {
+      "id": "node-builtin.fs.promises.access",
+      "kind": "node-builtin",
+      "name": "fs/promises.access",
+      "status": "static"
+    },
+    {
       "id": "node-builtin.fs.promises.chmod",
       "kind": "node-builtin",
       "name": "fs/promises.chmod",
       "status": "static"
     },
     {
+      "id": "node-builtin.fs.promises.lstat",
+      "kind": "node-builtin",
+      "name": "fs/promises.lstat",
+      "status": "static"
+    },
+    {
       "id": "node-builtin.fs.promises.mkdir",
       "kind": "node-builtin",
       "name": "fs/promises.mkdir",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.fs.promises.mkdtemp",
+      "kind": "node-builtin",
+      "name": "fs/promises.mkdtemp",
       "status": "static"
     },
     {
@@ -972,6 +989,12 @@
       "id": "node-builtin.fs.promises.readdir",
       "kind": "node-builtin",
       "name": "fs/promises.readdir",
+      "status": "static"
+    },
+    {
+      "id": "node-builtin.fs.promises.realpath",
+      "kind": "node-builtin",
+      "name": "fs/promises.realpath",
       "status": "static"
     },
     {
@@ -2021,6 +2044,12 @@
       "status": "static"
     },
     {
+      "id": "stdlib.array.fill",
+      "kind": "stdlib",
+      "name": "Array.prototype.fill",
+      "status": "static"
+    },
+    {
       "id": "stdlib.array.filter",
       "kind": "stdlib",
       "name": "Array.prototype.filter",
@@ -2048,6 +2077,12 @@
       "id": "stdlib.array.findLastIndex",
       "kind": "stdlib",
       "name": "Array.prototype.findLastIndex",
+      "status": "static"
+    },
+    {
+      "id": "stdlib.array.flat",
+      "kind": "stdlib",
+      "name": "Array.prototype.flat",
       "status": "static"
     },
     {

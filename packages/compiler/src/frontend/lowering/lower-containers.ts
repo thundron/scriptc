@@ -1676,8 +1676,33 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
       lowerer.badType(argNode, lowerer.typeOf(argNode));
     }
     const arity = fnArg.type.params.length;
-    const inlineCmp = elem.kind === "f64" ? numericComparatorShape(argNode) : null;
-    const key = `${method}:${typeKey(elem)}:${arity}:${inlineCmp ?? ""}`;
+    // A comparator that only subtracts a numeric key inlines: the closure
+    // call per comparison is what makes a sort slow, and LLVM cannot see
+    // through it.
+    const shape = arity === 2 ? numericComparatorKeyShape(argNode) : null;
+    let keyPlan: SortKeyPlan | null = null;
+    if (shape !== null) {
+      const k = shape.key;
+      if (k.kind === "self" && elem.kind === "f64") {
+        keyPlan = { dir: shape.dir, key: { kind: "self" } };
+      } else if (k.kind === "field" && elem.kind === "record") {
+        const field = lowerer.shapes.get(elem.shapeId)?.fields.find((x) => x.name === k.name);
+        if (field !== undefined && field.type.kind === "f64") {
+          keyPlan = { dir: shape.dir, key: { kind: "field", name: k.name, shapeId: elem.shapeId } };
+        }
+      } else if (k.kind === "index" && elem.kind === "f64") {
+        const kt = lowerer.mapTypeOf(lowerer.typeOf(k.arr));
+        if (kt !== undefined && kt !== null && kt.kind === "array" && kt.elem.kind === "f64") {
+          keyPlan = { dir: shape.dir, key: { kind: "index", node: k.arr, arrType: kt } };
+        }
+      }
+    }
+    const inlineCmp = keyPlan === null ? null : keyPlan.dir;
+    const keyTag =
+      keyPlan === null ? "" :
+      keyPlan.key.kind === "self" ? "self" :
+      keyPlan.key.kind === "field" ? `f:${keyPlan.key.shapeId}:${keyPlan.key.name}` : "idx";
+    const key = `${method}:${typeKey(elem)}:${arity}:${inlineCmp ?? ""}:${keyTag}`;
     let helper = lowerer.arrHofHelpers.get(key);
     if (!helper) {
       helper = `%arr.${method}.${lowerer.arrHofHelpers.size}`;
@@ -1693,13 +1718,19 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
           undefinedTag >= 0 ? undefinedTag : null,
           loc,
           inlineCmp,
+          keyPlan,
         ),
       );
     }
     return {
       kind: "call",
       callee: helper,
-      args: inlineCmp !== null ? [receiver] : [receiver, fnArg],
+      args:
+        keyPlan !== null && keyPlan.key.kind === "index"
+          ? [receiver, lowerer.lowerExpr(keyPlan.key.node)]
+          : inlineCmp !== null
+            ? [receiver]
+            : [receiver, fnArg],
       type: arrT,
       loc,
     };
@@ -1767,6 +1798,76 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
    *   }
    *   return a;
    */
+  /** The key a comparator extracts from each element before subtracting:
+   * the element itself (`a - b`), a record field (`a.f - b.f`), or an index
+   * into a same-for-both-sides array (`k[a] - k[b]`). Anything else keeps
+   * the closure call. */
+  type SortKeyPlan = {
+    dir: "asc" | "desc";
+    key:
+      | { kind: "self" }
+      | { kind: "field"; name: string; shapeId: string }
+      | { kind: "index"; node: ts.Expression; arrType: IrType };
+  };
+
+  type CmpKey =
+    | { kind: "self" }
+    | { kind: "field"; name: string }
+    | { kind: "index"; arr: ts.Expression };
+
+  function comparatorKeyOf(l: ts.Expression, r: ts.Expression, p0: string, p1: string): { key: CmpKey; dir: "asc" | "desc" } | null {
+    if (ts.isIdentifier(l) && ts.isIdentifier(r)) {
+      if (l.text === p0 && r.text === p1) return { key: { kind: "self" }, dir: "asc" };
+      if (l.text === p1 && r.text === p0) return { key: { kind: "self" }, dir: "desc" };
+      return null;
+    }
+    if (ts.isPropertyAccessExpression(l) && ts.isPropertyAccessExpression(r)) {
+      if (!ts.isIdentifier(l.expression) || !ts.isIdentifier(r.expression)) return null;
+      if (l.name.text !== r.name.text) return null;
+      const name = l.name.text;
+      if (l.expression.text === p0 && r.expression.text === p1) return { key: { kind: "field", name }, dir: "asc" };
+      if (l.expression.text === p1 && r.expression.text === p0) return { key: { kind: "field", name }, dir: "desc" };
+      return null;
+    }
+    if (ts.isElementAccessExpression(l) && ts.isElementAccessExpression(r)) {
+      // the indexed array must be one identifier, the same on both sides
+      if (!ts.isIdentifier(l.expression) || !ts.isIdentifier(r.expression)) return null;
+      if (l.expression.text !== r.expression.text) return null;
+      const li = l.argumentExpression;
+      const ri = r.argumentExpression;
+      if (!ts.isIdentifier(li) || !ts.isIdentifier(ri)) return null;
+      if (li.text === p0 && ri.text === p1) return { key: { kind: "index", arr: l.expression }, dir: "asc" };
+      if (li.text === p1 && ri.text === p0) return { key: { kind: "index", arr: l.expression }, dir: "desc" };
+      return null;
+    }
+    return null;
+  }
+
+  function numericComparatorKeyShape(node: ts.Node): { key: CmpKey; dir: "asc" | "desc" } | null {
+    if (!ts.isArrowFunction(node) || node.parameters.length !== 2) return null;
+    const p0 = node.parameters[0]!.name;
+    const p1 = node.parameters[1]!.name;
+    if (!ts.isIdentifier(p0) || !ts.isIdentifier(p1)) return null;
+    if (node.parameters.some((p) => p.initializer !== undefined || p.dotDotDotToken !== undefined)) return null;
+    let expr: ts.Expression | undefined;
+    if (ts.isBlock(node.body)) {
+      const only = node.body.statements.length === 1 ? node.body.statements[0]! : null;
+      if (only === null || !ts.isReturnStatement(only) || only.expression === undefined) return null;
+      expr = only.expression;
+    } else {
+      expr = node.body;
+    }
+    while (expr !== undefined && ts.isParenthesizedExpression(expr)) expr = expr.expression;
+    if (expr === undefined || !ts.isBinaryExpression(expr)) return null;
+    if (expr.operatorToken.kind !== ts.SyntaxKind.MinusToken) return null;
+    const strip = (e: ts.Expression): ts.Expression => {
+      let x = e;
+      while (ts.isParenthesizedExpression(x) || ts.isNonNullExpression(x)) x = x.expression;
+      return x;
+    };
+    return comparatorKeyOf(strip(expr.left), strip(expr.right), p0.text, p1.text);
+  }
+
   function numericComparatorShape(node: ts.Node): "asc" | "desc" | null {
     if (!ts.isArrowFunction(node) || node.parameters.length !== 2) return null;
     const p0 = node.parameters[0]!.name;
@@ -1800,8 +1901,10 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
     undefinedTag: number | null,
     loc: SrcLoc,
     inlineCmp: "asc" | "desc" | null = null,
+    keyPlan: SortKeyPlan | null = null,
   ): IrFunction {
     const arrT = arrayOf(elem);
+    const keyArrT = keyPlan !== null && keyPlan.key.kind === "index" ? keyPlan.key.arrType : null;
     const fnT = funcOf([elem, elem].slice(0, arity), F64);
 
     const ref = (id: string, t: IrType): IrExpr => varRef(id, t, loc);
@@ -1834,8 +1937,15 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
       return null;
     };
 
-    const rightEl = (): IrExpr => get(A(), num("j.0"));
-    const leftEl = (): IrExpr => get(A(), num("i.0"));
+    const keyOf = (el: IrExpr): IrExpr => {
+      if (keyPlan === null || keyPlan.key.kind === "self") return el;
+      if (keyPlan.key.kind === "field") {
+        return { kind: "recordGet", obj: el, shapeId: keyPlan.key.shapeId, field: keyPlan.key.name, type: F64, loc } as IrExpr;
+      }
+      return { kind: "arrayGet", arr: ref("kx.0", keyArrT!), index: el, type: F64, loc } as IrExpr;
+    };
+    const rightEl = (): IrExpr => keyOf(get(A(), num("j.0")));
+    const leftEl = (): IrExpr => keyOf(get(A(), num("i.0")));
     const cmpRightFirst = (): IrExpr =>
       inlineCmp === "asc"
         ? bin("<", rightEl(), leftEl(), BOOL)
@@ -1844,13 +1954,13 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
         : bin("<", {
         kind: "callValue",
         callee: ref("f.0", fnT),
-        args: [rightEl(), leftEl()].slice(0, arity),
+        args: [get(A(), num("j.0")), get(A(), num("i.0"))].slice(0, arity),
         type: F64,
         loc,
       } as IrExpr, numLit(0, loc), BOOL);
 
-    const rightUndefined = isUndefined(rightEl());
-    const leftUndefined = isUndefined(leftEl());
+    const rightUndefined = isUndefined(get(A(), num("j.0")));
+    const leftUndefined = isUndefined(get(A(), num("i.0")));
     const takeRight: IrExpr =
       rightUndefined !== null && leftUndefined !== null
         ? {
@@ -1870,11 +1980,13 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
     const mergeRun = (src: () => IrExpr, dst: () => IrExpr): IrStmt[] => {
       const rightSrc = (): IrExpr => get(src(), num("j.0"));
       const leftSrc = (): IrExpr => get(src(), num("i.0"));
+      const rightKey = (): IrExpr => keyOf(rightSrc());
+      const leftKey = (): IrExpr => keyOf(leftSrc());
       const cmpRF = (): IrExpr =>
         inlineCmp === "asc"
-          ? bin("<", rightSrc(), leftSrc(), BOOL)
+          ? bin("<", rightKey(), leftKey(), BOOL)
           : inlineCmp === "desc"
-          ? bin("<", leftSrc(), rightSrc(), BOOL)
+          ? bin("<", leftKey(), rightKey(), BOOL)
           : bin("<", {
               kind: "callValue",
               callee: ref("f.0", fnT),
@@ -1965,11 +2077,13 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
       name,
       params: [
         { localId: "a.0", name: "a", type: arrT },
+        ...(keyArrT !== null ? [{ localId: "kx.0", name: "kx", type: keyArrT }] : []),
         ...(inlineCmp !== null ? [] : [{ localId: "f.0", name: "f", type: fnT }]),
       ],
       returnType: arrT,
       locals: [
         { id: "a.0", name: "a", type: arrT, mutable: true },
+        ...(keyArrT !== null ? [{ id: "kx.0", name: "kx", type: keyArrT, mutable: true }] : []),
         ...(inlineCmp !== null ? [] : [{ id: "f.0", name: "f", type: fnT, mutable: true }]),
         { id: "t.0", name: "t", type: arrT, mutable: true },
         { id: "n.0", name: "n", type: F64, mutable: false },

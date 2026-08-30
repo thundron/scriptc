@@ -3158,6 +3158,10 @@ export type IrLibFn =
   | "fsp.readdir"
   | "fsp.rm"
   | "fsp.stat"
+  | "fsp.lstat"
+  | "fsp.realpath"
+  | "fsp.access"
+  | "fsp.mkdtemp"
   /** fs/promises.open and the statically represented FileHandle surface.
    * Every operation returns an already-settled promise; syscall failures
    * become rejections rather than escaping synchronously. read/write

@@ -1521,6 +1521,18 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
         : { kind: "numLit", value: 0, type: F64, loc };
       return { kind: "libCall", fn: "fs.accessSync", args: [path, mode], type: VOID, loc };
     }
+    // fs.promises.access(p, mode?): accessSync behind a settled promise —
+    // an omitted mode is Node's F_OK (0), failures REJECT at the await.
+    if (bi.module === "fs/promises" && bi.member === "access") {
+      if (expr.arguments.length < 1 || expr.arguments.length > 2 || expr.arguments.some(ts.isSpreadElement)) {
+        lowerer.noLowering(`fs.promises.access with ${expr.arguments.length} arguments`, expr);
+      }
+      const path = lowerer.lowerExprExpecting(expr.arguments[0]!, STRING);
+      const mode: IrExpr = expr.arguments[1]
+        ? lowerer.lowerExprExpecting(expr.arguments[1], F64)
+        : { kind: "numLit", value: 0, type: F64, loc };
+      return { kind: "libCall", fn: "fsp.access", args: [path, mode], type: { kind: "promise", inner: VOID }, loc };
+    }
     if (bi.module === "fs" && bi.member === "writeFileSync" && expr.arguments.length === 2) {
       const dataIr = lowerer.mapTypeOf(lowerer.typeOf(expr.arguments[1]!));
       if (dataIr?.kind === "bytes") {

@@ -701,6 +701,19 @@ export const BUILTIN_MODULE_FNS: Record<string, Record<string, BuiltinModuleFn |
     readdir: { fn: "fsp.readdir", params: [STRING], result: { kind: "promise", inner: arrayOf(STRING) } },
     rm: { fn: "fsp.rm", params: [STRING], result: { kind: "promise", inner: VOID } },
     stat: { fn: "fsp.stat", params: [STRING], result: { kind: "promise", inner: STATS_T } },
+    // statSync's no-follow sibling behind a settled promise (isSymbolicLink
+    // answers what the follow-free snapshot saw).
+    lstat: { fn: "fsp.lstat", params: [STRING], result: { kind: "promise", inner: STATS_T } },
+    // realpath(3) behind a settled promise (realpathSync's resolution;
+    // failures reject with Node's fs error shape).
+    realpath: { fn: "fsp.realpath", params: [STRING], result: { kind: "promise", inner: STRING } },
+    // mkdtempSync behind a settled promise: the prefix + 6 random chars.
+    mkdtemp: { fn: "fsp.mkdtemp", params: [STRING], result: { kind: "promise", inner: STRING } },
+    // access(path[, mode]) behind a settled promise — the optional mode
+    // (Node's F_OK default) is completed in lowerBuiltinModuleCall's
+    // special case, which intercepts both arg shapes; this row routes the
+    // dispatch and gives the static member coverage.
+    access: { fn: "fsp.access", params: [STRING, F64], result: { kind: "promise", inner: VOID } },
     unlink: { fn: "fsp.unlink", params: [STRING], result: { kind: "promise", inner: VOID } },
     chmod: { fn: "fsp.chmod", params: [STRING, F64], result: { kind: "promise", inner: VOID } },
     rename: { fn: "fsp.rename", params: [STRING, STRING], result: { kind: "promise", inner: VOID } },

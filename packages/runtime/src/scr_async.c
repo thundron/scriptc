@@ -1654,6 +1654,24 @@ ScrPromise *scr_fsp_rename(ScrStr *oldpath, ScrStr *newpath) {
   return scr_promise_settled_void();
 }
 
+ScrPromise *scr_fsp_realpath(ScrStr *path) {
+  return scr_promise_settled_str(scr_fs_realpath(path));
+}
+
+ScrPromise *scr_fsp_lstat(ScrStr *path) {
+  ScrStats *st = scr_fs_lstat(path);
+  return scr_promise_settled_ref(st, &scr_stats_retain_v, &scr_stats_release_v, NULL);
+}
+
+ScrPromise *scr_fsp_access(ScrStr *path, double mode) {
+  scr_fs_access(path, mode);
+  return scr_promise_settled_void();
+}
+
+ScrPromise *scr_fsp_mkdtemp(ScrStr *prefix) {
+  return scr_promise_settled_str(scr_fs_mkdtemp(prefix));
+}
+
 /* fs.rename(old, new, cb): the static callback surface. The OS operation
  * starts immediately on a native worker, matching libuv's key contract:
  * while JS/main is synchronously occupied, the filesystem request can still

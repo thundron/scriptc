@@ -1152,6 +1152,10 @@ declare module "fs/promises" {
   export function readdir(path: string): Promise<string[]>;
   export function rm(path: string): Promise<void>;
   export function stat(path: string): Promise<import("node:fs").Stats>;
+  export function lstat(path: string): Promise<import("node:fs").Stats>;
+  export function realpath(path: string): Promise<string>;
+  export function access(path: string, mode?: number): Promise<void>;
+  export function mkdtemp(prefix: string): Promise<string>;
   export function unlink(path: string): Promise<void>;
   export function chmod(path: string, mode: number): Promise<void>;
   export function rename(oldPath: string, newPath: string): Promise<void>;

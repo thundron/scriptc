@@ -2046,6 +2046,11 @@ export type IrLibFn =
   | "fs.readdirTypesSync"
   /** `Math.floor(x)` — C floor() IS the JS operation (NaN/±0/±Infinity
    * pass through bit-exactly). Never throws. */
+  | "math.sqrt"
+  | "math.sin"
+  | "math.cos"
+  | "math.atan2"
+  | "math.pow"
   | "math.floor"
   /** `Math.min(a, b)` / `Math.max(a, b)` — the two-argument scalar forms
    * (scr_lib.c), JS-exact like the Arr folds: NaN poisons, max prefers +0

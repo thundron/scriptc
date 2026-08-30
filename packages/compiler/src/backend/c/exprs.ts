@@ -4827,6 +4827,16 @@ function emitPrimitiveLibCall(state: LibCallState): Temp {
             return finish(`scr_math_min_arr(${arg(0)})`);
           // Math.floor/trunc/ceil — the C functions ARE the JS operations
           // (math.h is always included). Borrow nothing; no throw.
+          case "math.sqrt":
+            return finish(`sqrt(${arg(0)})`);
+          case "math.sin":
+            return finish(`sin(${arg(0)})`);
+          case "math.cos":
+            return finish(`cos(${arg(0)})`);
+          case "math.atan2":
+            return finish(`atan2(${arg(0)}, ${arg(1)})`);
+          case "math.pow":
+            return finish(`pow(${arg(0)}, ${arg(1)})`);
           case "math.floor":
             return finish(`floor(${arg(0)})`);
           case "math.trunc":

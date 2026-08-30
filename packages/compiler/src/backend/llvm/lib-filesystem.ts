@@ -549,6 +549,27 @@ export function emitPrimitiveLibCall(host: LlvmEmitterContext, e: LibCallExpr): 
       B.line(`${t} = call double @llvm.${intr}.f64(double ${v.name})`);
       return { name: t, type: e.type };
     }
+    if (e.fn === "math.sqrt" || e.fn === "math.sin" || e.fn === "math.cos") {
+      const intr = e.fn.slice(5);
+      const v = host.emitExpr(e.args[0]!);
+      host.declare(`declare double @llvm.${intr}.f64(double)`);
+      const t = B.tmp();
+      B.line(`${t} = call double @llvm.${intr}.f64(double ${v.name})`);
+      return { name: t, type: e.type };
+    }
+    if (e.fn === "math.pow" || e.fn === "math.atan2") {
+      const a = host.emitExpr(e.args[0]!);
+      const b = host.emitExpr(e.args[1]!);
+      const t = B.tmp();
+      if (e.fn === "math.pow") {
+        host.declare(`declare double @llvm.pow.f64(double, double)`);
+        B.line(`${t} = call double @llvm.pow.f64(double ${a.name}, double ${b.name})`);
+      } else {
+        host.declare(`declare double @atan2(double, double)`);
+        B.line(`${t} = call double @atan2(double ${a.name}, double ${b.name})`);
+      }
+      return { name: t, type: e.type };
+    }
     if (e.fn === "math.abs") {
       const v = host.emitExpr(e.args[0]!);
       host.declare(`declare double @llvm.fabs.f64(double)`);

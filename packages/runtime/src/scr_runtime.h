@@ -4797,6 +4797,27 @@ double scr_bit_shr(double a, double b);
 double scr_bit_ushr(double a, double b);
 double scr_bit_not(double a);
 
+/* Inlinable fast path for the six operators + `~`: values already in
+ * int32 range (the overwhelmingly common case, e.g. loop counters and
+ * `x & mask` accumulators) truncate exactly with a plain cast — JS and C
+ * both round toward zero — so the operation stays in registers. NaN,
+ * +/-Infinity, and out-of-range doubles miss the range test and take the
+ * exact runtime ToUint32 wrap. Same 32-bit result as the runtime forms. */
+static inline int32_t scr_i32_bits(double d) {
+  if (d > -2147483648.0 && d < 2147483648.0) return (int32_t)d;
+  return (int32_t)scr_to_uint32(d);
+}
+static inline double scr_bit_and_i(double a, double b) { return (double)(scr_i32_bits(a) & scr_i32_bits(b)); }
+static inline double scr_bit_or_i(double a, double b) { return (double)(scr_i32_bits(a) | scr_i32_bits(b)); }
+static inline double scr_bit_xor_i(double a, double b) { return (double)(scr_i32_bits(a) ^ scr_i32_bits(b)); }
+static inline double scr_bit_shr_i(double a, double b) { return (double)(scr_i32_bits(a) >> (scr_i32_bits(b) & 31)); }
+static inline double scr_bit_ushr_i(double a, double b) { return (double)((uint32_t)scr_i32_bits(a) >> (scr_i32_bits(b) & 31)); }
+static inline double scr_bit_not_i(double a) { return (double)(~scr_i32_bits(a)); }
+static inline double scr_bit_shl_i(double a, double b) {
+  uint32_t r = (uint32_t)scr_i32_bits(a) << (scr_i32_bits(b) & 31);
+  return r <= 0x7fffffffu ? (double)r : (double)r - 4294967296.0;
+}
+
 /* ── typed arrays / Buffer (scr_bytes.c) ──────────────────────────────
  * ONE runtime representation for Uint8Array/Uint32Array/Float32Array,
  * Node's Buffer (a Uint8Array subclass), and DataView: a refcounted,

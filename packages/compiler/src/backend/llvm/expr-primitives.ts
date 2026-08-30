@@ -16,6 +16,81 @@ const BYTES_ELEM_NUM: Record<"u8" | "u32" | "f32" | "i32", number> = {
 };
 import { f64Lit } from "./common.js";
 
+/* JS ToInt32/ToUint32 produce the same 32 bits; this helper yields that
+ * i32 pattern. Fast path: values with |d| < 2^31 truncate exactly with
+ * fptosi (JS truncates toward zero, as fptosi does). Everything else —
+ * NaN, +/-Infinity, out-of-range, the +/-2^31 boundary — falls to the
+ * exact runtime ToUint32 (fmod-based wrapping). alwaysinline so the fast
+ * path folds into callers and loop values stay in registers. */
+const BIT_I32_HELPER = [
+  `define internal i32 @scr_i32_bits(double %d) alwaysinline {`,
+  `e:`,
+  `  %a = call double @llvm.fabs.f64(double %d)`,
+  `  %lt = fcmp olt double %a, 0x41E0000000000000`,
+  `  br i1 %lt, label %f, label %s`,
+  `f:`,
+  `  %i = fptosi double %d to i32`,
+  `  br label %j`,
+  `s:`,
+  `  %u = call i32 @scr_to_uint32(double %d)`,
+  `  br label %j`,
+  `j:`,
+  `  %r = phi i32 [ %i, %f ], [ %u, %s ]`,
+  `  ret i32 %r`,
+  `}`,
+].join("\n");
+
+function bitToI32(host: LlvmEmitterContext, name: string): string {
+  host.declare(`declare double @llvm.fabs.f64(double)`);
+  host.declare(`declare i32 @scr_to_uint32(double)`);
+  host.declare(BIT_I32_HELPER);
+  const t = host.B.tmp();
+  host.B.line(`${t} = call i32 @scr_i32_bits(double ${name})`);
+  return t;
+}
+
+/** Inline lowering of `& | ^ << >> >>>` to native i32, JS-exact:
+ * ToInt32/ToUint32 both operands, the i32 op, then back to double
+ * (unsigned for `>>>`, signed otherwise). Shift counts mask with & 31. */
+export function emitBitBinInline(host: LlvmEmitterContext, op: string, lname: string, rname: string): string {
+  const B = host.B;
+  const a = bitToI32(host, lname);
+  const b = bitToI32(host, rname);
+  const res = B.tmp();
+  const dbl = B.tmp();
+  if (op === "&" || op === "|" || op === "^") {
+    const instr = op === "&" ? "and" : op === "|" ? "or" : "xor";
+    B.line(`${res} = ${instr} i32 ${a}, ${b}`);
+    B.line(`${dbl} = sitofp i32 ${res} to double`);
+    return dbl;
+  }
+  const sh = B.tmp();
+  B.line(`${sh} = and i32 ${b}, 31`);
+  if (op === "<<") {
+    B.line(`${res} = shl i32 ${a}, ${sh}`);
+    B.line(`${dbl} = sitofp i32 ${res} to double`);
+  } else if (op === ">>") {
+    B.line(`${res} = ashr i32 ${a}, ${sh}`);
+    B.line(`${dbl} = sitofp i32 ${res} to double`);
+  } else {
+    // >>> : unsigned shift, unsigned result (ToUint32).
+    B.line(`${res} = lshr i32 ${a}, ${sh}`);
+    B.line(`${dbl} = uitofp i32 ${res} to double`);
+  }
+  return dbl;
+}
+
+/** Inline `~x`: ToInt32, complement, back to signed double. */
+export function emitBitNotInline(host: LlvmEmitterContext, name: string): string {
+  const B = host.B;
+  const a = bitToI32(host, name);
+  const res = B.tmp();
+  const dbl = B.tmp();
+  B.line(`${res} = xor i32 ${a}, -1`);
+  B.line(`${dbl} = sitofp i32 ${res} to double`);
+  return dbl;
+}
+
 export function emitLiteralExpr(host: LlvmEmitterContext, e: ExprOf<"numLit" | "boolLit" | "strLit" | "unitLit" | "varRef">): LlValue {
     const B = host.B;
     switch (e.kind) {
@@ -95,8 +170,10 @@ export function emitOperatorExpr(host: LlvmEmitterContext, e: ExprOf<"bin" | "un
           if (e.left.type.kind !== "f64") throw new LlvmUnsupportedError(`bin:${e.op}:${e.left.type.kind}`, e.loc);
           if (arith[e.op] !== undefined) B.line(`${t} = ${arith[e.op]} double ${l.name}, ${r.name}`);
           else B.line(`${t} = fcmp ${cmp[e.op]} double ${l.name}, ${r.name}`);
+        } else if (bit[e.op] !== undefined) {
+          return { name: emitBitBinInline(host, e.op, l.name, r.name), type: e.type };
         } else {
-          const fn = libm[e.op] ?? bit[e.op];
+          const fn = libm[e.op];
           if (fn === undefined) throw new LlvmUnsupportedError(`bin:${e.op}`, e.loc);
           host.declare(`declare double @${fn}(double, double)`);
           B.line(`${t} = call double @${fn}(double ${l.name}, double ${r.name})`);
@@ -108,10 +185,7 @@ export function emitOperatorExpr(host: LlvmEmitterContext, e: ExprOf<"bin" | "un
         const t = B.tmp();
         if (e.op === "-") B.line(`${t} = fneg double ${v.name}`);
         else if (e.op === "!") B.line(`${t} = xor i1 ${v.name}, true`);
-        else {
-          host.declare(`declare double @scr_bit_not(double)`);
-          B.line(`${t} = call double @scr_bit_not(double ${v.name})`);
-        }
+        else return { name: emitBitNotInline(host, v.name), type: e.type };
         return { name: t, type: e.type };
       }
       case "incDec": {

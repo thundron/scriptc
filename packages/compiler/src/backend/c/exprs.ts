@@ -732,27 +732,28 @@ function emitOperatorExpr(
             return emitter.newTemp(e.type, `${l.name} == ${r.name}`);
           case "!==":
             return emitter.newTemp(e.type, `${l.name} != ${r.name}`);
-          // The bitwise six ride runtime helpers (ToInt32/ToUint32 wrap,
-          // 5-bit shift masks, exact C-portable arithmetic shifts).
+          // The bitwise six use inlinable helpers: an int32-range fast path
+          // (a plain cast, kept in registers) plus the exact ToInt32/ToUint32
+          // wrap for NaN/Infinity/out-of-range. Same 32-bit result.
           case "&":
-            return emitter.newTemp(e.type, `scr_bit_and(${l.name}, ${r.name})`);
+            return emitter.newTemp(e.type, `scr_bit_and_i(${l.name}, ${r.name})`);
           case "|":
-            return emitter.newTemp(e.type, `scr_bit_or(${l.name}, ${r.name})`);
+            return emitter.newTemp(e.type, `scr_bit_or_i(${l.name}, ${r.name})`);
           case "^":
-            return emitter.newTemp(e.type, `scr_bit_xor(${l.name}, ${r.name})`);
+            return emitter.newTemp(e.type, `scr_bit_xor_i(${l.name}, ${r.name})`);
           case "<<":
-            return emitter.newTemp(e.type, `scr_bit_shl(${l.name}, ${r.name})`);
+            return emitter.newTemp(e.type, `scr_bit_shl_i(${l.name}, ${r.name})`);
           case ">>":
-            return emitter.newTemp(e.type, `scr_bit_shr(${l.name}, ${r.name})`);
+            return emitter.newTemp(e.type, `scr_bit_shr_i(${l.name}, ${r.name})`);
           case ">>>":
-            return emitter.newTemp(e.type, `scr_bit_ushr(${l.name}, ${r.name})`);
+            return emitter.newTemp(e.type, `scr_bit_ushr_i(${l.name}, ${r.name})`);
           default:
             return emitter.newTemp(e.type, `${l.name} ${e.op} ${r.name}`);
         }
       }
       case "unary": {
         const v = emitter.emitExpr(e.operand);
-        if (e.op === "~") return emitter.newTemp(e.type, `scr_bit_not(${v.name})`);
+        if (e.op === "~") return emitter.newTemp(e.type, `scr_bit_not_i(${v.name})`);
         return emitter.newTemp(e.type, `${e.op}${v.name}`);
       }
       case "incDec": {

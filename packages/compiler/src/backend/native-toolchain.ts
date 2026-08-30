@@ -166,6 +166,11 @@ export interface WasmReactorBuild {
   outWasmPath: string;
   buildDir: string;
   exports: readonly string[];
+  /** Module uses regex literals or the lre-backed case conversions
+   * (toLowerCase/toUpperCase) or RegExp.escape — pull scr_regex.c,
+   * scr_assert.c, and the vendored libregexp/libunicode TUs into the link.
+   * Mirrors the native regex switch (moduleUsesRegex). */
+  regex?: boolean;
 }
 
 export async function buildWasmReactor(opts: WasmReactorBuild): Promise<void> {
@@ -185,10 +190,24 @@ export async function buildWasmReactor(opts: WasmReactorBuild): Promise<void> {
   const progObj = join(opts.buildDir, "prog.o");
   await execFileAsync(cc, [...pre, ...driver.targetArgs, ...sizeFlags, "-c", opts.programLlPath, "-o", progObj]);
   objs.push(progObj);
-  for (const src of [...LIB_RUNTIME_SOURCES, ...WASM_REACTOR_RUNTIME_SOURCES]) {
+  const regexSources = opts.regex ? ["scr_regex.c", "scr_assert.c"] : [];
+  for (const src of [...LIB_RUNTIME_SOURCES, ...WASM_REACTOR_RUNTIME_SOURCES, ...regexSources]) {
     const obj = join(opts.buildDir, src.replace(/\.c$/, ".o"));
-    await execFileAsync(cc, [...pre, ...driver.targetArgs, ...wasiDefs, ...sizeFlags, "-DSCR_LIB", "-I", rtDir, "-c", join(rtDir, src), "-o", obj]);
+    const engineInclude = opts.regex ? ["-I", vendorEngineDir()] : [];
+    await execFileAsync(cc, [...pre, ...driver.targetArgs, ...wasiDefs, ...sizeFlags, "-DSCR_LIB", "-I", rtDir, ...engineInclude, "-c", join(rtDir, src), "-o", obj]);
     objs.push(obj);
+  }
+  // The lre-backed case tables and matcher (scr_regex.c calls lre_case_conv,
+  // lre_is_cased, lre_exec): compile the vendored libregexp/libunicode TUs
+  // from source for wasm32-wasi, exactly as the native regex link does with
+  // ensureLreObjects — plain C11, no host-built inputs.
+  if (opts.regex) {
+    const engineDir = vendorEngineDir();
+    for (const src of LRE_SOURCES) {
+      const obj = join(opts.buildDir, src.replace(/\.c$/, ".o"));
+      await execFileAsync(cc, [...pre, ...driver.targetArgs, ...wasiDefs, ...sizeFlags, "-I", engineDir, "-c", join(engineDir, src), "-o", obj]);
+      objs.push(obj);
+    }
   }
   await execFileAsync(cc, [
     ...pre, ...driver.targetArgs, "-Oz",

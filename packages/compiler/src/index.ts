@@ -2884,6 +2884,7 @@ async function compileLibraryTracked(
           outWasmPath: wasmPath,
           buildDir: join(opts.outDir, `.${stem}.reactor`),
           exports: exportSyms,
+          regex: moduleUsesRegex(mod),
         });
         const wvc = (c: string): WasmValueClass =>
           c === "f64" ? "f64" : c === "void" ? "void" : c === "string" ? "string" : c === "bytes" ? "bytes" : "i32";

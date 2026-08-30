@@ -753,6 +753,11 @@ export const STATIC_MATH_PROPS: Record<string, number | undefined> = {
 };
 
 export const STATIC_MATH_FNS: Record<string, { fn: IrLibFn; arity: number } | undefined> = {
+  sqrt: { fn: "math.sqrt", arity: 1 },
+  sin: { fn: "math.sin", arity: 1 },
+  cos: { fn: "math.cos", arity: 1 },
+  atan2: { fn: "math.atan2", arity: 2 },
+  pow: { fn: "math.pow", arity: 2 },
   floor: { fn: "math.floor", arity: 1 },
   abs: { fn: "math.abs", arity: 1 },
   round: { fn: "math.round", arity: 1 },

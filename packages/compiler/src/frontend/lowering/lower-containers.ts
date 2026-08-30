@@ -1944,6 +1944,20 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
       }
       return { kind: "arrayGet", arr: ref("kx.0", keyArrT!), index: el, type: F64, loc } as IrExpr;
     };
+    // "r sorts strictly before l" and its negation, over the active order —
+    // shared by natural-run detection and the merge. Ties (equal keys / a 0 or
+    // NaN comparator result) are NOT strictly-before, so equal elements never
+    // move relative to each other: stability holds.
+    const callCmp = (r: IrExpr, l: IrExpr): IrExpr =>
+      ({ kind: "callValue", callee: ref("f.0", fnT), args: [r, l].slice(0, arity), type: F64, loc } as IrExpr);
+    const ltEl = (r: IrExpr, l: IrExpr): IrExpr =>
+      inlineCmp === "asc" ? bin("<", keyOf(r), keyOf(l), BOOL)
+      : inlineCmp === "desc" ? bin("<", keyOf(l), keyOf(r), BOOL)
+      : bin("<", callCmp(r, l), numLit(0, loc), BOOL);
+    const geEl = (r: IrExpr, l: IrExpr): IrExpr =>
+      inlineCmp === "asc" ? bin(">=", keyOf(r), keyOf(l), BOOL)
+      : inlineCmp === "desc" ? bin(">=", keyOf(l), keyOf(r), BOOL)
+      : bin(">=", callCmp(r, l), numLit(0, loc), BOOL);
     const rightEl = (): IrExpr => keyOf(get(A(), num("j.0")));
     const leftEl = (): IrExpr => keyOf(get(A(), num("i.0")));
     const cmpRightFirst = (): IrExpr =>
@@ -2036,7 +2050,7 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
       set("w.0", twoW()),
     ];
 
-    const body: IrStmt[] = [
+    const legacyBody: IrStmt[] = [
       ...(copyFirst
         ? [{
             kind: "assign" as const,
@@ -2073,6 +2087,174 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
       { kind: "return", value: A(), loc },
     ];
 
+    // Natural (adaptive) merge sort: detect maximal ascending / strict-
+    // descending runs in one O(n) scan (reversing descending runs in place —
+    // strictness keeps equal elements from moving, so stability holds), then
+    // merge the runs bottom-up with the same ping-pong buffers. Ordered and
+    // partially-ordered input collapses toward O(n). Gated to elem types with
+    // no undefined-sink (the union/jsval path keeps legacyBody).
+    // Undefined-sinking (union arm OR jsval engine undefined) is handled only
+    // by legacyBody's `take` ternary; the natural path must not claim those
+    // elem types or undefined would reach the comparator.
+    const hasUndefinedSink = elem.kind === "jsval" || (elem.kind === "union" && undefinedTag !== null);
+    const rbT = arrayOf(F64);
+    const rb = (): IrExpr => ref("rb.0", rbT);
+    const rbGet = (idx: IrExpr): IrExpr => ({ kind: "arrayGet", arr: rb(), index: idx, type: F64, loc } as IrExpr);
+    const rbSet = (idx: IrExpr, v: IrExpr): IrStmt => ({ kind: "arraySet", arr: rb(), index: idx, value: v, loc } as IrStmt);
+    const rbPush = (v: IrExpr): IrStmt =>
+      ({ kind: "exprStmt", expr: { kind: "arrIntrinsic", method: "push", receiver: rb(), args: [v], type: F64, loc }, loc } as IrStmt);
+    const p1 = (id: string, d: number): IrExpr => bin("+", num(id), numLit(d, loc));
+    const m1 = (id: string): IrExpr => bin("-", num(id), numLit(1, loc));
+    const detect: IrStmt[] = [
+      rbPush(numLit(0, loc)),
+      set("m.0", numLit(0, loc)),
+      set("i.0", numLit(0, loc)),
+      whileLt(num("i.0"), num("n.0"), [
+        set("j.0", p1("i.0", 1)),
+        {
+          kind: "if",
+          cond: bin("<", num("j.0"), num("n.0"), BOOL),
+          then: [{
+            kind: "if",
+            cond: ltEl(get(A(), num("j.0")), get(A(), num("i.0"))),
+            then: [
+              bump("j.0"),
+              whileLt(num("j.0"), num("n.0"), [
+                { kind: "if", cond: geEl(get(A(), num("j.0")), get(A(), m1("j.0"))), then: [{ kind: "break", loc }], else_: [], loc } as IrStmt,
+                bump("j.0"),
+              ]),
+              { kind: "varDecl", localId: "tmp.0", init: get(A(), num("i.0")), loc } as IrStmt,
+              set("rl.0", num("i.0")),
+              set("rh.0", m1("j.0")),
+              whileLt(num("rl.0"), num("rh.0"), [
+                set("tmp.0", get(A(), num("rl.0"))),
+                put(A(), num("rl.0"), get(A(), num("rh.0"))),
+                put(A(), num("rh.0"), ref("tmp.0", elem)),
+                bump("rl.0"),
+                set("rh.0", m1("rh.0")),
+              ]),
+            ],
+            else_: [
+              whileLt(num("j.0"), num("n.0"), [
+                { kind: "if", cond: ltEl(get(A(), num("j.0")), get(A(), m1("j.0"))), then: [{ kind: "break", loc }], else_: [], loc } as IrStmt,
+                bump("j.0"),
+              ]),
+            ],
+            loc,
+          } as IrStmt],
+          else_: [],
+          loc,
+        } as IrStmt,
+        rbPush(num("j.0")),
+        bump("m.0"),
+        set("i.0", num("j.0")),
+      ]),
+    ];
+    const mergeLevel = (src: () => IrExpr, dst: () => IrExpr): IrStmt[] => [
+      set("p.0", numLit(0, loc)),
+      set("q.0", numLit(0, loc)),
+      whileLt(num("p.0"), num("m.0"), [
+        set("lo.0", rbGet(num("p.0"))),
+        {
+          kind: "if",
+          cond: bin("<", p1("p.0", 1), num("m.0"), BOOL),
+          then: [
+            set("mid.0", rbGet(p1("p.0", 1))),
+            set("hi.0", rbGet(p1("p.0", 2))),
+            set("i.0", num("lo.0")),
+            set("j.0", num("mid.0")),
+            set("k.0", num("lo.0")),
+            whileLt(num("k.0"), num("hi.0"), [
+              {
+                kind: "if",
+                cond: bin(">=", num("i.0"), num("mid.0"), BOOL),
+                then: [put(dst(), num("k.0"), get(src(), num("j.0"))), bump("j.0")],
+                else_: [{
+                  kind: "if",
+                  cond: bin(">=", num("j.0"), num("hi.0"), BOOL),
+                  then: [put(dst(), num("k.0"), get(src(), num("i.0"))), bump("i.0")],
+                  else_: [{
+                    kind: "if",
+                    cond: ltEl(get(src(), num("j.0")), get(src(), num("i.0"))),
+                    then: [put(dst(), num("k.0"), get(src(), num("j.0"))), bump("j.0")],
+                    else_: [put(dst(), num("k.0"), get(src(), num("i.0"))), bump("i.0")],
+                    loc,
+                  } as IrStmt],
+                  loc,
+                } as IrStmt],
+                loc,
+              } as IrStmt,
+              bump("k.0"),
+            ]),
+            rbSet(num("q.0"), num("lo.0")),
+            set("p.0", p1("p.0", 2)),
+          ],
+          else_: [
+            set("hi.0", rbGet(p1("p.0", 1))),
+            set("x.0", num("lo.0")),
+            whileLt(num("x.0"), num("hi.0"), [put(dst(), num("x.0"), get(src(), num("x.0"))), bump("x.0")]),
+            rbSet(num("q.0"), num("lo.0")),
+            bump("p.0"),
+          ],
+          loc,
+        } as IrStmt,
+        bump("q.0"),
+      ]),
+      rbSet(num("q.0"), num("n.0")),
+      set("m.0", num("q.0")),
+    ];
+    const copyTtoA: IrStmt[] = [
+      set("x.0", numLit(0, loc)),
+      whileLt(num("x.0"), num("n.0"), [put(A(), num("x.0"), get(T(), num("x.0"))), bump("x.0")]),
+    ];
+    const scratch = ["m.0", "lo.0", "mid.0", "hi.0", "i.0", "j.0", "k.0", "x.0", "p.0", "q.0", "rl.0", "rh.0"];
+    const naturalBody: IrStmt[] = [
+      ...(copyFirst
+        ? [{
+            kind: "assign" as const,
+            localId: "a.0",
+            value: { kind: "arrIntrinsic" as const, method: "slice" as const, receiver: A(), args: [], type: arrT, loc },
+            loc,
+          }]
+        : []),
+      readLenStmt(arrT, loc),
+      { kind: "varDecl", localId: "t.0", init: { kind: "arrIntrinsic", method: "slice", receiver: A(), args: [], type: arrT, loc }, loc } as IrStmt,
+      { kind: "varDecl", localId: "rb.0", init: { kind: "arrayLit", elems: [], type: rbT, loc }, loc } as IrStmt,
+      ...scratch.map((id) => ({ kind: "varDecl", localId: id, init: numLit(0, loc), loc } as IrStmt)),
+      ...detect,
+      {
+        kind: "while",
+        cond: bin(">", num("m.0"), numLit(1, loc), BOOL),
+        body: [
+          ...mergeLevel(A, T),
+          { kind: "if", cond: bin("<=", num("m.0"), numLit(1, loc), BOOL), then: [...copyTtoA, { kind: "break", loc } as IrStmt], else_: [], loc } as IrStmt,
+          ...mergeLevel(T, A),
+        ],
+        loc,
+      } as IrStmt,
+      { kind: "return", value: A(), loc },
+    ];
+
+    const legacyLocals = [
+      { id: "t.0", name: "t", type: arrT, mutable: true },
+      { id: "n.0", name: "n", type: F64, mutable: false },
+      { id: "w.0", name: "w", type: F64, mutable: true },
+      { id: "lo.0", name: "lo", type: F64, mutable: true },
+      { id: "mid.0", name: "mid", type: F64, mutable: true },
+      { id: "hi.0", name: "hi", type: F64, mutable: true },
+      { id: "i.0", name: "i", type: F64, mutable: true },
+      { id: "j.0", name: "j", type: F64, mutable: true },
+      { id: "k.0", name: "k", type: F64, mutable: true },
+      { id: "x.0", name: "x", type: F64, mutable: true },
+    ];
+    const naturalLocals = [
+      { id: "t.0", name: "t", type: arrT, mutable: true },
+      { id: "rb.0", name: "rb", type: rbT, mutable: true },
+      { id: "n.0", name: "n", type: F64, mutable: false },
+      ...scratch.map((id) => ({ id, name: id.slice(0, -2), type: F64, mutable: true })),
+      { id: "tmp.0", name: "tmp", type: elem, mutable: true },
+    ];
+
     return {
       name,
       params: [
@@ -2085,18 +2267,9 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
         { id: "a.0", name: "a", type: arrT, mutable: true },
         ...(keyArrT !== null ? [{ id: "kx.0", name: "kx", type: keyArrT, mutable: true }] : []),
         ...(inlineCmp !== null ? [] : [{ id: "f.0", name: "f", type: fnT, mutable: true }]),
-        { id: "t.0", name: "t", type: arrT, mutable: true },
-        { id: "n.0", name: "n", type: F64, mutable: false },
-        { id: "w.0", name: "w", type: F64, mutable: true },
-        { id: "lo.0", name: "lo", type: F64, mutable: true },
-        { id: "mid.0", name: "mid", type: F64, mutable: true },
-        { id: "hi.0", name: "hi", type: F64, mutable: true },
-        { id: "i.0", name: "i", type: F64, mutable: true },
-        { id: "j.0", name: "j", type: F64, mutable: true },
-        { id: "k.0", name: "k", type: F64, mutable: true },
-        { id: "x.0", name: "x", type: F64, mutable: true },
+        ...(hasUndefinedSink ? legacyLocals : naturalLocals),
       ],
-      body,
+      body: hasUndefinedSink ? legacyBody : naturalBody,
       loc,
     };
   }

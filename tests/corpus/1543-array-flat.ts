@@ -34,3 +34,7 @@ console.log(JSON.stringify(src), JSON.stringify(f));
 const g = [[1], [2]];
 const g0 = g.flat(0);
 console.log(JSON.stringify(g0), g0 === g);
+
+// A union of array and non-array elements can't be flattened past depth 1:
+// the depth would differ per value, so deeper requests are refused.
+console.log(JSON.stringify([[1, [2]], [3]].flat()));

@@ -14,7 +14,7 @@
     "runtime-pack.json"
   ],
   "scripts": {
-    "build": "true",
+    "build": "node scripts/preflight.mjs",
     "build:native": "node scripts/build.mjs",
     "prepack": "node scripts/verify.mjs"
   },

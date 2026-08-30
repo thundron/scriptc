@@ -1540,6 +1540,19 @@ function filterCond(call: IrExpr, fnRet: IrType, loc: SrcLoc): IrExpr {
       cur = cur.elem;
       dEff++;
     }
+    // Peeling stopped early on a union that still has an array arm: the
+    // remaining levels are per-value decisions, so the loop nest below would
+    // silently under-flatten. Refuse instead of returning a wrong result.
+    if (dEff < dReq && cur.kind === "union") {
+      const arms = lowerer.unions.get(cur.unionId)?.arms ?? [];
+      if (arms.some((a) => a.kind === "array")) {
+        lowerer.unsupported(
+          "SC1090",
+          call,
+          "'.flat(depth)' past a union of array and non-array elements (the flatten depth would differ per value)",
+        );
+      }
+    }
     const receiver = lowerer.lowerExpr(access.expression);
     if (dEff === 0) {
       // Nothing to flatten (depth ≤0 or a non-nested receiver): Node returns

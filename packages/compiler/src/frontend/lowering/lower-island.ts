@@ -3211,8 +3211,11 @@ export function lowerStaticReadableStreamReaderCall(
           : undefined;
     if (!entry || call.arguments.length !== entry.args.length) return null;
     if (!lowerer.isStdlibMember(access)) return null;
+    // Spelled as the surface manifest names it, so profile teachings and
+    // fences keyed by `stdlib.number.*` / `stdlib.string.*` attach to this
+    // refusal (fence-eval matches the manifest name inside the message).
     lowerer.requireDynamicApi(
-      `'.${name}()' on ${kind === "f64" ? "numbers" : "strings"}`,
+      `'${kind === "f64" ? "number" : "string"}.prototype.${name}()'`,
       call,
     );
     return finish(lowerer.jsvalIn(lowerer.lowerExpr(access.expression), access.expression), entry);

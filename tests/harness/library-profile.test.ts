@@ -356,7 +356,7 @@ describe("library profile fences", () => {
           fences: [
             { id: "stdlib.math.random", teaching: "randomness is an effect", remediation: "ask the host" },
             { prefix: "node-builtin.fs.", teaching: "files are effects" },
-            { id: "stdlib.math.sin", teaching: "trig is host math", remediation: "request it as an effect" },
+            { id: "stdlib.number.toPrecision", teaching: "formatting is host math", remediation: "request it as an effect" },
           ],
         },
       }),

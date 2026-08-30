@@ -469,16 +469,10 @@ export const ISLAND_SURFACE = {
    * min/max/atan2/hypot/pow are declared with exactly two parameters
    * (rest/optional parameters aren't representable). */
   math: {
-    // floor, min/max (two-arg), and random are STATIC now
-    // (STATIC_MATH_FNS below).
-    fns: {
-      abs: ISL_N1, acos: ISL_N1, asin: ISL_N1, atan: ISL_N1, atan2: ISL_N2,
-      cbrt: ISL_N1, ceil: ISL_N1, cos: ISL_N1, exp: ISL_N1,
-      hypot: ISL_N2, log: ISL_N1, log2: ISL_N1, log10: ISL_N1, pow: ISL_N2,
-      round: ISL_N1,
-      sign: ISL_N1, sin: ISL_N1, sqrt: ISL_N1, tan: ISL_N1, trunc: ISL_N1,
-    } as Record<string, IslandFnEntry | undefined>,
-    // Math constants are compile-time literals, not island properties.
+    // Everything Math offers now lowers statically (STATIC_MATH_FNS and
+    // STATIC_MATH_PROPS below), so no Math member reaches the engine and
+    // this surface is empty. Unsupported call arities still refuse.
+    fns: {} as Record<string, IslandFnEntry | undefined>,
     props: {} as Record<string, IrType | undefined>,
   },
   /** Methods on `number` receivers. The receiver marshals by value; the

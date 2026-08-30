@@ -3421,6 +3421,22 @@ double scr_math_round(double x) {
   return (r == 0.0 && x < 0.0) ? -0.0 : r;
 }
 
+double scr_math_sign(double x) {
+  if (isnan(x)) return x;
+  if (x > 0.0) return 1.0;
+  if (x < 0.0) return -1.0;
+  return x; /* preserves +0 / -0 */
+}
+
+/* JS Math.pow differs from C pow at three points: an exponent of NaN is
+   always NaN, and a base of exactly +/-1 with an infinite exponent is NaN
+   where C answers 1.0. */
+double scr_math_pow(double b, double e) {
+  if (isnan(e)) return (double)NAN;
+  if (isinf(e) && (b == 1.0 || b == -1.0)) return (double)NAN;
+  return pow(b, e);
+}
+
 double scr_math_random(void) {
   uint64_t r;
   arc4random_buf(&r, sizeof r);

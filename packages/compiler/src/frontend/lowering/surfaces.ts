@@ -519,8 +519,14 @@ export const ISLAND_SURFACE = {
  * their island/fence behavior through ISLAND_SURFACE.math.props and the
  * generic standard-library member fence. */
 export const STATIC_MATH_PROPS: Record<string, number | undefined> = {
-  PI: 3.141592653589793,
-  E: 2.718281828459045,
+  PI: Math.PI,
+  E: Math.E,
+  LN2: Math.LN2,
+  LN10: Math.LN10,
+  LOG2E: Math.LOG2E,
+  LOG10E: Math.LOG10E,
+  SQRT2: Math.SQRT2,
+  SQRT1_2: Math.SQRT1_2,
 };
 
 /** Math members with a STATIC lowering — each is one C call that IS the
@@ -535,10 +541,30 @@ export const STATIC_MATH_PROPS: Record<string, number | undefined> = {
  * (lowerMathProperty). */
 export const STATIC_MATH_FNS: Record<string, { fn: IrLibFn; arity: number } | undefined> = {
   sqrt: { fn: "math.sqrt", arity: 1 },
+  cbrt: { fn: "math.cbrt", arity: 1 },
   sin: { fn: "math.sin", arity: 1 },
   cos: { fn: "math.cos", arity: 1 },
+  tan: { fn: "math.tan", arity: 1 },
+  asin: { fn: "math.asin", arity: 1 },
+  acos: { fn: "math.acos", arity: 1 },
+  atan: { fn: "math.atan", arity: 1 },
+  sinh: { fn: "math.sinh", arity: 1 },
+  cosh: { fn: "math.cosh", arity: 1 },
+  tanh: { fn: "math.tanh", arity: 1 },
+  asinh: { fn: "math.asinh", arity: 1 },
+  acosh: { fn: "math.acosh", arity: 1 },
+  atanh: { fn: "math.atanh", arity: 1 },
+  exp: { fn: "math.exp", arity: 1 },
+  expm1: { fn: "math.expm1", arity: 1 },
+  log: { fn: "math.log", arity: 1 },
+  log2: { fn: "math.log2", arity: 1 },
+  log10: { fn: "math.log10", arity: 1 },
+  log1p: { fn: "math.log1p", arity: 1 },
+  sign: { fn: "math.sign", arity: 1 },
+  fround: { fn: "math.fround", arity: 1 },
   atan2: { fn: "math.atan2", arity: 2 },
   pow: { fn: "math.pow", arity: 2 },
+  hypot: { fn: "math.hypot", arity: 2 },
   floor: { fn: "math.floor", arity: 1 },
   abs: { fn: "math.abs", arity: 1 },
   round: { fn: "math.round", arity: 1 },
@@ -551,6 +577,7 @@ export const STATIC_MATH_FNS: Record<string, { fn: IrLibFn; arity: number } | un
   max: { fn: "math.max", arity: 2 },
   random: { fn: "math.random", arity: 0 },
 };
+
 
 /** Number prototype methods with dedicated STATIC lowering paths. The
  * libCall spellings are also the compiled-graph witnesses used by library

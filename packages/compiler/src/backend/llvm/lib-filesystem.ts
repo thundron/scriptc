@@ -549,26 +549,56 @@ export function emitPrimitiveLibCall(host: LlvmEmitterContext, e: LibCallExpr): 
       B.line(`${t} = call double @llvm.${intr}.f64(double ${v.name})`);
       return { name: t, type: e.type };
     }
-    if (e.fn === "math.sqrt" || e.fn === "math.sin" || e.fn === "math.cos") {
-      const intr = e.fn.slice(5);
-      const v = host.emitExpr(e.args[0]!);
-      host.declare(`declare double @llvm.${intr}.f64(double)`);
-      const t = B.tmp();
-      B.line(`${t} = call double @llvm.${intr}.f64(double ${v.name})`);
-      return { name: t, type: e.type };
-    }
-    if (e.fn === "math.pow" || e.fn === "math.atan2") {
-      const a = host.emitExpr(e.args[0]!);
-      const b = host.emitExpr(e.args[1]!);
-      const t = B.tmp();
-      if (e.fn === "math.pow") {
-        host.declare(`declare double @llvm.pow.f64(double, double)`);
-        B.line(`${t} = call double @llvm.pow.f64(double ${a.name}, double ${b.name})`);
-      } else {
-        host.declare(`declare double @atan2(double, double)`);
-        B.line(`${t} = call double @atan2(double ${a.name}, double ${b.name})`);
+    // Math -> LLVM intrinsics where one exists, libm otherwise. pow and
+    // sign go through runtime shims: C pow(1, NaN) is 1.0 where JS is NaN,
+    // and JS sign preserves -0.
+    {
+      const INTRINSIC: Record<string, string | undefined> = {
+        "math.sqrt": "sqrt", "math.sin": "sin", "math.cos": "cos",
+        "math.exp": "exp", "math.log": "log", "math.log2": "log2",
+        "math.log10": "log10",
+      };
+      const LIBM: Record<string, string | undefined> = {
+        "math.cbrt": "cbrt", "math.tan": "tan", "math.asin": "asin",
+        "math.acos": "acos", "math.atan": "atan", "math.sinh": "sinh",
+        "math.cosh": "cosh", "math.tanh": "tanh", "math.asinh": "asinh",
+        "math.acosh": "acosh", "math.atanh": "atanh", "math.expm1": "expm1",
+        "math.log1p": "log1p",
+      };
+      const intr = INTRINSIC[e.fn];
+      if (intr !== undefined) {
+        const v = host.emitExpr(e.args[0]!);
+        host.declare(`declare double @llvm.${intr}.f64(double)`);
+        const t = B.tmp();
+        B.line(`${t} = call double @llvm.${intr}.f64(double ${v.name})`);
+        return { name: t, type: e.type };
       }
-      return { name: t, type: e.type };
+      const libm = LIBM[e.fn];
+      if (libm !== undefined) {
+        const v = host.emitExpr(e.args[0]!);
+        host.declare(`declare double @${libm}(double)`);
+        const t = B.tmp();
+        B.line(`${t} = call double @${libm}(double ${v.name})`);
+        return { name: t, type: e.type };
+      }
+      if (e.fn === "math.fround") {
+        const v = host.emitExpr(e.args[0]!);
+        const f = B.tmp(), t = B.tmp();
+        B.line(`${f} = fptrunc double ${v.name} to float`);
+        B.line(`${t} = fpext float ${f} to double`);
+        return { name: t, type: e.type };
+      }
+      if (e.fn === "math.sign" || e.fn === "math.pow" || e.fn === "math.atan2" || e.fn === "math.hypot") {
+        const sym = e.fn === "math.sign" ? "scr_math_sign"
+          : e.fn === "math.pow" ? "scr_math_pow"
+          : e.fn === "math.atan2" ? "atan2" : "hypot";
+        const n = e.fn === "math.sign" ? 1 : 2;
+        const args = e.args.slice(0, n).map((a) => host.emitExpr(a));
+        host.declare(`declare double @${sym}(${Array(n).fill("double").join(", ")})`);
+        const t = B.tmp();
+        B.line(`${t} = call double @${sym}(${args.map((a) => `double ${a.name}`).join(", ")})`);
+        return { name: t, type: e.type };
+      }
     }
     if (e.fn === "math.abs") {
       const v = host.emitExpr(e.args[0]!);

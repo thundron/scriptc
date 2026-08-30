@@ -947,6 +947,8 @@ double scr_math_min_arr(ScrArr *a);
  * arc4random_buf (SEMANTICS.md 62: Node's distribution, not its sequence). */
 double scr_math_min(double a, double b);
 double scr_math_round(double x);
+double scr_math_sign(double x);
+double scr_math_pow(double b, double e);
 double scr_math_max(double a, double b);
 double scr_math_random(void);
 

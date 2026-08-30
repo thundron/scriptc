@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,6 +14,15 @@ if (process.platform !== "darwin" || process.arch !== "arm64") {
 const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 const buildDir = join(repoRoot, "node_modules/.cache/scriptc-llvm-darwin-arm64");
 const llvmDir = process.env.LLVM_DIR ?? "/opt/homebrew/opt/llvm@22/lib/cmake/llvm";
+if (!existsSync(llvmDir)) {
+  process.stderr.write(
+    `LLVM_DIR not found: ${llvmDir}\n` +
+    "This helper requires LLVM 22.1.8 EXACTLY. Install it and retry:\n" +
+    "  brew install llvm@22\n" +
+    "Or point LLVM_DIR at a 22.1.8 lib/cmake/llvm.\n",
+  );
+  process.exit(1);
+}
 execFileSync("cmake", [
   "-S", join(repoRoot, "native/llvm-codegen"),
   "-B", buildDir,

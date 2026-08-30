@@ -195,7 +195,7 @@ async function resolveHelper(
   } catch {
     throw new NativeCodegenError(
       "SC3003",
-      `LLVM native helper package ${helper.packageName} is not installed; reinstall scriptc with optional dependencies enabled for this host`,
+      `LLVM native helper package ${helper.packageName} is not installed; build it with \`pnpm --filter ${helper.packageName} run build:native\`, or reinstall scriptc with optional dependencies enabled for this host`,
       "missing_package",
     );
   }
@@ -211,7 +211,7 @@ async function resolveHelper(
   } catch {
     throw new NativeCodegenError(
       "SC3003",
-      `LLVM native helper package ${helper.packageName} is incomplete: ${binaryPath} is missing; reinstall scriptc`,
+      `LLVM native helper package ${helper.packageName} is incomplete: ${binaryPath} is missing; build it with \`pnpm --filter ${helper.packageName} run build:native\`, or reinstall scriptc`,
       "missing_binary",
     );
   }

@@ -33,8 +33,12 @@ project(scriptc_llvm_codegen LANGUAGES C CXX)
 # LLVMSupport. Resolve it before loading LLVM's exported targets so CMake never
 # leaves an unresolved `zstd::libzstd_static` edge on Linux or Windows.
 find_package(zstd CONFIG QUIET)
-
-find_package(LLVM 22.1.8 EXACT REQUIRED CONFIG)
+find_package(LLVM 22.1.8 EXACT CONFIG)
+if(NOT LLVM_FOUND)
+  message(FATAL_ERROR
+    "scriptc-llvm-codegen requires LLVM 22.1.8 exactly (found: ${LLVM_PACKAGE_VERSION}). "
+    "Install LLVM 22.1.8 or set LLVM_DIR to its lib/cmake/llvm directory.")
+endif()
 
 # LLVM's exported Support target names zstd's shared target even when the
 # selected LLVM components are static. The npm sidecar must not retain a

@@ -789,6 +789,23 @@ static void scr_case_put_cp(ScrJsonBuf *b, uint32_t cp) {
 }
 
 static ScrStr *scr_str_case_conv(const ScrStr *s, int to_lower) {
+  bool ascii = true;
+  for (size_t i = 0; i < s->len; i++) {
+    if (((unsigned char)s->data[i] & 0x80) != 0) {
+      ascii = false;
+      break;
+    }
+  }
+  if (ascii) {
+    ScrStr *out = scr_str_new(s->data, s->len);
+    for (size_t i = 0; i < out->len; i++) {
+      unsigned char c = (unsigned char)out->data[i];
+      if (to_lower && c >= 'A' && c <= 'Z') out->data[i] = (char)(c + ('a' - 'A'));
+      if (!to_lower && c >= 'a' && c <= 'z') out->data[i] = (char)(c - ('a' - 'A'));
+    }
+    return out;
+  }
+
   ScrJsonBuf b;
   scr_jb_init(&b);
   uint32_t res[LRE_CC_RES_LEN_MAX];

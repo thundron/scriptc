@@ -2633,6 +2633,7 @@ export type IrStrIntrinsicMethod =
   | "slice"
   | "substring"
   | "repeat"
+  | "replaceAll"
   | "trim"
   | "trimStart"
   | "trimEnd"

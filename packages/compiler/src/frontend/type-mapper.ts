@@ -1,7 +1,7 @@
 import { InternalCompilerError } from "../errors.js";
 import * as ts from "./ts7/adapter.js";
 import type { IrRecordShape, IrType, IrUnionDef } from "../ir/ir.js";
-import { arrayOf, BOOL, bytesOf, canConvertToDyn, CHILD_T, DATE_T, DYN, F64, funcOf, isSupportedArrayElem, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, JSVAL, mapOf, NULL_T, PROCSTREAM_T, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, setOf, STRING, SYMBOL_T, typeEquals, typeKey, UNDEFINED_T, VOID } from "../ir/ir.js";
+import { arrayOf, BOOL, bytesOf, canConvertToDyn, CHILD_T, DATE_T, DYN, F64, funcOf, isSupportedArrayElem, isSupportedIndexValue, isSupportedMapKey, isSupportedMapValue, isSupportedSetElem, isUnitType, JSVAL, mapOf, NULL_T, PROCSTREAM_T, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, setOf, STRING, SYMBOL_T, typeEquals, weakMapOf, typeKey, UNDEFINED_T, VOID } from "../ir/ir.js";
 
 import { isJsSourceFile, isNodeTypesPath } from "./program.js";
 import { accessorSlotProp } from "../ir/ir.js";
@@ -431,7 +431,7 @@ export function formatIrType(t: IrType, shapes: ShapeRegistry, unions: UnionRegi
       // runtime representation; the message stays honest either way).
       return t.elem === "u8" ? "Uint8Array" : t.elem === "u32" ? "Uint32Array" : t.elem === "i32" ? "Int32Array" : "Float32Array";
     case "map":
-      return `Map<${formatIrType(t.key, shapes, unions, seen)}, ${formatIrType(t.value, shapes, unions, seen)}>`;
+      return `${t.weak ? "WeakMap" : "Map"}<${formatIrType(t.key, shapes, unions, seen)}, ${formatIrType(t.value, shapes, unions, seen)}>`;
     case "set":
       return `Set<${formatIrType(t.elem, shapes, unions, seen)}>`;
     case "func":
@@ -1621,6 +1621,15 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     const value = mapType(args[1]!, ctx);
     if (!value || !isSupportedMapValue(value)) return null;
     return mapOf(key, value);
+  }
+  if (isStdlibInterface("WeakMap")) {
+    const args = checker.getTypeArguments(widened as ts.TypeReference);
+    if (args.length !== 2) return null;
+    const key = mapType(args[0]!, ctx);
+    if (!key || key.kind !== "object" || key.className.startsWith("%")) return null;
+    const value = mapType(args[1]!, ctx);
+    if (!value || (value.kind !== "f64" && value.kind !== "bool" && value.kind !== "string")) return null;
+    return weakMapOf(key, value);
   }
   // Set<T>: Map's sibling — same provenance rule, elements fenced to Map's
   // KEY kinds (f64/string, SameValueZero). Anything else stays unmapped;
@@ -3560,6 +3569,7 @@ function mapRecordTypeInner(widened: ts.Type, ctx: TypeMapperCtx): IrType | Reco
 const STDLIB_CONTAINERS: Record<string, { role: (i: number) => string }> = {
   Map: { role: (i) => (i === 0 ? "key" : "value") },
   ReadonlyMap: { role: (i) => (i === 0 ? "key" : "value") },
+  WeakMap: { role: (i) => (i === 0 ? "key" : "value") },
   Set: { role: () => "element" },
   ReadonlySet: { role: () => "element" },
   Promise: { role: () => "value" },
@@ -3654,6 +3664,12 @@ export function describeComponentBlocker(widened: ts.Type, ctx: TypeMapperCtx): 
       }
       if ((container === "Map" || container === "ReadonlyMap") && i === 1 && !isSupportedMapValue(mapped)) {
         return `the ${container} shape is supported, but '${text(arg)}' values have no Map slot yet (functions, promises, and nested Maps stay out)`;
+      }
+      if (container === "WeakMap" && i === 0 && mapped.kind !== "object") {
+        return `the WeakMap shape is supported, but keys currently require a concrete class — '${text(arg)}' is outside that domain`;
+      }
+      if (container === "WeakMap" && i === 1 && mapped.kind !== "f64" && mapped.kind !== "bool" && mapped.kind !== "string") {
+        return `the WeakMap shape is supported, but values are limited to number, boolean, or string — '${text(arg)}' is outside that domain`;
       }
       if ((container === "Set" || container === "ReadonlySet") && !isSupportedSetElem(mapped)) {
         return `the ${container} shape is supported, but elements are limited to numbers and strings — '${text(arg)}' is outside that domain`;

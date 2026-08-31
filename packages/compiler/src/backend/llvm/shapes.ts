@@ -383,7 +383,7 @@ export function mapKeyAccess(key: IrType): "f64" | "str" | "ref" {
   if (key.kind === "f64") return "f64";
   if (key.kind === "string") return "str";
   if (key.kind === "symbol") return "ref";
-  if (key.kind === "netServer") return "ref"; // handle identity (Set<Server>)
+  if (key.kind === "netServer" || key.kind === "object") return "ref"; // handle identity (Set<Server>)
   throw new LlvmUnsupportedError(`mapKey:${key.kind}`);
 }
 

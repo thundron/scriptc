@@ -41,13 +41,10 @@ export type IrType =
   | { kind: "string" } // heap, refcounted, UTF-8
   | { kind: "bool" }
   | { kind: "array"; elem: IrType } // heap, refcounted, monomorphic elements
-  /** ES `Map<K, V>` — heap, refcounted, insertion-ordered hash map with ONE
-   * runtime representation (ScrMap) and type-directed key/value handling,
-   * exactly the array pattern (never per-instantiation structs). Keys are
-   * f64 or string (SameValueZero); values are f64, string, bool, record,
-   * object, union, or array — anything isRefCounted or scalar EXCEPT
-   * func/promise/dyn/jsval/map (frontend-fenced, validator-checked). */
-  | { kind: "map"; key: IrType; value: IrType }
+  /** ES Map or the restricted WeakMap slice. Ordinary maps use f64/string
+   * SameValueZero keys. Weak maps carry weak=true, concrete class identity
+   * keys, and scalar/string values; the runtime never retains their keys. */
+  | { kind: "map"; key: IrType; value: IrType; weak?: true }
   /** ES `Set<T>` — heap, refcounted, insertion-ordered. Map's sibling with
    * the value slot removed: ONE runtime representation (the backend lowers
    * sets onto the map runtime with a constant unit value), elements are
@@ -536,6 +533,10 @@ export function mapOf(key: IrType, value: IrType): IrType {
   return { kind: "map", key, value };
 }
 
+export function weakMapOf(key: IrType, value: IrType): IrType {
+  return { kind: "map", key, value, weak: true };
+}
+
 export function setOf(elem: IrType): IrType {
   return { kind: "set", elem };
 }
@@ -690,7 +691,7 @@ export function typeKey(t: IrType): string {
     case "bytes":
       return `bytes<${t.elem}>`;
     case "map":
-      return `map<${typeKey(t.key)},${typeKey(t.value)}>`;
+      return `${t.weak ? "weakmap" : "map"}<${typeKey(t.key)},${typeKey(t.value)}>`;
     case "set":
       return `set<${typeKey(t.elem)}>`;
     case "func":

@@ -3,6 +3,7 @@ import {
   DYN_HANDLE_KINDS,
   RUNTIME_STREAM_CLASSES,
   type IrExpr,
+  type IrModule,
   type IrRecordShape,
   type IrStmt,
   type IrType,
@@ -152,4 +153,17 @@ export function streamRooted(meta: IrClassGraphNode): boolean {
     if (RUNTIME_STREAM_CLASSES.has(current.def.name)) return true;
   }
   return false;
+}
+
+export function moduleUsesWeakMap(mod: IrModule): boolean {
+  const seen = new Set<object>();
+  const visit = (value: unknown): boolean => {
+    if (value === null || typeof value !== "object") return false;
+    if (seen.has(value)) return false;
+    seen.add(value);
+    if ((value as { kind?: unknown }).kind === "map" && (value as { weak?: unknown }).weak === true) return true;
+    if (Array.isArray(value)) return value.some(visit);
+    return Object.entries(value).some(([key, child]) => key !== "loc" && visit(child));
+  };
+  return visit(mod);
 }

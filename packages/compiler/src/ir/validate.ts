@@ -2627,10 +2627,12 @@ function validateFunction(
           err(`mapNew must be map-typed, got ${e.type.kind}`, e.loc);
           break;
         }
-        if (!isSupportedMapKey(e.type.key)) {
+        const weakKey = e.type.key.kind === "object";
+        if (e.type.weak ? !weakKey : !isSupportedMapKey(e.type.key)) {
           err(`mapNew key kind ${e.type.key.kind} (frontend must fence)`, e.loc);
         }
-        if (!isSupportedMapValue(e.type.value)) {
+        const weakValue = e.type.value.kind === "f64" || e.type.value.kind === "bool" || e.type.value.kind === "string";
+        if (e.type.weak ? !weakValue : !isSupportedMapValue(e.type.value)) {
           err(`mapNew value kind ${e.type.value.kind} (frontend must fence)`, e.loc);
         }
         // Seed entries lower pairwise, K/V-typed exactly like set() args.

@@ -389,9 +389,9 @@ export function elemAccess(elem: IrType): "f64" | "bool" | "ref" {
 export function mapKeyAccess(key: IrType): "f64" | "str" | "ref" {
   if (key.kind === "f64") return "f64";
   if (key.kind === "string") return "str";
-  // Handle-kind SET elements (identity hashing — isSupportedSetElem);
-  // Map keys proper stay f64/string.
-  if (key.kind === "netServer" || key.kind === "symbol") return "ref";
+  // Handle-kind SET elements and concrete-class WeakMap keys use identity
+  // hashing; ordinary Map keys stay f64/string.
+  if (key.kind === "netServer" || key.kind === "symbol" || key.kind === "object") return "ref";
   throw new InternalCompilerError(`emitter bug: map key of ${key.kind} (frontend rejects these)`);
 }
 

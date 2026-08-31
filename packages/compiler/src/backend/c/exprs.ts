@@ -2051,9 +2051,10 @@ function emitContainerExpr(
         if (e.type.kind !== "map") throw new InternalCompilerError("emitter bug: mapNew of non-map type");
         const value = e.type.value;
         const rc = isRefCounted(value) ? vAdapters(value) : null;
+        const ctor = e.type.weak ? "scr_weak_map_new" : "scr_map_new";
         const m = emitter.newTemp(
           e.type,
-          `scr_map_new(${mapKeyKindC(e.type.key)}, ${mapValKindC(value)}, ` +
+          `${ctor}(${mapKeyKindC(e.type.key)}, ${mapValKindC(value)}, ` +
             `${rc ? `&${rc.retain}` : "NULL"}, ${rc ? `&${rc.release}` : "NULL"}, ${emitter.traceArgC(value)})`,
         );
         // Seeded construction: set() each pair in source order — exactly

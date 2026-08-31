@@ -9,7 +9,7 @@ import type { IrFunction } from "../../ir/ir.js";
 import { IrClassDef, IrType, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES, isRefCounted, mapOf, STRING } from "../../ir/ir.js";
 import { mangleClassGcFree, mangleClassNew, mangleClassRelease, mangleClassReleaseDirect, mangleClassRetain, mangleClassStruct, mangleClassTrace, mangleCtorThunk, mangleField, mangleFunction, mangleRecordClone, mangleRecordGcFree, mangleRecordNew, mangleRecordRelease, mangleRecordRetain, mangleRecordStruct, mangleRecordTrace, mangleVtAdapter, mangleVtInstance, mangleVtStruct } from "../mangle.js";
 import { boxKindC, cDecl, cType, elemKindC, mapValKindC, releaseCallC, retainCallC, vAdapters } from "./types.js";
-import { streamRooted } from "../../ir/analysis.js";
+import { moduleUsesWeakMap, streamRooted } from "../../ir/analysis.js";
 
 /** The overflow map's C member name on index-signature record structs.
  * User fields mangle to `sc_fld_*`, so no field can collide. */
@@ -60,6 +60,7 @@ export interface ClassMeta {
    * contract in scr_runtime.h) — and their retain/release feed the
    * candidate-root buffer. Acyclic shapes keep the lean 1-word header. */
   export function emitStructDefs(emitter: CEmitter, out: string[]): void {
+    const hasWeakMaps = moduleUsesWeakMap(emitter.mod);
     interface StructShape {
       struct: string;
       newFn: string;
@@ -230,6 +231,7 @@ export interface ClassMeta {
           `static void ${s.release}(${s.struct} *o) {`,
           `  if (!o || o->rc == SIZE_MAX) return;`,
           `  if (--o->rc == 0) {`,
+          ...(hasWeakMaps && s.meta !== null ? [`    scr_weak_notify_dead(o);`] : []),
         );
         for (const m of rcMembers(s)) {
           if (!isRefCounted(m.type)) continue;
@@ -277,6 +279,7 @@ export interface ClassMeta {
         `  if (!o || o->rc == SIZE_MAX) return;`,
         `  if (--o->rc == 0) {`,
         `    scr_cyc_on_dead(o);`,
+        ...(hasWeakMaps && s.meta !== null ? [`    scr_weak_notify_dead(o);`] : []),
       );
       for (const m of rcMembers(s)) {
         if (!isRefCounted(m.type)) continue;
@@ -308,6 +311,7 @@ export interface ClassMeta {
         ),
         `}`,
         `static void ${s.gcFree}(void *o0) {`,
+        ...(hasWeakMaps && s.meta !== null ? [`  scr_weak_notify_dead(o0);`] : []),
         ...(untracedRefFields.length > 0
           ? [
               `  ${s.struct} *o = (${s.struct} *)o0;`,
@@ -481,6 +485,7 @@ function emitRecordCloneC(
       traced: boolean;
       fields: { name: string; type: IrType }[];
     },): void {
+    const hasWeakMaps = moduleUsesWeakMap(emitter.mod);
     const reld = mangleClassReleaseDirect(meta.def.name);
     const emitterRooted = meta.root.def.name === RUNTIME_EMITTER_CLASS;
     const isStreamRooted = streamRooted(meta);
@@ -504,6 +509,7 @@ function emitRecordCloneC(
       `  ${s.struct} *o = (${s.struct} *)o0;`,
       `  if (--o->rc == 0) {`,
       ...(s.traced ? [`    scr_cyc_on_dead(o);`] : []),
+      ...(hasWeakMaps ? [`    scr_weak_notify_dead(o);`] : []),
     );
     for (const f of s.fields) {
       if (!isRefCounted(f.type)) continue;
@@ -560,6 +566,7 @@ function emitRecordCloneC(
         ...tracedFields.map((f) => `  visit(o->${mangleField(f.name)}, ctx); /* ${f.name} */`),
         `}`,
         `static void ${s.gcFree}(void *o0) {`,
+        ...(hasWeakMaps ? [`  scr_weak_notify_dead(o0);`] : []),
         ...(untracedRefFields.length > 0 || emitterRooted
           ? [`  ${s.struct} *o = (${s.struct} *)o0;`]
           : []),

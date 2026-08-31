@@ -30,6 +30,24 @@ long scr_map_live_count(void) { return scr_live_maps; }
 
 #define SCR_MAP_EMPTY SIZE_MAX
 
+static SCR_TL ScrMap *scr_weak_maps = NULL;
+
+static void *scr_weak_key_borrow(void *key) { return key; }
+static void scr_weak_key_drop(void *key) { (void)key; }
+
+static void scr_weak_unlink(ScrMap *m) {
+  ScrMap **link = &scr_weak_maps;
+  while (*link && *link != m) link = &(*link)->weak_next;
+  if (*link == m) *link = m->weak_next;
+  m->weak_next = NULL;
+}
+
+void scr_weak_notify_dead(void *key) {
+  for (ScrMap *m = scr_weak_maps; m; m = m->weak_next) {
+    scr_map_delete_ref(m, key);
+  }
+}
+
 static void scr_map_oom(void) {
   scr_trap("scriptc: out of memory\n");
 }
@@ -223,6 +241,21 @@ ScrMap *scr_map_new(ScrMapKeyKind key_kind, ScrMapValKind val_kind,
   return m;
 }
 
+ScrMap *scr_weak_map_new(ScrMapKeyKind key_kind, ScrMapValKind val_kind,
+                          void *(*val_retain)(void *), void (*val_release)(void *),
+                          ScrTraceFn val_trace) {
+  if (key_kind != SCR_MAP_KEY_REF || val_trace) {
+    scr_trap("scriptc: invalid weak map key or value type\n");
+  }
+  ScrMap *m = scr_map_new(key_kind, val_kind, val_retain, val_release, NULL);
+  m->key_retain = &scr_weak_key_borrow;
+  m->key_release = &scr_weak_key_drop;
+  m->weak_keys = true;
+  m->weak_next = scr_weak_maps;
+  scr_weak_maps = m;
+  return m;
+}
+
 ScrMap *scr_map_retain(ScrMap *m) {
   if (m->rc != SIZE_MAX) {
     m->rc++;
@@ -234,6 +267,7 @@ ScrMap *scr_map_retain(ScrMap *m) {
 void scr_map_release(ScrMap *m) {
   if (!m || m->rc == SIZE_MAX) return; /* NULL: an uninitialized `let` local */
   if (--m->rc == 0) {
+    if (m->weak_keys) scr_weak_unlink(m);
     if (m->val_trace) scr_cyc_on_dead(m);
     for (size_t e = 0; e < m->nentries; e++) {
       if (!m->entries[e].live) continue;
@@ -392,6 +426,16 @@ void scr_map_set_ref_f64(ScrMap *m, void *key, double v) {
   scr_map_set(m, scr_map_fnv1a((const unsigned char *)&k, 8), k, scr_map_slot_from_f64(v));
 }
 
+void scr_map_set_ref_bool(ScrMap *m, void *key, bool v) {
+  uint64_t k = scr_map_slot_from_ptr(key);
+  scr_map_set(m, scr_map_fnv1a((const unsigned char *)&k, 8), k, (uint64_t)(v ? 1 : 0));
+}
+
+void scr_map_set_ref_ref(ScrMap *m, void *key, void *v) {
+  uint64_t k = scr_map_slot_from_ptr(key);
+  scr_map_set(m, scr_map_fnv1a((const unsigned char *)&k, 8), k, scr_map_slot_from_ptr(v));
+}
+
 ScrMap *scr_set_new_ref(void *(*elem_retain)(void *), void (*elem_release)(void *)) {
   ScrMap *m = scr_map_new(SCR_MAP_KEY_REF, SCR_MAP_VAL_F64, NULL, NULL, NULL);
   m->key_retain = elem_retain;
@@ -448,6 +492,26 @@ void *scr_map_get_str_ref(const ScrMap *m, const ScrStr *key) {
   size_t e = scr_map_find_str(m, key);
   if (e == SCR_MAP_EMPTY) return NULL;
   return m->val_retain(scr_map_slot_to_ptr(m->entries[e].val)); /* +1 */
+}
+
+bool scr_map_get_ref_f64(const ScrMap *m, const void *key, double *out) {
+  size_t e = scr_map_find_ref(m, key);
+  if (e == SCR_MAP_EMPTY) return false;
+  *out = scr_map_slot_to_f64(m->entries[e].val);
+  return true;
+}
+
+bool scr_map_get_ref_bool(const ScrMap *m, const void *key, bool *out) {
+  size_t e = scr_map_find_ref(m, key);
+  if (e == SCR_MAP_EMPTY) return false;
+  *out = m->entries[e].val != 0;
+  return true;
+}
+
+void *scr_map_get_ref_ref(const ScrMap *m, const void *key) {
+  size_t e = scr_map_find_ref(m, key);
+  if (e == SCR_MAP_EMPTY) return NULL;
+  return m->val_retain(scr_map_slot_to_ptr(m->entries[e].val));
 }
 
 /* ── iteration primitives (the forEach desugar) ────────────────────────── */

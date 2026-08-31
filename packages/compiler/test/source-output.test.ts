@@ -28,6 +28,29 @@ test("serialized IR is the primary artifact and round-trips through validation",
   expect(validateModule(module)).toEqual([]);
 });
 
+test("WeakMap emits class death hooks only in modules that use it", async () => {
+  const ordinary = await fixture("class Key { id = 1; }\nconsole.log(new Key().id);\n");
+  const ordinaryPath = join(ordinary.outDir, "ordinary.c");
+  const ordinaryResult = await compile(ordinary.entry, { outDir: ordinary.outDir, outPath: ordinaryPath, outputKind: "c" });
+  if (!ordinaryResult.ok) throw new Error("ordinary C emission failed");
+  expect(await readFile(ordinaryPath, "utf8")).not.toContain("scr_weak_notify_dead");
+
+  const weak = await fixture("class Key { id = 1; }\nconst m = new WeakMap<Key, number>();\nconst k = new Key();\nm.set(k, 1);\nconsole.log(m.get(k));\n");
+  const weakCPath = join(weak.outDir, "weak.c");
+  const weakC = await compile(weak.entry, { outDir: weak.outDir, outPath: weakCPath, outputKind: "c" });
+  if (!weakC.ok) throw new Error("WeakMap C emission failed");
+  const cSource = await readFile(weakCPath, "utf8");
+  expect(cSource).toContain("scr_weak_map_new");
+  expect(cSource).toContain("scr_weak_notify_dead");
+
+  const weakLlPath = join(weak.outDir, "weak.ll");
+  const weakLl = await compile(weak.entry, { outDir: weak.outDir, outPath: weakLlPath, outputKind: "llvm" });
+  if (!weakLl.ok) throw new Error("WeakMap LLVM emission failed");
+  const llvmSource = await readFile(weakLlPath, "utf8");
+  expect(llvmSource).toContain("@scr_weak_map_new");
+  expect(llvmSource).toContain("@scr_weak_notify_dead");
+});
+
 test("C and LLVM are exact primary artifacts and never create an executable", async () => {
   const { entry, outDir } = await fixture();
   const cPath = join(outDir, "exact.output");

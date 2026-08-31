@@ -5234,12 +5234,20 @@ export function lowerNew(lowerer: Lowerer, expr: ts.NewExpression): IrExpr {
       // insertion order preserved, exactly JS). Non-array seeds (another
       // Set, general iterables) keep the fence. Unsupported element types
       // are named specifically.
-      // `new WeakMap()` / `new WeakSet()` in JAVASCRIPT sources: no weak
-      // container exists in the value model, but harness code constructs
-      // one unconditionally and touches it only on paths tests don't
-      // reach — the value lowers as an opaque dyn object (identity only;
-      // every reached METHOD use meets its own per-site fence → runtime
-      // fence). TypeScript keeps the compile fence.
+      if (symbol?.name === "WeakMap" && lowerer.isStdlibSymbol(symbol) && !isJsSourceFile(expr.getSourceFile())) {
+        const mapped = lowerer.mapTypeOf(lowerer.typeOf(expr));
+        if (mapped?.kind !== "map" || mapped.weak !== true) lowerer.badType(expr, lowerer.typeOf(expr));
+        if ((expr.arguments?.length ?? 0) !== 0) {
+          lowerer.noLowering(
+            "seeded WeakMap construction",
+            expr,
+            "construct an empty WeakMap and call set() for each concrete class key",
+          );
+        }
+        return { kind: "mapNew", type: mapped, loc };
+      }
+      // Unreached JavaScript WeakMap/WeakSet construction remains an opaque
+      // island value; every reached method use retains its runtime fence.
       if (
         (symbol?.name === "WeakMap" || symbol?.name === "WeakSet") &&
         lowerer.isStdlibSymbol(symbol) &&
@@ -5442,7 +5450,7 @@ export function lowerNew(lowerer: Lowerer, expr: ts.NewExpression): IrExpr {
           String: "boxed wrapper objects have no lowering — use the string primitive (the box is only distinguishable via typeof/identity, which nothing here can honor)",
           Number: "boxed wrapper objects have no lowering — use the number primitive",
           Boolean: "boxed wrapper objects have no lowering — use the boolean primitive",
-          WeakMap: "weak collections observe garbage collection, which reference counting never exposes — a strong Map behaves identically in-language: use Map",
+          WeakMap: "the static lowering requires TypeScript, a concrete compiled class key, a number/boolean/string value, and an empty constructor",
           WeakSet: "weak collections observe garbage collection, which reference counting never exposes — a strong Set behaves identically in-language: use Set",
           WeakRef: "deref()-after-collect exposes GC timing — genuinely dynamic; hold a strong reference instead",
           FinalizationRegistry: "finalization callbacks expose GC timing — genuinely dynamic; release resources explicitly instead",

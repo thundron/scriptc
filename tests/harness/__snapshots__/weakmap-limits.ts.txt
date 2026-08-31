@@ -1,0 +1,53 @@
+weakmap-limits.ts:6:7 - error SC2009: values of type 'WeakMap<object, number>' cannot be compiled: the WeakMap shape is supported, but keys currently require a concrete class — 'object' is outside that domain
+
+  5 | 
+  6 | const generic = new WeakMap<object, number>();
+    |       ^~~~~~~
+  7 | const objectValue = new WeakMap<Key, Key>();
+
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+weakmap-limits.ts:6:17 - error SC2009: values of type 'WeakMap<object, number>' cannot be compiled: the WeakMap shape is supported, but keys currently require a concrete class — 'object' is outside that domain
+
+  5 | 
+  6 | const generic = new WeakMap<object, number>();
+    |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  7 | const objectValue = new WeakMap<Key, Key>();
+
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+weakmap-limits.ts:7:7 - error SC2009: values of type 'WeakMap<Key, Key>' cannot be compiled: the WeakMap shape is supported, but values are limited to number, boolean, or string — 'Key' is outside that domain
+
+  6 | const generic = new WeakMap<object, number>();
+  7 | const objectValue = new WeakMap<Key, Key>();
+    |       ^~~~~~~~~~~
+  8 | const seededKey = new Key(1);
+
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+weakmap-limits.ts:7:21 - error SC2009: values of type 'WeakMap<Key, Key>' cannot be compiled: the WeakMap shape is supported, but values are limited to number, boolean, or string — 'Key' is outside that domain
+
+  6 | const generic = new WeakMap<object, number>();
+  7 | const objectValue = new WeakMap<Key, Key>();
+    |                     ^~~~~~~~~~~~~~~~~~~~~~~
+  8 | const seededKey = new Key(1);
+
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+weakmap-limits.ts:9:16 - error SC2020: 'seeded WeakMap construction' is part of the standard library types but has no scriptc lowering yet
+
+   8 | const seededKey = new Key(1);
+   9 | const seeded = new WeakMap<Key, number>([[seededKey, 1]]);
+     |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  10 | 
+
+  hint: construct an empty WeakMap and call set() for each concrete class key
+
+weakmap-limits.ts:11:13 - error SC2004: uses of 'generic' inherit the blocker on its declaration
+
+  10 | 
+  11 | console.log(generic, objectValue, seeded);
+     |             ^~~~~~~
+  12 | 
+
+  hint: the declaration of 'generic' did not compile — fix the diagnostic reported there and these sites clear with it

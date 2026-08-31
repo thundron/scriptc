@@ -22,7 +22,7 @@ import { InternalCompilerError } from "../../errors.js";
  * the emitter refuses them by name before anything here runs. */
 import type { IrClassDef, IrFunction, IrModule, IrType, IrUnionDef } from "../../ir/ir.js";
 import { isRefCounted, RUNTIME_EMITTER_CLASS, RUNTIME_ERROR_CLASSES, RUNTIME_STREAM_CLASSES } from "../../ir/ir.js";
-import { streamRooted, undefinedArmTag } from "../../ir/analysis.js";
+import { moduleUsesWeakMap, streamRooted, undefinedArmTag } from "../../ir/analysis.js";
 import {
   mangleClassGcFree,
   mangleClassNew,
@@ -244,8 +244,10 @@ export function emitClassShapes(
   const defs: string[] = [];
   const emitted = (mod.classes ?? []).filter((c) => !c.runtime);
   if (emitted.length === 0) return { typeDefs, defs };
+  const hasWeakMaps = moduleUsesWeakMap(mod);
   host.declare(`declare void @scr_obj_alloc_note()`);
   host.declare(`declare void @scr_obj_free_note()`);
+  if (hasWeakMaps) host.declare(`declare void @scr_weak_notify_dead(ptr)`);
 
   for (const cls of emitted) {
     const meta = metaMap.get(cls.name)!;
@@ -333,6 +335,7 @@ export function emitClassShapes(
     // (the public one on standalone classes, the DIRECT one on hierarchy
     // members). Runs at rc == 0.
     const teardown = (lines: string[]): void => {
+      if (hasWeakMaps) lines.push(`  call void @scr_weak_notify_dead(ptr %o)`);
       if (traced) {
         host.declare(`declare void @scr_cyc_on_dead(ptr)`);
         lines.push(`  call void @scr_cyc_on_dead(ptr %o)`);
@@ -491,6 +494,7 @@ export function emitClassShapes(
       const gf: string[] = [
         `define internal void @${mangleClassGcFree(cls.name)}(ptr %o) ${FN_ATTRS} { ; gcFree ${cls.name}`,
         `entry:`,
+        ...(hasWeakMaps ? [`  call void @scr_weak_notify_dead(ptr %o)`] : []),
       ];
       if (isEmitterRooted) gf.push(...regCall("gf", "scr_emitter_reg_gcfree", ""));
       if (isStreamRooted) gf.push(...stCall("gfs", "scr_stream_st_gcfree", ""));

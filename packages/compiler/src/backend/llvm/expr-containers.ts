@@ -460,10 +460,11 @@ export function emitMapNew(host: LlvmEmitterContext, e: IrExpr & { kind: "mapNew
     const B = host.B;
     const value = e.type.value;
     const rc = isRefCounted(value) ? vAdapters(host, value) : { retain: "null", release: "null" };
-    host.declare(`declare ptr @scr_map_new(i32, i32, ptr, ptr, ptr)`);
+    const ctor = e.type.weak ? "scr_weak_map_new" : "scr_map_new";
+    host.declare(`declare ptr @${ctor}(i32, i32, ptr, ptr, ptr)`);
     const m = B.tmp();
     B.line(
-      `${m} = call ptr @scr_map_new(i32 ${mapKeyKindNum(e.type.key)}, i32 ${mapValKindNum(value)}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${isRefCounted(value) ? traceArg(host, value) : "null"})`,
+      `${m} = call ptr @${ctor}(i32 ${mapKeyKindNum(e.type.key)}, i32 ${mapValKindNum(value)}, ptr ${rc.retain}, ptr ${rc.release}, ptr ${isRefCounted(value) ? traceArg(host, value) : "null"})`,
     );
     const out = host.own({ name: m, type: e.type });
     // Seeded construction: set() each pair in source order — a repeated

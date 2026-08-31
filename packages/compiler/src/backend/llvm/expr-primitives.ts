@@ -23,7 +23,7 @@ import { f64Lit } from "./common.js";
  * exact runtime ToUint32 (fmod-based wrapping). alwaysinline so the fast
  * path folds into callers and loop values stay in registers. */
 const BIT_I32_HELPER = [
-  `define internal i32 @scr_i32_bits(double %d) alwaysinline {`,
+  `define internal i32 @sc_i32_bits(double %d) alwaysinline {`,
   `e:`,
   `  %a = call double @llvm.fabs.f64(double %d)`,
   `  %lt = fcmp olt double %a, 0x41E0000000000000`,
@@ -45,7 +45,7 @@ function bitToI32(host: LlvmEmitterContext, name: string): string {
   host.declare(`declare i32 @scr_to_uint32(double)`);
   host.declare(BIT_I32_HELPER);
   const t = host.B.tmp();
-  host.B.line(`${t} = call i32 @scr_i32_bits(double ${name})`);
+  host.B.line(`${t} = call i32 @sc_i32_bits(double ${name})`);
   return t;
 }
 

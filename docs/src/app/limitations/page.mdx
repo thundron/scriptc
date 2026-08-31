@@ -31,6 +31,7 @@ const results = await Promise.all(jobs); // number[] — compiles
 - The type checker sees the full standard library; only the supported surface compiles. Reaching declared-but-unlowered surface is SC2020 with the supported alternatives in the hint — e.g. parts of the regex API (`re.exec`), `Symbol`, `globalThis`, array/Map/Set methods beyond the lowered sets.
 - `Date` values support zero-argument construction, one number/string argument, storage and passing, `getTime`/`valueOf`, `toISOString`, the local and UTC calendar getters, and `getTimezoneOffset`. Date-armed unions, the year/month field constructor, setters, identity comparisons, throwing `Date` values, `Date.parse`, and locale/string formatters remain fenced; the supported string grammar is described below.
 - Map keys and Set elements are strings and numbers; other key types are fenced.
+- WeakMap supports empty construction with concrete compiled class keys and number, boolean, or string values. Keys are not retained, and entries are removed when refcounting or cycle collection destroys the key. Structural-record keys are fenced because width conversion can change identity; object-valued entries are fenced because they require ephemeron tracing.
 
 **The `any`/`unknown` boundary**
 

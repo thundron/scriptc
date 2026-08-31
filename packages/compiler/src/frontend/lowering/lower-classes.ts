@@ -1087,7 +1087,7 @@ export function collectClassShapeInner(lowerer: Lowerer, decl: ts.ClassLikeDecla
         }
         if (t.typeArguments) lowerer.unsupported("SC1090", t, "extending generic classes");
         base = named;
-        if (!base) {
+        if (!base && !(symbol && lowerer.deferredDiags.has(symbol))) {
           lowerer.unsupported(
             "SC1090",
             t,

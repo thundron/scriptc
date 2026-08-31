@@ -909,6 +909,7 @@ typedef struct ScrArr {
   void *(*elem_retain)(void *);
   void (*elem_release)(void *);
   ScrTraceFn elem_trace;
+  bool data_inline;
   uint64_t *data;
 } ScrArr;
 

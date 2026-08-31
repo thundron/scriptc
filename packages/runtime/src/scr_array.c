@@ -87,24 +87,33 @@ static void scr_arr_grow(ScrArr *a, size_t need) {
     if (cap > SIZE_MAX / 2 / sizeof(uint64_t)) scr_arr_oom();
     cap *= 2;
   }
-  uint64_t *data = realloc(a->data, cap * sizeof(uint64_t));
+  uint64_t *data;
+  if (a->data_inline) {
+    data = malloc(cap * sizeof(uint64_t));
+    if (data) memcpy(data, a->data, a->len * sizeof(uint64_t));
+  } else {
+    data = realloc(a->data, cap * sizeof(uint64_t));
+  }
   if (!data) scr_arr_oom();
   a->data = data;
+  a->data_inline = false;
   a->cap = cap;
 }
 
 ScrArr *scr_arr_new(ScrElemKind elem, size_t initial_cap) {
-  ScrArr *a = malloc(sizeof(ScrArr));
+  size_t cap = initial_cap < 4 ? 4 : initial_cap;
+  if (cap > (SIZE_MAX - sizeof(ScrArr)) / sizeof(uint64_t)) scr_arr_oom();
+  ScrArr *a = malloc(sizeof(ScrArr) + cap * sizeof(uint64_t));
   if (!a) scr_arr_oom();
   a->rc = 1;
   a->len = 0;
-  a->cap = 0;
+  a->cap = cap;
   a->elem = elem;
   a->elem_retain = NULL;
   a->elem_release = NULL;
   a->elem_trace = NULL;
-  a->data = NULL;
-  if (initial_cap > 0) scr_arr_grow(a, initial_cap);
+  a->data_inline = true;
+  a->data = (uint64_t *)(a + 1);
 #ifdef SCR_RC_AUDIT
   scr_live_arrays++;
 #endif
@@ -122,7 +131,7 @@ void scr_arr_trace_v(void *a0, ScrTraceVisit visit, void *ctx) {
 
 static void scr_arr_gc_free(void *a0) {
   ScrArr *a = (ScrArr *)a0;
-  free(a->data);
+  if (!a->data_inline) free(a->data);
 #ifdef SCR_RC_AUDIT
   scr_live_arrays--;
 #endif
@@ -133,21 +142,27 @@ ScrArr *scr_arr_new_ref(void *(*elem_retain)(void *),
                          void (*elem_release)(void *),
                          ScrTraceFn elem_trace, size_t initial_cap) {
   ScrArr *a;
+  size_t cap = initial_cap < 4 ? 4 : initial_cap;
   if (elem_trace) {
     a = scr_cyc_alloc(sizeof(ScrArr), &scr_arr_trace_v, &scr_arr_gc_free);
+    a->data_inline = false;
+    a->data = NULL;
+    a->cap = 0;
   } else {
-    a = malloc(sizeof(ScrArr));
+    if (cap > (SIZE_MAX - sizeof(ScrArr)) / sizeof(uint64_t)) scr_arr_oom();
+    a = malloc(sizeof(ScrArr) + cap * sizeof(uint64_t));
     if (!a) scr_arr_oom();
+    a->data_inline = true;
+    a->data = (uint64_t *)(a + 1);
+    a->cap = cap;
   }
   a->rc = 1;
   a->len = 0;
-  a->cap = 0;
   a->elem = SCR_ELEM_REF;
   a->elem_retain = elem_retain;
   a->elem_release = elem_release;
   a->elem_trace = elem_trace;
-  a->data = NULL;
-  if (initial_cap > 0) scr_arr_grow(a, initial_cap);
+  if (elem_trace) scr_arr_grow(a, initial_cap);
 #ifdef SCR_RC_AUDIT
   scr_live_arrays++;
 #endif
@@ -164,7 +179,7 @@ void scr_arr_release(ScrArr *a) {
     if (a->elem_trace) {
       scr_arr_gc_free(a);
     } else {
-      free(a->data);
+      if (!a->data_inline) free(a->data);
 #ifdef SCR_RC_AUDIT
       scr_live_arrays--;
 #endif

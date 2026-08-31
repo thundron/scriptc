@@ -1054,7 +1054,7 @@ class LlEmitter {
       // elem_release, elem_trace, data } — the immortal tagged-template
       // strings objects lay out through it (nothing GEPs into live heap
       // arrays; those stay behind the runtime's own entry points).
-      `%ScrArr = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, i32, ptr, ptr, ptr, ptr }`,
+      `%ScrArr = type { ${this.sizeType}, ${this.sizeType}, ${this.sizeType}, i32, ptr, ptr, ptr, i8, ptr }`,
       // The runtime error prefix { rc, vt, name, message, code } and the
       // class-object shape { rc, pre, post, ctor, name } — field reads on
       // builtin errors and classval loads GEP through these.
@@ -1145,7 +1145,7 @@ class LlEmitter {
       const n = inst.slots.length;
       out.push(
         `@${inst.sym}_data = internal constant [${n} x ptr] [ ${inst.slots.map((s) => `ptr ${s}`).join(", ")} ]`,
-        `@${inst.sym} = internal global %ScrArr { ${this.sizeType} -1, ${this.sizeType} ${n}, ${this.sizeType} ${n}, i32 2, ptr null, ptr null, ptr null, ptr @${inst.sym}_data }`,
+        `@${inst.sym} = internal global %ScrArr { ${this.sizeType} -1, ${this.sizeType} ${n}, ${this.sizeType} ${n}, i32 2, ptr null, ptr null, ptr null, i8 0, ptr @${inst.sym}_data }`,
       );
     }
     if (this.templateStringsInstances.size > 0) out.push(``);

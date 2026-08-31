@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, copyFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, copyFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -19,7 +19,14 @@ describe.runIf(hasZig())("wasm host imports (library callbacks -> wasm imports)"
     const dir = mkdtempSync(join(tmpdir(), "wasm-host-imports-"));
     try {
       copyFileSync(join(FIXTURE, "lib.ts"), join(dir, "lib.ts"));
-      copyFileSync(join(FIXTURE, "profile.json"), join(dir, "profile.json"));
+      // The native conformance profile is shared and keeps growing; the wasm
+      // host-import ABI has no string/bytes RESULT class, so exports that
+      // return one are dropped rather than assumed absent.
+      const profile = JSON.parse(readFileSync(join(FIXTURE, "profile.json"), "utf8"));
+      profile.exports = profile.exports.filter(
+        (e: { returns: string }) => e.returns !== "string" && e.returns !== "bytes",
+      );
+      writeFileSync(join(dir, "profile.json"), JSON.stringify(profile, null, 2));
       execFileSync("node", [CLI, "build", "--lib", "--profile", "profile.json"], {
         cwd: dir,
         env: { ...process.env, SCRIPTC_CC: "zigcc", SCRIPTC_TARGET: "wasm32-wasi" },

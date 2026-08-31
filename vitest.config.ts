@@ -61,6 +61,6 @@ export default defineConfig({
     ...(workers !== undefined && workers !== ""
       ? { maxWorkers: Number(workers), minWorkers: 1 }
       : {}),
-    globalSetup: ["./tests/harness/suite-lock.mjs"],
+    globalSetup: ["./tests/harness/node-pin.mjs", "./tests/harness/suite-lock.mjs"],
   },
 });

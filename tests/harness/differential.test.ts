@@ -327,9 +327,10 @@ let oracleKeyBaseMemo: Promise<string> | null = null;
 function oracleKeyBase(): Promise<string> {
   // The spawned `node` comes from PATH, so ask IT for its version rather than
   // trusting process.version (vitest's own node could differ).
-  oracleKeyBaseMemo ??= execFileAsync("node", ["--version"]).then(({ stdout }) =>
+  oracleKeyBaseMemo ??= execFileAsync(process.execPath, ["--version"]).then(({ stdout }) =>
     createHash("sha256")
-      .update("oracle-v1\0")
+      .update("oracle-v2\0")
+      .update(process.execPath).update("\0")
       .update(stdout.trim())
       .update("\0")
       // Decorator programs run tsc's downlevel on the Node side — its
@@ -407,7 +408,7 @@ async function runNode(file: string, track?: Track): Promise<RunResult> {
   // Node 24 strips types natively; the supported subset is erasable by
   // construction — except `// @transform-types` programs (namespaces),
   // which run under Node's transform mode.
-  const res = await runBinary("node", nodeOracleArgs(file), programEnv(file), track);
+  const res = await runBinary(process.execPath, nodeOracleArgs(file), programEnv(file), track);
   if (cachePath !== null) {
     try {
       const tmp = `${cachePath}.${process.pid}.${Math.random().toString(36).slice(2)}`;

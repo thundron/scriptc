@@ -4163,6 +4163,10 @@ export type IrLibFn =
    * lower to buffer.fromStr(s, "utf8") (identical bytes — ScrStr storage
    * is well-formed UTF-8). Borrowed arg; owned (+1) string; never throws. */
   | "text.decode"
+  /** UTF-8 TextDecoder.decode with the statically known `{ fatal: true }`
+   * constructor option. Invalid or truncated input throws TypeError; a valid
+   * leading BOM is stripped. Borrowed bytes; owned (+1) string; may throw. */
+  | "text.decodeFatal"
   /** TextDecoder.decode for a compile-time non-UTF-8 WHATWG label. The
    * second f64 is the frontend-owned encoding id consumed by scr_bytes.c;
    * label aliases/case/ASCII whitespace are canonicalized before IR. The
@@ -7223,6 +7227,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dyn.toString",
   "dyn.defineProps",
   "process.chdir",
+  "text.decodeFatal",
   "fs.realpathSync",
   "fs.readFileSync",
   "fs.writeFileSync",

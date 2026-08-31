@@ -5068,6 +5068,8 @@ function emitPrimitiveLibCall(state: LibCallState): Temp {
             // WHATWG utf-8 decode with the leading BOM stripped
             // (scr_bytes.c). Borrowed bytes; +1 string; never throws.
             return finish(`scr_text_decode(${arg(0)})`);
+          case "text.decodeFatal":
+            return finish(`scr_text_decode_fatal(${arg(0)})`);
           case "text.decodeLegacy":
             // Compile-time-labeled WHATWG legacy decode (scr_bytes.c).
             // Borrowed bytes + numeric encoding id; +1 string.

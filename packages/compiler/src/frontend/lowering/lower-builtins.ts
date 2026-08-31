@@ -6904,7 +6904,6 @@ function staticTextDecoderEncoding(label: string): StaticTextDecoderEncoding | n
     if (!ts.isNewExpression(ctor)) return null;
     const callee = stripTypeCasts(ctor.expression);
     if (!ts.isIdentifier(callee)) return null;
-    if (callee.text !== "TextDecoder" && callee.text !== "TextEncoder") return null;
     const sym = lowerer.resolveValueSymbol(callee);
     if (!sym || !lowerer.isStdlibSymbol(sym)) return null;
     if (sym.name !== "TextDecoder" && sym.name !== "TextEncoder") return null;
@@ -6917,13 +6916,24 @@ function staticTextDecoderEncoding(label: string): StaticTextDecoderEncoding | n
    * an actual recognized literal here: accepting an arbitrary expression
    * merely typed as a label would move or repeat its effects when the
    * binding is erased. */
+  function staticFatalTextDecoderOptions(expr: ts.Expression): boolean {
+    const value = stripTypeCasts(expr);
+    if (!ts.isObjectLiteralExpression(value) || value.properties.length !== 1) return false;
+    const prop = value.properties[0];
+    if (!prop || !ts.isPropertyAssignment(prop)) return false;
+    const name = prop.name;
+    const fatal = (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) && name.text === "fatal";
+    return fatal && stripTypeCasts(prop.initializer).kind === ts.SyntaxKind.TrueKeyword;
+  }
+
   function erasableTextCodecCtor(info: TextCodecCtor): boolean {
     const args = info.ctor.arguments ?? [];
     if (info.cls === "TextEncoder") return args.length === 0;
     if (args.length === 0) return true;
-    if (args.length !== 1) return false;
     const label = stripTypeCasts(args[0]!);
-    return ts.isStringLiteralLike(label) && staticTextDecoderEncoding(label.text) !== null;
+    if (!ts.isStringLiteralLike(label) || staticTextDecoderEncoding(label.text) === null) return false;
+    return args.length === 1 ||
+      (args.length === 2 && staticFatalTextDecoderOptions(args[1]!));
   }
 
 /** `const encoder = new TextEncoder()` / a statically-labelled TextDecoder twin:
@@ -7059,14 +7069,16 @@ function staticTextDecoderEncoding(label: string): StaticTextDecoderEncoding | n
         : labelT !== null && labelT.isStringLiteralType()
         ? staticTextDecoderEncoding(labelT.value)
         : null;
-      if (ctorArgs.length > 1 || encoding === null) {
+      const fatal = ctorArgs.length === 2 && staticFatalTextDecoderOptions(ctorArgs[1]!);
+      if (ctorArgs.length > 2 || encoding === null ||
+          (ctorArgs.length === 2 && (!fatal || encoding.kind !== "utf8"))) {
         lowerer.noLowering(
           "new TextDecoder with runtime-valued options or an unknown label",
           recv,
-          "a recognized literal WHATWG label with default options compiles",
+          "a recognized literal WHATWG label with default options, or utf-8 with { fatal: true }, compiles",
         );
       }
-      const labelEffect = ctorArgs.length === 1
+      const labelEffect = ctorArgs.length >= 1
         ? lowerer.lowerExprExpecting(ctorArgs[0]!, STRING)
         : null;
       const afterLabel = (result: IrExpr): IrExpr =>
@@ -7100,7 +7112,7 @@ function staticTextDecoderEncoding(label: string): StaticTextDecoderEncoding | n
         );
       }
       const decoded: IrExpr = encoding.kind === "utf8"
-        ? { kind: "libCall", fn: "text.decode", args: [arg], type: STRING, loc }
+        ? { kind: "libCall", fn: fatal ? "text.decodeFatal" : "text.decode", args: [arg], type: STRING, loc }
         : {
           kind: "libCall",
           fn: "text.decodeLegacy",

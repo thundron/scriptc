@@ -241,6 +241,7 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "stats.atimeMs": "scr_stats_atime_ms",
   "stats.mtimeMs": "scr_stats_mtime_ms",
   "text.decode": "scr_text_decode",
+  "text.decodeFatal": "scr_text_decode_fatal",
   "text.decodeLegacy": "scr_text_decode_legacy",
   "zlib.deflateSync": "scr_zlib_deflate",
   "zlib.inflateSync": "scr_zlib_inflate",

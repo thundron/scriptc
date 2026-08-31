@@ -5047,6 +5047,7 @@ ScrStr *scr_bytes_to_str_checked_range(const ScrBytes *b, const ScrStr *enc, dou
  * same replacement decode as toString("utf8") with the leading BOM
  * stripped. Borrows; +1; never throws. */
 ScrStr *scr_text_decode(const ScrBytes *b);
+ScrStr *scr_text_decode_fatal(const ScrBytes *b);
 
 /* TextDecoder with a compile-time WHATWG legacy-encoding id. The frontend
  * owns label canonicalization and emits only the ids understood by

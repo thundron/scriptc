@@ -1536,9 +1536,9 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
         "instances and other members need a runtime object representation";
     } else if (container === "TextDecoder") {
       hint =
-        "the inline new TextDecoder(<literal label>).decode(bytes) form and same-scope const store-then-call " +
-        "(const decoder = new TextDecoder(<literal label>); decoder.decode(bytes)) compile; captured/imported " +
-        "instances, streaming state, and other members need a runtime object representation";
+        "the inline new TextDecoder(<literal label>[, { fatal: true }]).decode(bytes) form and same-scope " +
+        "const store-then-call compile; fatal mode is limited to utf-8, while captured/imported instances, " +
+        "streaming state, and other members need a runtime object representation";
     } else if (member === "prototype") {
       hint =
         "prototype objects are not values here (method lookup is static) — call the method on an instance instead";

@@ -509,6 +509,46 @@ ScrStr *scr_text_decode(const ScrBytes *b) {
   return scr_bytes_decode_utf8(in, n);
 }
 
+static bool scr_utf8_valid(const uint8_t *p, size_t n) {
+  size_t i = 0;
+  while (i < n) {
+    uint8_t b0 = p[i++];
+    if (b0 <= 0x7f) continue;
+    size_t need;
+    uint8_t lo = 0x80, hi = 0xbf;
+    if (b0 >= 0xc2 && b0 <= 0xdf) need = 1;
+    else if (b0 == 0xe0) { need = 2; lo = 0xa0; }
+    else if (b0 == 0xed) { need = 2; hi = 0x9f; }
+    else if (b0 >= 0xe1 && b0 <= 0xef) need = 2;
+    else if (b0 == 0xf0) { need = 3; lo = 0x90; }
+    else if (b0 == 0xf4) { need = 3; hi = 0x8f; }
+    else if (b0 >= 0xf1 && b0 <= 0xf3) need = 3;
+    else return false;
+    if (i + need > n || p[i] < lo || p[i] > hi) return false;
+    i++;
+    for (size_t k = 1; k < need; k++, i++) {
+      if (p[i] < 0x80 || p[i] > 0xbf) return false;
+    }
+  }
+  return true;
+}
+
+ScrStr *scr_text_decode_fatal(const ScrBytes *b) {
+  const uint8_t *in = b->data;
+  size_t n = b->len;
+  if (n >= 3 && in[0] == 0xef && in[1] == 0xbb && in[2] == 0xbf) {
+    in += 3;
+    n -= 3;
+  }
+  if (!scr_utf8_valid(in, n)) {
+    scr_throw_error_named(
+        scr_str_new("TypeError", 9),
+        scr_str_new("The encoded data was not valid for encoding utf-8", 49));
+    return NULL;
+  }
+  return scr_str_new((const char *)in, n);
+}
+
 /* ── node:string_decoder, the utf8 StringDecoder ─────────────────────────
  * The decoder VALUE is a one-field record holding the pending partial
  * sequence PACKED into an f64 (count in the low byte, then up to three

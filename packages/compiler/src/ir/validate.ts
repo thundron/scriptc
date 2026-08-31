@@ -1147,6 +1147,7 @@ export const LIB_FN_SIGS: Record<IrLibFn, { argTypes: (IrType | null)[]; result:
   "date.parseGetTime": { argTypes: [STRING], result: F64 },
   "date.utc": { argTypes: [F64, F64, F64, F64, F64, F64, F64], result: F64 },
   "text.decode": { argTypes: [BYTES_U8], result: STRING },
+  "text.decodeFatal": { argTypes: [BYTES_U8], result: STRING },
   "text.decodeLegacy": { argTypes: [BYTES_U8, F64], result: STRING },
   "fs.mkdirRecursiveSync": { argTypes: [STRING], result: VOID },
   "fs.rmOptsSync": { argTypes: [STRING, BOOL, BOOL], result: VOID },

@@ -482,8 +482,8 @@ declare var Buffer: BufferConstructor;
 /* The WHATWG encoders (Node globals). The COMPOSED forms lower —
  * `new TextEncoder().encode(s)` and `new TextDecoder().decode(bytes)` —
  * as do same-scope const store-then-call forms. Recognized literal WHATWG
- * labels compile statically; runtime-valued/unknown labels and the
- * fatal/ignoreBOM options fence at the use site). */
+ * labels compile statically; utf-8 also accepts the exact `{ fatal: true }`
+ * option. Runtime-valued options, ignoreBOM, and streaming fence at the use site. */
 interface TextEncoder {
   encode(input?: string): Uint8Array;
 }
@@ -1678,7 +1678,6 @@ declare module "util" {
     positionals: string[];
     tokens?: ParseArgsToken[];
   }
-  export function parseArgs(config?: ParseArgsConfig): ParseArgsResult;
   /* util.getCallSites (Node ≥22.9): the captured-frame slice harness
    * code reads. No stack bookkeeping exists in a compiled binary — every
    * reached call fences per site. */
@@ -1691,7 +1690,73 @@ declare module "util" {
   export function getCallSites(frameCount?: number): CallSite[];
 }
 declare module "node:util" {
-  export * from "util";
+  export function promisify(
+    fn: (file: string, args?: string[] | null, options?: object) => unknown,
+  ): (
+    file: string,
+    args?: string[],
+    options?: {
+      encoding?: "utf8" | "utf-8";
+      cwd?: string;
+      env?: { [k: string]: string | undefined };
+      timeout?: number;
+      maxBuffer?: number;
+      killSignal?: string;
+      windowsHide?: boolean;
+    },
+  ) => Promise<{ stdout: string; stderr: string }>;
+  export function inspect(object: unknown, options?: { depth?: number | null; colors?: boolean; [k: string]: unknown }): string;
+  export function format(format?: unknown, ...args: unknown[]): string;
+  export function formatWithOptions(
+    inspectOptions: { depth?: number | null; colors?: boolean; [k: string]: unknown },
+    format?: unknown,
+    ...args: unknown[]
+  ): string;
+  export type ParseArgsOptionsType = "boolean" | "string";
+  export interface ParseArgsOptionDescriptor {
+    type: ParseArgsOptionsType;
+    multiple?: boolean;
+    short?: string;
+    default?: string | boolean | string[] | boolean[];
+  }
+  export interface ParseArgsOptionsConfig {
+    [longOption: string]: ParseArgsOptionDescriptor;
+  }
+  export interface ParseArgsConfig {
+    args?: readonly string[];
+    options?: ParseArgsOptionsConfig;
+    strict?: boolean;
+    allowPositionals?: boolean;
+    allowNegative?: boolean;
+    tokens?: boolean;
+  }
+  export type ParseArgsToken =
+    | {
+        kind: "option";
+        index: number;
+        name: string;
+        rawName: string;
+        value: string | undefined;
+        inlineValue: boolean | undefined;
+      }
+    | { kind: "positional"; index: number; value: string }
+    | { kind: "option-terminator"; index: number };
+  export interface ParseArgsResult {
+    values: { [longOption: string]: undefined | string | boolean | Array<string | boolean> };
+    positionals: string[];
+    tokens?: ParseArgsToken[];
+  }
+  export function parseArgs(config?: ParseArgsConfig): ParseArgsResult;
+  export interface CallSite {
+    readonly functionName: string;
+    readonly scriptName: string;
+    readonly lineNumber: number;
+    readonly columnNumber: number;
+  }
+  export function getCallSites(frameCount?: number): CallSite[];
+  export const TextDecoder: {
+    new (label?: string, options?: { fatal?: boolean; ignoreBOM?: boolean }): TextDecoder;
+  };
 }
 
 /* node:util/types — the type probes. isModuleNamespaceObject answers a

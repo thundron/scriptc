@@ -311,7 +311,7 @@ describe(`llvm differential corpus (${files.length} programs${sanitize ? ", sani
       const [llvm, c, node] = await Promise.all([
         runBinary(llvmRes.binaryPath, []),
         runBinary(cRes.binaryPath, []),
-        runBinary("node", nodeOracleArgs(file)),
+        runBinary(process.execPath, nodeOracleArgs(file)),
       ]);
 
       // stdout: byte parity across all three lanes.

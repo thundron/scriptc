@@ -9,7 +9,7 @@ import { mangleField, mangleGlobal, mangleLocal, mangleRawParam } from "../mangl
 import { BOOL, CAUGHT, IrExpr, IrStmt, RUNTIME_ERROR_CLASSES, isRefCounted } from "../../ir/ir.js";
 import { boxAccess, cDecl, cStringLiteral, elemAccess, vAdapters } from "./types.js";
 import { OVERFLOW_MEMBER } from "./shapes.js";
-import { emitArrayReceiver, emitBytesReceiver } from "./exprs.js";
+import { emitArrayReceiver, emitBytesReceiver, emitStableReceiver } from "./exprs.js";
 import { matchIntegerBytesForLoop } from "../../ir/integer-loops.js";
 import { endsWithJump, matchStringSelfConcat } from "../../ir/analysis.js";
 
@@ -438,7 +438,7 @@ export function emitStmt(emitter: CEmitter, s: IrStmt): void {
         // cycle collection, which must never see a heap edge whose count
         // was already given up (scr_cycle.c). Classes and records share
         // the struct layout, so one emission.
-        const obj = emitter.emitExpr(s.obj);
+        const obj = emitStableReceiver(emitter, s.obj, [s.value]);
         const v = emitter.emitExpr(s.value);
         // Runtime error classes use ScrError's own member names.
         const member =

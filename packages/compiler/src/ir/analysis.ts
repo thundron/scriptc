@@ -75,9 +75,8 @@ export function dynDesc(
   }
 }
 
-/** Whether evaluating an index/value expression can overwrite a bytes
- * receiver binding. Deliberately conservative: uncertain shapes are false. */
-export function isStableBytesOperand(e: IrExpr, receiverLocalId: string): boolean {
+/** Whether evaluating a later operand can overwrite a retained receiver binding. */
+export function isStableReceiverOperand(e: IrExpr, receiverLocalId: string): boolean {
   switch (e.kind) {
     case "numLit":
     case "boolLit":
@@ -85,28 +84,31 @@ export function isStableBytesOperand(e: IrExpr, receiverLocalId: string): boolea
     case "incDec":
       return true;
     case "assignExpr":
-      return e.localId !== receiverLocalId && isStableBytesOperand(e.value, receiverLocalId);
+      return e.localId !== receiverLocalId && isStableReceiverOperand(e.value, receiverLocalId);
     case "bin":
     case "logical":
-      return isStableBytesOperand(e.left, receiverLocalId) &&
-        isStableBytesOperand(e.right, receiverLocalId);
+      return isStableReceiverOperand(e.left, receiverLocalId) &&
+        isStableReceiverOperand(e.right, receiverLocalId);
     case "unary":
     case "toBool":
-      return isStableBytesOperand(e.operand, receiverLocalId);
+      return isStableReceiverOperand(e.operand, receiverLocalId);
     case "ternary":
-      return isStableBytesOperand(e.cond, receiverLocalId) &&
-        isStableBytesOperand(e.then, receiverLocalId) &&
-        isStableBytesOperand(e.else_, receiverLocalId);
+      return isStableReceiverOperand(e.cond, receiverLocalId) &&
+        isStableReceiverOperand(e.then, receiverLocalId) &&
+        isStableReceiverOperand(e.else_, receiverLocalId);
     case "bytesIntrinsic":
       return (e.method === "get" || e.method === "length" || e.method === "byteLength") &&
         e.receiver.kind === "varRef" &&
-        e.args.every((arg) => isStableBytesOperand(arg, receiverLocalId));
+        e.args.every((arg) => isStableReceiverOperand(arg, receiverLocalId));
     case "arrayGet":
-      return e.arr.kind === "varRef" && isStableBytesOperand(e.index, receiverLocalId);
+      return e.arr.kind === "varRef" && isStableReceiverOperand(e.index, receiverLocalId);
+    case "recordGet":
+    case "fieldGet":
+      return e.obj.kind === "varRef";
     case "arrIntrinsic":
       return e.method === "length" &&
         e.receiver.kind === "varRef" &&
-        e.args.every((arg) => isStableBytesOperand(arg, receiverLocalId));
+        e.args.every((arg) => isStableReceiverOperand(arg, receiverLocalId));
     default:
       return false;
   }

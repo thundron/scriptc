@@ -10,7 +10,7 @@ import { OVERFLOW_MEMBER } from "./shapes.js";
 import { dynDestrCheckHelper, dynIterNHelper, dynKeyGetHelper } from "./walkers.js";
 import { collectFfiRetainedOps, parseFfiCallbackKey } from "../ffi-callbacks.js";
 import { genResultThunkFor } from "./async.js";
-import { isStableBytesOperand, matchStringSelfConcat, newValueMayThrow, streamTypedRefEligible, undefinedArmTag } from "../../ir/analysis.js";
+import { isStableReceiverOperand, matchStringSelfConcat, newValueMayThrow, streamTypedRefEligible, undefinedArmTag } from "../../ir/analysis.js";
 
 function streamTypedRefCommitAdapter(
   emitter: CEmitter,
@@ -473,43 +473,26 @@ function dynPromiseAdapter(
 
 
 
-/** Array receivers borrow under the same proof as bytes receivers: a direct,
- * unboxed binding whose owner outlives the access, with operands that cannot
- * overwrite it. Kills retain/release traffic around every indexed access. */
-export function emitArrayReceiver(emitter: CEmitter, receiver: IrExpr, following: IrExpr[]): Temp {
+/** Borrow a direct unboxed receiver when later operands cannot overwrite it. */
+export function emitStableReceiver(emitter: CEmitter, receiver: IrExpr, following: IrExpr[]): Temp {
   if (
     receiver.kind === "varRef" &&
-    following.every((operand) => isStableBytesOperand(operand, receiver.localId))
+    following.every((operand) => isStableReceiverOperand(operand, receiver.localId))
   ) {
     const local = emitter.currentLocals.get(receiver.localId);
-    if (local && !local.boxed) {
-      return emitter.newBorrowedTemp(receiver.type, mangleLocal(receiver.localId));
-    }
-    if (!local && emitter.globalsById.has(receiver.localId)) {
+    if (local && !local.boxed) return emitter.newBorrowedTemp(receiver.type, mangleLocal(receiver.localId));
+    if (!local && emitter.globalsById.has(receiver.localId))
       return emitter.newBorrowedTemp(receiver.type, mangleGlobal(receiver.localId));
-    }
   }
   return emitter.emitExpr(receiver);
 }
 
-/** Evaluate a bytes receiver as a borrow when it is a direct, unboxed
- * binding and all later operands are stable. The binding's scope/global
- * owner then keeps the value alive, avoiding retain/release traffic around
- * every indexed access. Any uncertain shape falls back to an owned temp. */
+export function emitArrayReceiver(emitter: CEmitter, receiver: IrExpr, following: IrExpr[]): Temp {
+  return emitStableReceiver(emitter, receiver, following);
+}
+
 export function emitBytesReceiver(emitter: CEmitter, receiver: IrExpr, following: IrExpr[]): Temp {
-  if (
-    receiver.kind === "varRef" &&
-    following.every((operand) => isStableBytesOperand(operand, receiver.localId))
-  ) {
-    const local = emitter.currentLocals.get(receiver.localId);
-    if (local && !local.boxed) {
-      return emitter.newBorrowedTemp(receiver.type, mangleLocal(receiver.localId));
-    }
-    if (!local && emitter.globalsById.has(receiver.localId)) {
-      return emitter.newBorrowedTemp(receiver.type, mangleGlobal(receiver.localId));
-    }
-  }
-  return emitter.emitExpr(receiver);
+  return emitStableReceiver(emitter, receiver, following);
 }
 
 function emitMapLikeIntrinsic(
@@ -2565,7 +2548,7 @@ function emitRecordExpr(
   switch (e.kind) {
       case "fieldGet":
       case "recordGet": {
-        const obj = emitter.emitExpr(e.obj);
+        const obj = emitStableReceiver(emitter, e.obj, []);
         // Runtime error classes use ScrError's own member names.
         const member =
           e.kind === "fieldGet" && RUNTIME_ERROR_CLASSES.has(e.className)

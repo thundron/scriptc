@@ -1,6 +1,6 @@
 /* Focused LLVM expression emission extracted from emitter.ts. */
 import { InternalCompilerError } from "../../errors.js";
-import { isStableBytesOperand } from "../../ir/analysis.js";
+import { isStableReceiverOperand } from "../../ir/analysis.js";
 import { F64, IrBytesElem, IrExpr } from "../../ir/ir.js";
 import type { LlvmEmitterContext, LlValue } from "./expr-context.js";
 import { F64_INF, f64Lit } from "./common.js";
@@ -56,7 +56,7 @@ const DV_SET_KIND: Record<string, number> = {
 export function emitBytesReceiver(host: LlvmEmitterContext, receiver: IrExpr, following: IrExpr[]): LlValue {
     if (
       receiver.kind === "varRef" &&
-      following.every((operand) => isStableBytesOperand(operand, receiver.localId))
+      following.every((operand) => isStableReceiverOperand(operand, receiver.localId))
     ) {
       const b = host.binding(receiver.localId);
       if (b.kind !== "boxed") {

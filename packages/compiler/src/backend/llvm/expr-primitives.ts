@@ -511,7 +511,7 @@ export function emitContainerExpr(host: LlvmEmitterContext, e: ExprOf<"arrayLit"
         return out;
       }
       case "arrayGet": {
-        const arr = host.emitExpr(e.arr);
+        const arr = host.emitBytesReceiver(e.arr, [e.index]);
         const idx = host.emitExpr(e.index);
         if (e.arr.type.kind !== "array") throw new InternalCompilerError("llvm emitter bug: arrayGet on non-array");
         // Ref-element reads return +1 (the runtime retains); own registers
@@ -581,14 +581,14 @@ export function emitRecordExpr(host: LlvmEmitterContext, e: ExprOf<"fieldGet" | 
     const B = host.B;
     switch (e.kind) {
       case "fieldGet": {
-        const obj = host.emitExpr(e.obj);
+        const obj = host.emitBytesReceiver(e.obj, []);
         const { ptr, type } = host.classFieldPtr(obj.name, e.className, e.field);
         const v = host.loadField(ptr, type);
         if (isRefCounted(e.type)) return host.own({ name: host.retainValue(v, e.type), type: e.type });
         return { name: v, type: e.type };
       }
       case "recordGet": {
-        const obj = host.emitExpr(e.obj);
+        const obj = host.emitBytesReceiver(e.obj, []);
         const { ptr, type } = host.recordFieldPtr(obj.name, e.shapeId, e.field);
         const v = host.loadField(ptr, type);
         if (isRefCounted(e.type)) return host.own({ name: host.retainValue(v, e.type), type: e.type });

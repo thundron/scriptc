@@ -3124,7 +3124,7 @@ class LlEmitter {
         // Evaluation order matches JS: array, index, then value. Ownership
         // of a refcounted value moves into the array (the runtime releases
         // the replaced element itself).
-        const arr = this.emitExpr(s.arr);
+        const arr = this.emitBytesReceiver(s.arr, [s.index, s.value]);
         const idx = this.emitExpr(s.index);
         const v = this.emitExpr(s.value);
         if (s.arr.type.kind !== "array") throw new InternalCompilerError("llvm emitter bug: arraySet on non-array");
@@ -3156,7 +3156,7 @@ class LlEmitter {
         // release — a release can trigger a cycle collection, which must
         // never see a heap edge whose count was already given up).
         // Classes and records share the struct layout, so one emission.
-        const obj = this.emitExpr(s.obj);
+        const obj = this.emitBytesReceiver(s.obj, [s.value]);
         const v = this.emitExpr(s.value);
         const { ptr, type } =
           s.kind === "fieldSet"

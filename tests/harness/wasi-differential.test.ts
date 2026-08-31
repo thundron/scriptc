@@ -3,6 +3,7 @@
  * selection independently of the host platform.
  */
 import { execFile, execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -154,18 +155,24 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
     if (llvmResult.ok) expect(llvmResult.backend).toBe("llvm");
   });
 
-  test("library mode reports a target diagnostic instead of invoking the WASI toolchain", async () => {
+  test("library mode emits a wasm reactor and its JS glue", async () => {
     const outDir = await mkdtemp("/tmp/scriptc-wasi-library-");
     const result = await compileLibrary({
       profilePath: join(repoRoot, "tests/library-mode/scalars/profile.json"),
       outDir,
     });
-    expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.diagnostics).toHaveLength(1);
-      expect(result.diagnostics[0]?.code).toBe("SC3002");
-      expect(result.diagnostics[0]?.message).toMatch(/does not support library-mode archive builds/);
+      throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
     }
+    const wasm = join(outDir, "lib.wasm");
+    const glue = join(outDir, "lib.mjs");
+    expect(existsSync(wasm)).toBe(true);
+    expect(existsSync(glue)).toBe(true);
+    // a reactor exports _initialize and has no _start
+    const mod = new WebAssembly.Module(readFileSync(wasm));
+    const names = WebAssembly.Module.exports(mod).map((x) => x.name);
+    expect(names).toContain("_initialize");
+    expect(names).not.toContain("_start");
   });
 
   test("the explicit C backend still emits async-free wasm", async () => {

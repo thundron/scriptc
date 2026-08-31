@@ -2961,13 +2961,60 @@ function lowerNullishThisInvoke(
   const thisArg = call.arguments[0];
   if (thisArg === undefined || !isNullishLiteral(lowerer, thisArg)) return null;
 
-  // `f.bind(nullish)` with nothing to partially apply is `f` itself.
-  // Partial application needs a capture box the expression path cannot
-  // introduce, so it keeps the refusal.
   if (name === "bind") {
-    if (call.arguments.length !== 1) return null;
     const fn = lowerer.lowerExpr(access.expression);
-    return fn.type.kind === "func" ? fn : null;
+    const ft = fn.type;
+    if (ft.kind !== "func" || ft.rest === true) return null;
+    const boundNodes = call.arguments.slice(1);
+    if (boundNodes.length > ft.params.length) return null;
+    const resultT = lowerer.mapTypeOf(lowerer.typeOf(call));
+    const expectedT: IrType = { kind: "func", params: ft.params.slice(boundNodes.length), ret: ft.ret };
+    if (resultT?.kind !== "func" || !typeEquals(resultT, expectedT)) return null;
+    const bound = boundNodes.map((node, i) => lowerer.lowerExprExpecting(node, ft.params[i]!));
+    const captureTypes = [ft, ...ft.params.slice(0, bound.length)];
+    const captureIds = captureTypes.map((_, i) => i === 0 ? "sc_bf.0" : `sc_b${i - 1}.0`);
+    const captureNames = captureTypes.map((_, i) => i === 0 ? "fn" : `bound${i - 1}`);
+    const paramIds = resultT.params.map((_, i) => `sc_p${i}.0`);
+    const key = `func.bind:${typeKey(ft)}:${bound.length}`;
+    const existing = lowerer.arrHofHelpers.get(key);
+    const factory = existing ?? `%func.bind.${lowerer.arrHofHelpers.size}`;
+    if (!existing) {
+      lowerer.arrHofHelpers.set(key, factory);
+      const impl = `${factory}.impl`;
+      const invoke: IrExpr = {
+        kind: "callValue",
+        callee: { kind: "varRef", localId: captureIds[0]!, type: ft, loc: locOf(call) },
+        args: [
+          ...bound.map((_, i) => ({ kind: "varRef", localId: captureIds[i + 1]!, type: ft.params[i]!, loc: locOf(call) }) as IrExpr),
+          ...resultT.params.map((type, i) => ({ kind: "varRef", localId: paramIds[i]!, type, loc: locOf(call) }) as IrExpr),
+        ],
+        type: ft.ret,
+        loc: locOf(call),
+      };
+      lowerer.liftedFns.push({
+        name: impl,
+        params: resultT.params.map((type, i) => ({ localId: paramIds[i]!, name: `arg${i}`, type })),
+        returnType: ft.ret,
+        captures: captureTypes.map((type, i) => ({ localId: captureIds[i]!, name: captureNames[i]!, type })),
+        locals: [
+          ...captureTypes.map((type, i) => ({ id: captureIds[i]!, name: captureNames[i]!, type, mutable: false, boxed: true })),
+          ...resultT.params.map((type, i) => ({ id: paramIds[i]!, name: `arg${i}`, type, mutable: false })),
+        ],
+        body: ft.ret.kind === "void"
+          ? [{ kind: "exprStmt", expr: invoke, loc: locOf(call) }]
+          : [{ kind: "return", value: invoke, loc: locOf(call) }],
+        loc: locOf(call),
+      });
+      lowerer.liftedFns.push({
+        name: factory,
+        params: captureTypes.map((type, i) => ({ localId: captureIds[i]!, name: captureNames[i]!, type })),
+        returnType: resultT,
+        locals: captureTypes.map((type, i) => ({ id: captureIds[i]!, name: captureNames[i]!, type, mutable: false, boxed: true })),
+        body: [{ kind: "return", value: { kind: "closure", fnName: impl, captures: captureIds, type: resultT, loc: locOf(call) }, loc: locOf(call) }],
+        loc: locOf(call),
+      });
+    }
+    return { kind: "call", callee: factory, args: [fn, ...bound], type: resultT, loc: locOf(call) };
   }
 
   let argNodes: readonly ts.Expression[];
@@ -8807,16 +8854,14 @@ export function lowerFunction(lowerer: Lowerer, decl: ts.FunctionDeclaration): I
         (name === "apply" || name === "call" || name === "bind") &&
         lowerer.checker.getCallSignatures(recvT).length > 0
       ) {
-        // A nullish `this` re-routes to nothing, so the call IS the direct
-        // call: `f.call(null, a, b)` and `f.apply(null, [a, b])` invoke the
-        // function value with a statically known argument list. Any other
-        // `this` still has nowhere to go.
+        // A nullish `this` re-routes to nothing. call/apply invoke directly;
+        // bind builds an owned closure over the function and fixed prefix.
         const direct = lowerNullishThisInvoke(lowerer, call, access, name);
         if (direct !== null) return direct;
         lowerer.unsupported(
           "SC1090",
           call,
-          `Function.prototype.${name} on a compiled function value in this form (compiled calls are direct — no runtime 'this' or arguments object exists to re-route; a nullish 'this' does lower: f.call(null, a, b), f.apply(null, [a, b]), f.bind(null); otherwise spell the call directly: '${access.expression.getText()}(...)')`,
+          `Function.prototype.${name} on a compiled function value in this form (compiled calls are direct — no runtime 'this' or arguments object exists to re-route; a nullish 'this' does lower: f.call(null, a, b), f.apply(null, [a, b]), f.bind(null, a); otherwise spell the call directly: '${access.expression.getText()}(...)')`,
         );
       }
       // STANDARD-LIBRARY generic members (Promise.then, Object.

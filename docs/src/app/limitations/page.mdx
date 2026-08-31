@@ -12,6 +12,7 @@ These are rejected at compile time with an `SC` code, a code frame, and usually 
 - `break`/`continue` crossing a `finally` block, and any `return`/`break`/`continue` out of the `finally` body itself, are fenced. An ordinary `return` through `finally` compiles.
 - Generics monomorphize when the target resolves statically. The remaining edges include generic functions declared inside another function, generic class expressions, generic classes whose base depends on their own type parameters, and generic methods that would require dynamic dispatch.
 - Generic function values must be pinned at use to a concrete signature and come from a never-reassigned binding; unpinned or rebound values remain fenced. Built-in and standard-library functions often have call-only lowerings, so values such as `const g = Math.floor` are rejected — call them directly.
+- `Function.prototype.call`, literal-array `apply`, and fixed-prefix `bind` compile only with a null or undefined `this`. Bound functions are fresh owned closures and retain captured arguments. Dynamic apply arrays, rest-signature binding, and non-null receivers remain fenced.
 
 **Types and shapes**
 

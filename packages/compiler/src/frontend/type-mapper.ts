@@ -2494,7 +2494,20 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     for (const p of sig.getParameters()) {
       const decl = checker.valueDeclarationOf(p);
       if (decl && ts.isParameter(decl) && decl.dotDotDotToken) {
-        return null;
+        const restType = checker.getTypeOfSymbol(p);
+        if (!ctx.isStdlibFile(decl.getSourceFile()) || !checker.isTupleType(restType)) return null;
+        const ref = restType as ts.TupleTypeReference;
+        const shape = (ref.elementFlags as ts.ElementFlags[] | undefined) !== undefined
+          ? ref
+          : (ref.getTarget() as ts.TupleType | undefined);
+        const args = checker.getTypeArguments(ref);
+        if (args.length > 0 && (shape?.elementFlags === undefined || shape.elementFlags.some((f) => !(f & ts.ElementFlags.Required)))) return null;
+        for (const arg of args) {
+          const mapped = mapType(arg, ctx);
+          if (!mapped || mapped.kind === "void") return null;
+          params.push(mapped);
+        }
+        continue;
       }
       const optional =
         decl !== undefined &&

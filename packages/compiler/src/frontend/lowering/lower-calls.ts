@@ -2946,6 +2946,61 @@ export function lowerFfiCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr 
     };
   }
 
+/** `f.call(nullish, ...args)` / `f.apply(nullish, [args])` as a direct
+ * invocation of the function value. Returns null when the receiver is not a
+ * plain function value, `this` is anything else, or the argument list is not
+ * statically known — those keep the existing refusal. */
+function lowerNullishThisInvoke(
+  lowerer: Lowerer,
+  call: ts.CallExpression,
+  access: ts.PropertyAccessExpression,
+  name: string,
+): IrExpr | null {
+  if (name !== "call" && name !== "apply" && name !== "bind") return null;
+  if (call.arguments.some((a) => ts.isSpreadElement(a))) return null;
+  const thisArg = call.arguments[0];
+  if (thisArg === undefined || !isNullishLiteral(lowerer, thisArg)) return null;
+
+  // `f.bind(nullish)` with nothing to partially apply is `f` itself.
+  // Partial application needs a capture box the expression path cannot
+  // introduce, so it keeps the refusal.
+  if (name === "bind") {
+    if (call.arguments.length !== 1) return null;
+    const fn = lowerer.lowerExpr(access.expression);
+    return fn.type.kind === "func" ? fn : null;
+  }
+
+  let argNodes: readonly ts.Expression[];
+  if (name === "call") {
+    argNodes = call.arguments.slice(1);
+  } else {
+    if (call.arguments.length > 2) return null;
+    const list = call.arguments[1];
+    if (list === undefined) argNodes = [];
+    else if (ts.isArrayLiteralExpression(list) && !list.elements.some((e) => ts.isSpreadElement(e))) {
+      argNodes = list.elements;
+    } else return null;
+  }
+
+  const callee = lowerer.lowerExpr(access.expression);
+  const ft = callee.type;
+  if (ft.kind !== "func" || ft.rest === true) return null;
+  if (ft.params.length !== argNodes.length) return null;
+
+  const args = argNodes.map((a) => lowerer.lowerExpr(a));
+  for (let i = 0; i < args.length; i++) {
+    if (!typeEquals(args[i]!.type, ft.params[i]!)) return null;
+  }
+  return { kind: "callValue", callee, args, type: ft.ret, loc: locOf(call) };
+}
+
+function isNullishLiteral(lowerer: Lowerer, e: ts.Expression): boolean {
+  if (e.kind === ts.SyntaxKind.NullKeyword) return true;
+  if (ts.isIdentifier(e) && e.text === "undefined") return true;
+  const mapped = lowerer.mapTypeOf(lowerer.typeOf(e));
+  return mapped !== null && (mapped.kind === "undefinedT" || mapped.kind === "nullT");
+}
+
 export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
     const loc = locOf(expr);
 
@@ -8752,10 +8807,16 @@ export function lowerFunction(lowerer: Lowerer, decl: ts.FunctionDeclaration): I
         (name === "apply" || name === "call" || name === "bind") &&
         lowerer.checker.getCallSignatures(recvT).length > 0
       ) {
+        // A nullish `this` re-routes to nothing, so the call IS the direct
+        // call: `f.call(null, a, b)` and `f.apply(null, [a, b])` invoke the
+        // function value with a statically known argument list. Any other
+        // `this` still has nowhere to go.
+        const direct = lowerNullishThisInvoke(lowerer, call, access, name);
+        if (direct !== null) return direct;
         lowerer.unsupported(
           "SC1090",
           call,
-          `Function.prototype.${name} on a compiled function value (compiled calls are direct — no runtime 'this' or arguments object exists to re-route; spell the call directly: '${access.expression.getText()}(...)')`,
+          `Function.prototype.${name} on a compiled function value in this form (compiled calls are direct — no runtime 'this' or arguments object exists to re-route; a nullish 'this' does lower: f.call(null, a, b), f.apply(null, [a, b]), f.bind(null); otherwise spell the call directly: '${access.expression.getText()}(...)')`,
         );
       }
       // STANDARD-LIBRARY generic members (Promise.then, Object.

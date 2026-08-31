@@ -1356,6 +1356,11 @@ function emitStringExpr(
             );
           case "repeat":
             return emitter.newTemp(e.type, `scr_str_repeat(${r.name}, ${args[0]!.name})`);
+          case "replaceAll":
+            return emitter.newTemp(
+              e.type,
+              `scr_str_replace_all(${r.name}, ${args[0]!.name}, ${args[1]!.name})`,
+            );
           case "trim":
             return emitter.newTemp(e.type, `scr_str_trim(${r.name})`);
           case "trimStart":

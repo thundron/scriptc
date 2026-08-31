@@ -931,6 +931,113 @@ bool scr_str_includes(ScrStr *s, ScrStr *needle) {
   return scr_byte_find(s->data, s->len, needle->data, needle->len) != NULL;
 }
 
+static size_t scr_replace_size_add(size_t total, size_t add) {
+  if (SIZE_MAX - total < add) scr_oom();
+  return total + add;
+}
+
+static size_t scr_replace_template_size(ScrStr *source, ScrStr *needle,
+                                        ScrStr *replacement, size_t at) {
+  size_t n = 0;
+  for (size_t i = 0; i < replacement->len; i++) {
+    if (replacement->data[i] != '$' || i + 1 >= replacement->len) {
+      n = scr_replace_size_add(n, 1);
+      continue;
+    }
+    char next = replacement->data[i + 1];
+    if (next == '$') n = scr_replace_size_add(n, 1);
+    else if (next == '&') n = scr_replace_size_add(n, needle->len);
+    else if (next == '`') n = scr_replace_size_add(n, at);
+    else if (next == '\'') n = scr_replace_size_add(n, source->len - at - needle->len);
+    else {
+      n = scr_replace_size_add(n, 1);
+      continue;
+    }
+    i++;
+  }
+  return n;
+}
+
+static size_t scr_replace_template_write(char *out, size_t offset,
+                                         ScrStr *source, ScrStr *needle,
+                                         ScrStr *replacement, size_t at) {
+  for (size_t i = 0; i < replacement->len; i++) {
+    if (replacement->data[i] != '$' || i + 1 >= replacement->len) {
+      out[offset++] = replacement->data[i];
+      continue;
+    }
+    char next = replacement->data[i + 1];
+    const char *data = NULL;
+    size_t len = 0;
+    if (next == '$') {
+      out[offset++] = '$';
+      i++;
+      continue;
+    }
+    if (next == '&') {
+      data = needle->data;
+      len = needle->len;
+    } else if (next == '`') {
+      data = source->data;
+      len = at;
+    } else if (next == '\'') {
+      data = source->data + at + needle->len;
+      len = source->len - at - needle->len;
+    } else {
+      out[offset++] = '$';
+      continue;
+    }
+    memcpy(out + offset, data, len);
+    offset += len;
+    i++;
+  }
+  return offset;
+}
+
+ScrStr *scr_str_replace_all(ScrStr *source, ScrStr *needle,
+                            ScrStr *replacement) {
+  if (needle->len == 0) {
+    scr_trap("scriptc: replaceAll with an empty string pattern is not supported\n");
+  }
+  const char *first = scr_byte_find(source->data, source->len,
+                                    needle->data, needle->len);
+  if (!first) {
+    scr_str_retain(source);
+    return source;
+  }
+  size_t total = 0;
+  size_t cursor = 0;
+  const char *found = first;
+  while (found) {
+    size_t at = (size_t)(found - source->data);
+    total = scr_replace_size_add(total, at - cursor);
+    total = scr_replace_size_add(
+        total, scr_replace_template_size(source, needle, replacement, at));
+    cursor = at + needle->len;
+    found = scr_byte_find(source->data + cursor, source->len - cursor,
+                          needle->data, needle->len);
+  }
+  total = scr_replace_size_add(total, source->len - cursor);
+
+  ScrStr *out = scr_str_alloc_raw(total, total);
+  size_t offset = 0;
+  cursor = 0;
+  found = first;
+  while (found) {
+    size_t at = (size_t)(found - source->data);
+    memcpy(out->data + offset, source->data + cursor, at - cursor);
+    offset += at - cursor;
+    offset = scr_replace_template_write(out->data, offset, source, needle,
+                                        replacement, at);
+    cursor = at + needle->len;
+    found = scr_byte_find(source->data + cursor, source->len - cursor,
+                          needle->data, needle->len);
+  }
+  memcpy(out->data + offset, source->data + cursor, source->len - cursor);
+  out->data[total] = '\0';
+  return out;
+}
+
 bool scr_str_starts_with(ScrStr *s, ScrStr *needle) {
   return needle->len <= s->len &&
          memcmp(s->data, needle->data, needle->len) == 0;

@@ -5544,6 +5544,16 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
         call,
       );
     }
+    if (entry.method === "replaceAll") {
+      const pattern = call.arguments[0]!;
+      if (!ts.isStringLiteralLike(pattern) || pattern.text.length === 0) {
+        lowerer.noLowering(
+          ".replaceAll with a dynamic or empty string pattern",
+          call,
+          "static replaceAll supports a non-empty string literal pattern; regex literals use the regex lowering",
+        );
+      }
+    }
     const receiver = dynReceiver ? dynReceiver() : lowerer.lowerExpr(access.expression);
     const args = entry.method === "split"
       ? [lowerer.lowerExpr(call.arguments[0]!), lowerSplitLimitArg(lowerer, call.arguments[1], locOf(call))]

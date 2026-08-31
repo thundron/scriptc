@@ -39,6 +39,7 @@ export const STR_INTRINSIC_SIGS: Record<
   slice: { argTypes: [F64, F64], minArgs: 0, result: STRING },
   substring: { argTypes: [F64, F64], minArgs: 1, result: STRING },
   repeat: { argTypes: [F64], minArgs: 1, result: STRING },
+  replaceAll: { argTypes: [STRING, STRING], minArgs: 2, result: STRING },
   trim: { argTypes: [], minArgs: 0, result: STRING },
   trimStart: { argTypes: [], minArgs: 0, result: STRING },
   trimEnd: { argTypes: [], minArgs: 0, result: STRING },

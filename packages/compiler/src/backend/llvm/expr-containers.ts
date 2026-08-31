@@ -138,6 +138,14 @@ export function emitStrIntrinsic(host: LlvmEmitterContext, e: IrExpr & { kind: "
         );
       case "repeat":
         return call("scr_str_repeat", "ptr (ptr, double)", `ptr ${r.name}, double ${args[0]!.name}`, "ptr", true);
+      case "replaceAll":
+        return call(
+          "scr_str_replace_all",
+          "ptr (ptr, ptr, ptr)",
+          `ptr ${r.name}, ptr ${args[0]!.name}, ptr ${args[1]!.name}`,
+          "ptr",
+          true,
+        );
       case "trim":
         return call("scr_str_trim", "ptr (ptr)", `ptr ${r.name}`, "ptr", true);
       case "trimStart":

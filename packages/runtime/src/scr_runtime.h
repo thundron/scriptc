@@ -660,6 +660,11 @@ double scr_str_last_index_of(ScrStr *s, ScrStr *needle);
 /* includes(needle) — no position argument. Empty needle → true. */
 bool scr_str_includes(ScrStr *s, ScrStr *needle);
 
+/* replaceAll(pattern, replacement) for a non-empty string pattern.
+ * Replacement templates support $$, $&, $`, and $'. Returns +1. */
+ScrStr *scr_str_replace_all(ScrStr *source, ScrStr *needle,
+                            ScrStr *replacement);
+
 /* startsWith(needle) / endsWith(needle) — no position argument. */
 bool scr_str_starts_with(ScrStr *s, ScrStr *needle);
 bool scr_str_ends_with(ScrStr *s, ScrStr *needle);

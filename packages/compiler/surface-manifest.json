@@ -3591,8 +3591,8 @@
       "id": "stdlib.string.replaceAll",
       "kind": "stdlib",
       "name": "string.prototype.replaceAll",
-      "status": "dynamic-only",
-      "code": "SC2012"
+      "status": "static",
+      "note": "the lowered call form takes exactly 2 arguments"
     },
     {
       "id": "stdlib.string.slice",

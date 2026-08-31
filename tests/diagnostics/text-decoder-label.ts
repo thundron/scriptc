@@ -1,3 +1,5 @@
+import { TextDecoder as UtilTextDecoder } from "node:util";
+
 const bytes = new Uint8Array([0x41]);
 
 const runtimeLabel: string = process.argv[2] ?? "utf-8";
@@ -8,6 +10,9 @@ console.log(new TextDecoder("replacement").decode(bytes));
 
 // Vertical tab is not WHATWG ASCII whitespace and must not be trimmed.
 console.log(new TextDecoder("\vutf-8").decode(bytes));
+
+console.log(new UtilTextDecoder("utf-8", { fatal: false }).decode(bytes));
+console.log(new UtilTextDecoder("windows-1252", { fatal: true }).decode(bytes));
 
 // A literal-typed variable read is still runtime constructor evaluation. Do
 // not drop its TDZ behavior after selecting the static decoder id.

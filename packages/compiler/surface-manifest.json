@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "compilerVersion": "0.0.35",
+  "compilerVersion": "0.0.36",
   "coverage": [
     "Entries are projected mechanically from the compiler's own decision tables: the diagnostics registry, the unsupported-syntax dispatch tables, the stdlib and node-builtin lowering tables, and the supported-builtin-module list. Nothing is hand-maintained; the manifest regenerates byte-identically from the source tree at this version.",
     "Absence from this manifest means 'not projected', never 'unsupported'. Surfaces lowered through dedicated code paths rather than tables are not yet projected: console, JSON, Promise/async and the timer surface, the net/http/tls/https/dgram/dns/assert/test/stream/readline module member surfaces, template literals, the regex slice, global functions (parseInt, parseFloat, isNaN, isFinite), and the process surface outside its ambient slice.",
@@ -2603,56 +2603,56 @@
       "kind": "stdlib",
       "name": "Math.E",
       "status": "static",
-      "note": "folds to its literal value"
+      "note": "the constant read compiles to a numeric literal; no runtime Math read is performed"
     },
     {
       "id": "stdlib.math.LN10",
       "kind": "stdlib",
       "name": "Math.LN10",
       "status": "static",
-      "note": "folds to its literal value"
+      "note": "the constant read compiles to a numeric literal; no runtime Math read is performed"
     },
     {
       "id": "stdlib.math.LN2",
       "kind": "stdlib",
       "name": "Math.LN2",
       "status": "static",
-      "note": "folds to its literal value"
+      "note": "the constant read compiles to a numeric literal; no runtime Math read is performed"
     },
     {
       "id": "stdlib.math.LOG10E",
       "kind": "stdlib",
       "name": "Math.LOG10E",
       "status": "static",
-      "note": "folds to its literal value"
+      "note": "the constant read compiles to a numeric literal; no runtime Math read is performed"
     },
     {
       "id": "stdlib.math.LOG2E",
       "kind": "stdlib",
       "name": "Math.LOG2E",
       "status": "static",
-      "note": "folds to its literal value"
+      "note": "the constant read compiles to a numeric literal; no runtime Math read is performed"
     },
     {
       "id": "stdlib.math.PI",
       "kind": "stdlib",
       "name": "Math.PI",
       "status": "static",
-      "note": "folds to its literal value"
+      "note": "the constant read compiles to a numeric literal; no runtime Math read is performed"
     },
     {
       "id": "stdlib.math.SQRT1_2",
       "kind": "stdlib",
       "name": "Math.SQRT1_2",
       "status": "static",
-      "note": "folds to its literal value"
+      "note": "the constant read compiles to a numeric literal; no runtime Math read is performed"
     },
     {
       "id": "stdlib.math.SQRT2",
       "kind": "stdlib",
       "name": "Math.SQRT2",
       "status": "static",
-      "note": "folds to its literal value"
+      "note": "the constant read compiles to a numeric literal; no runtime Math read is performed"
     },
     {
       "id": "stdlib.math.abs",

@@ -1196,6 +1196,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/1542-array-fill.ts": {
+   "order": [
+    "<repo>/tests/corpus/1542-array-fill.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/1542-map-promise-values.ts": {
    "order": [
     "<repo>/tests/corpus/1542-map-promise-values.ts"
@@ -1205,6 +1211,12 @@
   "<repo>/tests/corpus/1542-record-literal-into-union.ts": {
    "order": [
     "<repo>/tests/corpus/1542-record-literal-into-union.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/1543-array-flat.ts": {
+   "order": [
+    "<repo>/tests/corpus/1543-array-flat.ts"
    ],
    "diags": []
   },
@@ -1226,9 +1238,21 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/1544-fs-promises-async.ts": {
+   "order": [
+    "<repo>/tests/corpus/1544-fs-promises-async.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/1544-string-matchall.ts": {
    "order": [
     "<repo>/tests/corpus/1544-string-matchall.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/1545-fn-call-apply-bind.ts": {
+   "order": [
+    "<repo>/tests/corpus/1545-fn-call-apply-bind.ts"
    ],
    "diags": []
   },
@@ -5682,6 +5706,18 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2693-string-replace-all-path-posix.ts": {
+   "order": [
+    "<repo>/tests/corpus/2693-string-replace-all-path-posix.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2694-weakmap-concrete-keys.ts": {
+   "order": [
+    "<repo>/tests/corpus/2694-weakmap-concrete-keys.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2695-borrowed-receiver-ownership.ts": {
    "order": [
     "<repo>/tests/corpus/2695-borrowed-receiver-ownership.ts"
@@ -6705,6 +6741,12 @@
   "<repo>/tests/corpus/998-process-env.ts": {
    "order": [
     "<repo>/tests/corpus/998-process-env.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/bitwise-edge.ts": {
+   "order": [
+    "<repo>/tests/corpus/bitwise-edge.ts"
    ],
    "diags": []
   },
@@ -7871,6 +7913,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/diagnostics/string-replaceall-pattern.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/string-replaceall-pattern.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/diagnostics/text-codec-value.ts": {
    "order": [
     "<repo>/tests/diagnostics/text-codec-value.ts"
@@ -7963,6 +8011,12 @@
   "<repo>/tests/diagnostics/var-fences.ts": {
    "order": [
     "<repo>/tests/diagnostics/var-fences.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/diagnostics/weakmap-limits.ts": {
+   "order": [
+    "<repo>/tests/diagnostics/weakmap-limits.ts"
    ],
    "diags": []
   },

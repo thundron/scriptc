@@ -3532,6 +3532,13 @@
       "note": "the lowered call form takes exactly 1 argument"
     },
     {
+      "id": "stdlib.string.codePointAt",
+      "kind": "stdlib",
+      "name": "string.prototype.codePointAt",
+      "status": "static",
+      "note": "the lowered call form takes exactly 1 argument"
+    },
+    {
       "id": "stdlib.string.endsWith",
       "kind": "stdlib",
       "name": "string.prototype.endsWith",
@@ -3584,8 +3591,8 @@
       "id": "stdlib.string.replace",
       "kind": "stdlib",
       "name": "string.prototype.replace",
-      "status": "dynamic-only",
-      "code": "SC2012"
+      "status": "static",
+      "note": "the lowered call form takes exactly 2 arguments"
     },
     {
       "id": "stdlib.string.replaceAll",

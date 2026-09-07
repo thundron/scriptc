@@ -5554,6 +5554,14 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
         );
       }
     }
+    if ((entry.method === "replace" || entry.method === "replaceAll") &&
+        lowerer.mapTypeOf(lowerer.typeOf(call.arguments[1]!))?.kind !== "string") {
+      lowerer.unsupported(
+        "SC1120",
+        call.arguments[1]!,
+        "function replacement values (replacements must be strings)",
+      );
+    }
     const receiver = dynReceiver ? dynReceiver() : lowerer.lowerExpr(access.expression);
     const args = entry.method === "split"
       ? [lowerer.lowerExpr(call.arguments[0]!), lowerSplitLimitArg(lowerer, call.arguments[1], locOf(call))]
@@ -5573,12 +5581,20 @@ const ITER_TERMINALS = new Set(["toArray", "forEach", "reduce", "some", "every",
     if ((entry.method === "padStart" || entry.method === "padEnd") && args.length === 1) {
       args.push({ kind: "strLit", value: " ", type: STRING, loc: locOf(call) });
     }
+    let result = entry.result;
+    if (entry.method === "codePointAt") {
+      const mapped = lowerer.mapTypeOf(lowerer.typeOf(call));
+      if (dynReceiver !== undefined || mapped?.kind !== "union") {
+        lowerer.noLowering("string.codePointAt on a value without its number | undefined result", call);
+      }
+      result = mapped;
+    }
     return {
       kind: "strIntrinsic",
       method: entry.method,
       receiver,
       args,
-      type: entry.result,
+      type: result,
       loc: locOf(call),
     };
   }

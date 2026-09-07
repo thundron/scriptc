@@ -648,6 +648,14 @@ double scr_str_utf16_len(ScrStr *s);
  * [0, length) — note charCodeAt(1.5) is index 1, matching Node. */
 double scr_str_char_code_at(ScrStr *s, double i);
 
+/* codePointAt(i): the Unicode scalar at a leading UTF-16 position, the low
+ * surrogate at a trailing position, or the supplied undefined union arm
+ * outside [0, length). Returns +1. */
+struct ScrUnion;
+struct ScrUnion *scr_str_code_point_at_union(ScrStr *s, double i,
+                                             uint32_t number_tag,
+                                             struct ScrUnion *absent);
+
 /* indexOf(needle, fromIndex): UTF-16 index of the first occurrence at or
  * after fromIndex (clamped to [0, length]), or -1. Empty needle returns the
  * clamped fromIndex per spec. */
@@ -660,8 +668,10 @@ double scr_str_last_index_of(ScrStr *s, ScrStr *needle);
 /* includes(needle) — no position argument. Empty needle → true. */
 bool scr_str_includes(ScrStr *s, ScrStr *needle);
 
-/* replaceAll(pattern, replacement) for a non-empty string pattern.
- * Replacement templates support $$, $&, $`, and $'. Returns +1. */
+/* replace/replaceAll with string patterns. Replacement templates support
+ * $$, $&, $`, and $'. Returns +1. */
+ScrStr *scr_str_replace(ScrStr *source, ScrStr *needle,
+                        ScrStr *replacement);
 ScrStr *scr_str_replace_all(ScrStr *source, ScrStr *needle,
                             ScrStr *replacement);
 

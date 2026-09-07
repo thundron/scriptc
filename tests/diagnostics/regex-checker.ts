@@ -1,5 +1,5 @@
-// Checker-level regex fences: function replacements — tsc rejects them
-// before lowering starts. (exec lowers through the match intrinsic and
-// `new RegExp(pattern, flags)` compiles now, so neither appears here.)
+// Function replacements remain outside the static string and regex paths.
+// exec lowers through the match intrinsic and RegExp construction compiles.
 const m = /a(b)/.exec("ab");
-const fn = "abc".replace(/b/, (s: string) => s);
+const regexFn = "abc".replace(/b/, (s: string) => s);
+const stringFn = "abc".replace("b", (s: string) => s);

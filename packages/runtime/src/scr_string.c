@@ -890,6 +890,23 @@ double scr_str_char_code_at(ScrStr *s, double i) {
   return mid ? (double)(0xDC00 + (v & 0x3FF)) : (double)(0xD800 + (v >> 10));
 }
 
+ScrUnion *scr_str_code_point_at_union(ScrStr *s, double i,
+                                      uint32_t number_tag, ScrUnion *absent) {
+  double idx = scr_to_integer_or_infinity(i);
+  if (!(idx >= 0) || idx >= (double)s->len) return scr_union_retain(absent);
+  ScrSidx *e = scr_sidx(s);
+  if (e->u16len == s->len) {
+    return scr_union_new_f64(number_tag, (double)(unsigned char)s->data[(size_t)idx]);
+  }
+  bool mid;
+  size_t off = scr_u16_to_byte_c(s, e, (size_t)idx, &mid);
+  if (off >= s->len) return scr_union_retain(absent);
+  size_t adv;
+  uint32_t cp = scr_utf8_decode(s->data + off, &adv);
+  if (mid && cp >= 0x10000) cp = 0xDC00 + ((cp - 0x10000) & 0x3FF);
+  return scr_union_new_f64(number_tag, (double)cp);
+}
+
 double scr_str_index_of(ScrStr *s, ScrStr *needle, double fromIndex) {
   double pos = scr_to_integer_or_infinity(fromIndex);
   ScrSidx *e = scr_sidx(s);
@@ -992,6 +1009,28 @@ static size_t scr_replace_template_write(char *out, size_t offset,
     i++;
   }
   return offset;
+}
+
+ScrStr *scr_str_replace(ScrStr *source, ScrStr *needle,
+                        ScrStr *replacement) {
+  const char *found = scr_byte_find(source->data, source->len,
+                                    needle->data, needle->len);
+  if (!found) {
+    scr_str_retain(source);
+    return source;
+  }
+  size_t at = (size_t)(found - source->data);
+  size_t total = scr_replace_size_add(at,
+      scr_replace_template_size(source, needle, replacement, at));
+  total = scr_replace_size_add(total, source->len - at - needle->len);
+  ScrStr *out = scr_str_alloc_raw(total, total);
+  memcpy(out->data, source->data, at);
+  size_t offset = scr_replace_template_write(out->data, at, source, needle,
+                                              replacement, at);
+  memcpy(out->data + offset, source->data + at + needle->len,
+         source->len - at - needle->len);
+  out->data[total] = '\0';
+  return out;
 }
 
 ScrStr *scr_str_replace_all(ScrStr *source, ScrStr *needle,

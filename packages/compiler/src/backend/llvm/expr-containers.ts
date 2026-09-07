@@ -90,6 +90,21 @@ export function emitStrIntrinsic(host: LlvmEmitterContext, e: IrExpr & { kind: "
         return call("scr_str_utf16_len", "double (ptr)", `ptr ${r.name}`, "double", false);
       case "charCodeAt":
         return call("scr_str_char_code_at", "double (ptr, double)", `ptr ${r.name}, double ${args[0]!.name}`, "double", false);
+      case "codePointAt": {
+        if (e.type.kind !== "union") throw new InternalCompilerError("llvm emitter bug: codePointAt result");
+        const def = host.unionsById.get(e.type.unionId);
+        const undefTag = undefinedArmTag(e.type, host.unionsById);
+        const numberTag = def?.arms.findIndex((a) => a.kind === "f64") ?? -1;
+        if (!def || undefTag < 0 || numberTag < 0) throw new InternalCompilerError("llvm emitter bug: codePointAt union");
+        const absent = host.unitInstanceRef(e.type.unionId, undefTag);
+        return call(
+          "scr_str_code_point_at_union",
+          "ptr (ptr, double, i32, ptr)",
+          `ptr ${r.name}, double ${args[0]!.name}, i32 ${numberTag}, ptr ${absent}`,
+          "ptr",
+          true,
+        );
+      }
       case "charAt":
         return call("scr_str_char_at", "ptr (ptr, double)", `ptr ${r.name}, double ${args[0]!.name}`, "ptr", true);
       case "indexOf":
@@ -138,6 +153,14 @@ export function emitStrIntrinsic(host: LlvmEmitterContext, e: IrExpr & { kind: "
         );
       case "repeat":
         return call("scr_str_repeat", "ptr (ptr, double)", `ptr ${r.name}, double ${args[0]!.name}`, "ptr", true);
+      case "replace":
+        return call(
+          "scr_str_replace",
+          "ptr (ptr, ptr, ptr)",
+          `ptr ${r.name}, ptr ${args[0]!.name}, ptr ${args[1]!.name}`,
+          "ptr",
+          true,
+        );
       case "replaceAll":
         return call(
           "scr_str_replace_all",

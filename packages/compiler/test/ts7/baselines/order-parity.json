@@ -5682,6 +5682,24 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2695-borrowed-receiver-ownership.ts": {
+   "order": [
+    "<repo>/tests/corpus/2695-borrowed-receiver-ownership.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2696-textdecoder-fatal-utf8.ts": {
+   "order": [
+    "<repo>/tests/corpus/2696-textdecoder-fatal-utf8.ts"
+   ],
+   "diags": []
+  },
+  "<repo>/tests/corpus/2697-string-codepoint-replace.ts": {
+   "order": [
+    "<repo>/tests/corpus/2697-string-codepoint-replace.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2700-wasi-core.ts": {
    "order": [
     "<repo>/tests/corpus/2700-wasi-core.ts"

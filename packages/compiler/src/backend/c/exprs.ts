@@ -1306,6 +1306,18 @@ function emitStringExpr(
             return emitter.newTemp(e.type, `scr_str_utf16_len(${r.name})`);
           case "charCodeAt":
             return emitter.newTemp(e.type, `scr_str_char_code_at(${r.name}, ${args[0]!.name})`);
+          case "codePointAt": {
+            if (e.type.kind !== "union") throw new InternalCompilerError("emitter bug: codePointAt result");
+            const def = emitter.unionsById.get(e.type.unionId);
+            const undefTag = undefinedArmTag(e.type, emitter.unionsById);
+            const numberTag = def?.arms.findIndex((a) => a.kind === "f64") ?? -1;
+            if (!def || undefTag < 0 || numberTag < 0) throw new InternalCompilerError("emitter bug: codePointAt union");
+            const absent = emitter.unitInstanceRef(e.type.unionId, undefTag);
+            return emitter.newTemp(
+              e.type,
+              `scr_str_code_point_at_union(${r.name}, ${args[0]!.name}, ${numberTag}, ${absent})`,
+            );
+          }
           case "charAt":
             return emitter.newTemp(e.type, `scr_str_char_at(${r.name}, ${args[0]!.name})`);
           case "indexOf":
@@ -1339,6 +1351,11 @@ function emitStringExpr(
             );
           case "repeat":
             return emitter.newTemp(e.type, `scr_str_repeat(${r.name}, ${args[0]!.name})`);
+          case "replace":
+            return emitter.newTemp(
+              e.type,
+              `scr_str_replace(${r.name}, ${args[0]!.name}, ${args[1]!.name})`,
+            );
           case "replaceAll":
             return emitter.newTemp(
               e.type,

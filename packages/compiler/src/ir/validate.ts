@@ -31,6 +31,7 @@ export const STR_INTRINSIC_SIGS: Record<
 > = {
   length: { argTypes: [], minArgs: 0, result: F64 },
   charCodeAt: { argTypes: [F64], minArgs: 1, result: F64 },
+  codePointAt: { argTypes: [F64], minArgs: 1, result: F64 },
   charAt: { argTypes: [F64], minArgs: 1, result: STRING },
   indexOf: { argTypes: [STRING, F64], minArgs: 1, result: F64 },
   includes: { argTypes: [STRING, F64], minArgs: 1, result: BOOL },
@@ -39,6 +40,7 @@ export const STR_INTRINSIC_SIGS: Record<
   slice: { argTypes: [F64, F64], minArgs: 0, result: STRING },
   substring: { argTypes: [F64, F64], minArgs: 1, result: STRING },
   repeat: { argTypes: [F64], minArgs: 1, result: STRING },
+  replace: { argTypes: [STRING, STRING], minArgs: 2, result: STRING },
   replaceAll: { argTypes: [STRING, STRING], minArgs: 2, result: STRING },
   trim: { argTypes: [], minArgs: 0, result: STRING },
   trimStart: { argTypes: [], minArgs: 0, result: STRING },
@@ -2292,7 +2294,13 @@ function validateFunction(
           const want = sig.argTypes[i];
           if (want) expectType(a, want, `strIntrinsic ${e.method} arg ${i}`);
         });
-        if (!typeEquals(e.type, sig.result)) {
+        if (e.method === "codePointAt") {
+          const def = e.type.kind === "union" ? unions.get(e.type.unionId) : undefined;
+          if (!def || def.arms.length !== 2 || !def.arms.some((a) => a.kind === "f64") ||
+              !def.arms.some((a) => a.kind === "undefinedT")) {
+            err(`strIntrinsic codePointAt must be f64|undefined, got ${e.type.kind}`, e.loc);
+          }
+        } else if (!typeEquals(e.type, sig.result)) {
           err(`strIntrinsic ${e.method} must be ${sig.result.kind}, got ${e.type.kind}`, e.loc);
         }
         break;

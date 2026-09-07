@@ -272,6 +272,7 @@ export function generateSurfaceManifest(compilerVersion: string): SurfaceManifes
     }
   }
   for (const name of Object.keys(ISLAND_SURFACE.string)) {
+    if (Object.hasOwn(STR_METHODS, name)) continue;
     add({
       id: `stdlib.string.${name}`,
       kind: "stdlib",

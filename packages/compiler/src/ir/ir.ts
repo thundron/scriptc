@@ -4539,11 +4539,11 @@ export type IrExpr =
    * out with the tail sliding down; the result type is the interned
    * `elem | undefined` union — union ELEMENTS are frontend-fenced, so the
    * arms never collide; ref ownership moves out into the box), and
-   * `splice` (the REMOVAL forms only — one or two f64 args, Node's
-   * relative/clamped start and clamped count, an omitted count removes to
-   * the end [backends fill +Infinity, the slice convention]; the result is
-   * a fresh +1 array of the removed elements IN ORDER, their ownership
-   * MOVED from the receiver; insertion forms are frontend-fenced), and
+   * `splice` (one or two f64 args, plus optionally one elem-typed insertion;
+   * Node's relative/clamped start and clamped count, an omitted count removes
+   * to the end; the result is a fresh +1 array of removed elements, their
+   * ownership moved from the receiver, while inserted ownership moves in;
+   * multiple-item insertion is frontend-fenced), and
    * `reverse` (zero args; swaps the receiver's slots in place and returns
    * the same array identity as an owned reference). */
   | {

@@ -2581,7 +2581,7 @@ function validateFunction(
                       : e.method === "with"
                         ? { argTypes: [F64, elem], result: e.receiver.type }
                   : e.method === "splice"
-                    ? { argTypes: [F64, F64], result: e.receiver.type }
+                    ? { argTypes: [F64, F64, elem], result: e.receiver.type }
                       : e.method === "fill"
                         ? { argTypes: [elem, F64, F64], result: e.receiver.type }
                         : e.method === "shift"

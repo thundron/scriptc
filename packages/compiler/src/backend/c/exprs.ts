@@ -1696,12 +1696,17 @@ function emitContainerExpr(
             return out;
           }
           case "splice": {
-            // The removal splice: the removed elements come back as a
-            // fresh +1 array, their ownership MOVED out of the receiver
-            // (no retain/release churn). An omitted count removes to the
-            // end (+Infinity, the slice convention).
             const start = emitter.emitExpr(e.args[0]!);
-            const cnt = e.args[1] ? emitter.emitExpr(e.args[1]).name : "INFINITY";
+            const count = e.args[1] ? emitter.emitExpr(e.args[1]) : null;
+            const item = e.args[2] ? emitter.emitExpr(e.args[2]) : null;
+            const cnt = count?.name ?? "INFINITY";
+            if (item) {
+              if (acc === "ref") emitter.moveTemp(item);
+              return emitter.newTemp(
+                e.type,
+                `scr_arr_splice_one_${acc}(${r.name}, ${start.name}, ${cnt}, ${item.name})`,
+              );
+            }
             return emitter.newTemp(e.type, `scr_arr_splice(${r.name}, ${start.name}, ${cnt})`);
           }
           case "fill": {

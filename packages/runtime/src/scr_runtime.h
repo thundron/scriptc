@@ -1028,11 +1028,13 @@ double scr_arr_shift_f64(ScrArr *a);
 bool scr_arr_shift_bool(ScrArr *a);
 void *scr_arr_shift_ref(ScrArr *a);
 
-/* splice(start, deleteCount) — the REMOVAL forms: Node-exact
- * relative/clamped start, count clamped to [0, len - start] (+Infinity =
- * to the end). Returns the removed elements in order as a fresh +1 array,
- * ownership MOVED out of the receiver. Borrows a. */
+/* splice removal and one-item insertion: Node-exact relative/clamped
+ * indices. Removed ownership moves to the returned array; inserted
+ * ownership moves into the receiver. deleteCount=+Infinity means omitted. */
 ScrArr *scr_arr_splice(ScrArr *a, double start, double deleteCount);
+ScrArr *scr_arr_splice_one_f64(ScrArr *a, double start, double deleteCount, double item);
+ScrArr *scr_arr_splice_one_bool(ScrArr *a, double start, double deleteCount, bool item);
+ScrArr *scr_arr_splice_one_ref(ScrArr *a, double start, double deleteCount, void *item);
 
 /* indexOf: first index whose element strictly equals (JS ===) the needle,
  * or -1. Per element kind: f64 by value (NaN never matches — NaN !== NaN;

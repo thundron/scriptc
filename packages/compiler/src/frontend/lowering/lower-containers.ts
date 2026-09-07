@@ -322,7 +322,7 @@ function fenceProducedArrayElem(lowerer: Lowerer, node: ts.Node, producer: strin
     const arity = {
       push: [0, Number.MAX_SAFE_INTEGER], unshift: [0, Number.MAX_SAFE_INTEGER], pop: [0, 0], indexOf: [1, 1], includes: [1, 1], join: [1, 1],
       concat: [0, Number.MAX_SAFE_INTEGER],
-      slice: [0, 2], shift: [0, 0], splice: [1, 2], at: [1, 1], fill: [1, 3], flat: [0, 1],
+      slice: [0, 2], shift: [0, 0], splice: [1, 3], at: [1, 1], fill: [1, 3], flat: [0, 1],
       map: [1, 1], filter: [1, 1], forEach: [1, 1], find: [1, 1], findIndex: [1, 1], some: [1, 1],
       findLast: [1, 1], findLastIndex: [1, 1],
       every: [1, 1], flatMap: [1, 1], reduce: [1, 2], reduceRight: [1, 2],
@@ -334,7 +334,7 @@ function fenceProducedArrayElem(lowerer: Lowerer, node: ts.Node, producer: strin
     if (call.arguments.length < arity[0]! || call.arguments.length > arity[1]!) {
       const hint =
         name === "splice"
-          ? "the removal forms lower — splice(start, deleteCount?); to insert, build a new array with slice and push"
+          ? "the removal forms and one-item insertion lower — splice(start, deleteCount?, item)"
           : name === "join"
             ? 'pass the separator explicitly: join(",")'
             : name === "indexOf" || name === "includes"
@@ -519,14 +519,20 @@ function fenceProducedArrayElem(lowerer: Lowerer, node: ts.Node, producer: strin
       return lowerArrayFlatCall(lowerer, call, access, elem, receiverIr);
     }
     if (name === "splice") {
-      // The REMOVAL forms: splice(start) and splice(start, deleteCount) —
-      // Node-exact relative/clamped indices, the removed elements back in
-      // order (their ownership moves out of the receiver). Insertion
-      // (3+ args) fenced by arity above.
+      // Removal plus the fixed one-item insertion form. Removed element
+      // ownership moves into the returned array; an inserted reference
+      // moves from the argument into the receiver.
       const receiver = lowerer.lowerExpr(access.expression);
-      const args = call.arguments.map((a) => lowerer.lowerExpr(a));
-      for (let i = 0; i < args.length; i++) {
-        if (args[i]!.type.kind !== "f64") lowerer.badType(call.arguments[i]!, lowerer.typeOf(call.arguments[i]!));
+      const args: IrExpr[] = [];
+      const indices = call.arguments.slice(0, 2);
+      for (let i = 0; i < indices.length; i++)
+        args.push(lowerer.lowerExprExpecting(indices[i]!, F64));
+      if (call.arguments[2]) {
+        args.push(lowerer.coerceInto(
+          call.arguments[2]!,
+          lowerer.lowerExpr(call.arguments[2]!),
+          elem,
+        ));
       }
       return { kind: "arrIntrinsic", method: "splice", receiver, args, type: receiverIr, loc };
     }

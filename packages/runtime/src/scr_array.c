@@ -418,19 +418,17 @@ bool scr_arr_shift_bool(ScrArr *a) { return scr_arr_shift_slot(a) != 0; }
 
 void *scr_arr_shift_ref(ScrArr *a) { return scr_slot_to_ptr(scr_arr_shift_slot(a)); }
 
-/* ── splice (the removal forms) ────────────────────────────────────────
- * a.splice(start, deleteCount) with Node's exact index handling: start
- * goes through ToIntegerOrInfinity with negative-from-the-end resolution
- * and clamps to [0, len]; deleteCount clamps to [0, len - start] (the
- * omitted-count form passes +Infinity — remove to the end). The removed
- * elements come back as a fresh +1 array IN ORDER, their ownership MOVED
- * out of the receiver (no retain/release churn); the tail slides down.
- * Borrows a. */
-ScrArr *scr_arr_splice(ScrArr *a, double start, double deleteCount) {
-  double len = (double)a->len;
+/* ── splice ─────────────────────────────────────────────────────────────
+ * Removal and one-item insertion with Node's relative/clamped indices.
+ * Removed ownership moves into the fresh result; inserted ownership moves
+ * into the receiver. */
+static ScrArr *scr_arr_splice_slot(ScrArr *a, double start, double deleteCount,
+                                   bool insert, uint64_t item) {
+  size_t old_len = a->len;
+  double len = (double)old_len;
   double s0 = isnan(start) ? 0 : trunc(start);
   if (s0 < 0) s0 += len;
-  size_t from = s0 <= 0 ? 0 : s0 >= len ? a->len : (size_t)s0;
+  size_t from = s0 <= 0 ? 0 : s0 >= len ? old_len : (size_t)s0;
   double avail = len - (double)from;
   double d0 = isnan(deleteCount) ? 0 : trunc(deleteCount);
   size_t n = d0 <= 0 ? 0 : d0 >= avail ? (size_t)avail : (size_t)d0;
@@ -441,10 +439,40 @@ ScrArr *scr_arr_splice(ScrArr *a, double start, double deleteCount) {
   if (n > 0) {
     memcpy(out->data, a->data + from, n * sizeof(uint64_t));
     out->len = n;
-    memmove(a->data + from, a->data + from + n, (a->len - from - n) * sizeof(uint64_t));
-    a->len -= n;
+  }
+  size_t tail = old_len - from - n;
+  if (insert) {
+    scr_arr_grow(a, old_len - n + 1);
+    memmove(a->data + from + 1, a->data + from + n, tail * sizeof(uint64_t));
+    a->data[from] = item;
+    a->len = old_len - n + 1;
+  } else if (n > 0) {
+    memmove(a->data + from, a->data + from + n, tail * sizeof(uint64_t));
+    a->len = old_len - n;
   }
   return out;
+}
+
+ScrArr *scr_arr_splice(ScrArr *a, double start, double deleteCount) {
+  return scr_arr_splice_slot(a, start, deleteCount, false, 0);
+}
+
+ScrArr *scr_arr_splice_one_f64(ScrArr *a, double start, double deleteCount,
+                               double item) {
+  return scr_arr_splice_slot(a, start, deleteCount, true,
+                             scr_slot_from_f64(item));
+}
+
+ScrArr *scr_arr_splice_one_bool(ScrArr *a, double start, double deleteCount,
+                                bool item) {
+  return scr_arr_splice_slot(a, start, deleteCount, true,
+                             (uint64_t)(item ? 1 : 0));
+}
+
+ScrArr *scr_arr_splice_one_ref(ScrArr *a, double start, double deleteCount,
+                               void *item) {
+  return scr_arr_splice_slot(a, start, deleteCount, true,
+                             scr_slot_from_ptr(item));
 }
 
 /* ── indexOf / includes ────────────────────────────────────────────────

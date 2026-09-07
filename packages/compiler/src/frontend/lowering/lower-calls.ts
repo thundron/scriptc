@@ -7669,10 +7669,9 @@ export function lowerPromiseMethodCall(lowerer: Lowerer, call: ts.CallExpression
     // fields answer by their runtime tag — the explicit-undefined-is-absent
     // stance: an omitted optional field holds the undefined arm and reads
     // as NOT own, exactly Node's absent key (an EXPLICIT `k: undefined`
-    // diverges — documented next to the child-env/JSON rule). Tuple,
-    // index-signature (overflow membership lives in the runtime map), and
-    // accessor-carrying shapes keep the SC2020 fence; non-record receivers
-    // do too.
+    // diverges — documented next to the child-env/JSON rule). Pure index-
+    // signature records probe their overflow key map; hybrid index shapes,
+    // tuples, and accessor-carrying shapes keep the SC2020 fence.
     if (member === "hasOwn" && call.arguments.length === 2 && !call.arguments.some((a) => ts.isSpreadElement(a))) {
       const recvNode = call.arguments[0]!;
       const keyNode = call.arguments[1]!;
@@ -7692,7 +7691,7 @@ export function lowerPromiseMethodCall(lowerer: Lowerer, call: ts.CallExpression
       }
       if (probed?.type.kind !== "record") return null;
       const shape = lowerer.shapes.get(probed.type.shapeId);
-      if (!shape || shape.tuple || shape.indexValue || shapeHasAccessorSlots(shape)) return null;
+      if (!shape || shape.tuple || shapeHasAccessorSlots(shape)) return null;
       const loc = locOf(call);
       const receiver = lowerer.lowerExpr(recvNode);
       if (receiver.type.kind !== "record") return null; // probe/lower drift: keep the fence
@@ -7703,6 +7702,18 @@ export function lowerPromiseMethodCall(lowerer: Lowerer, call: ts.CallExpression
         key = { kind: "toString", operand: key, type: STRING, loc: locOf(keyNode) };
       }
       if (key.type.kind !== "string") return null;
+      if (shape.indexValue) {
+        if (shape.fields.length !== 0) return null;
+        const keysT = arrayOf(STRING);
+        const keys: IrExpr = {
+          kind: "recordOvfKeys",
+          obj: receiver,
+          shapeId: receiver.type.shapeId,
+          type: keysT,
+          loc,
+        };
+        return { kind: "arrIntrinsic", method: "includes", receiver: keys, args: [key], type: BOOL, loc };
+      }
       const helper = recordHasOwnHelper(lowerer, receiver.type.shapeId, loc);
       return { kind: "call", callee: helper, args: [receiver, key], type: BOOL, loc };
     }

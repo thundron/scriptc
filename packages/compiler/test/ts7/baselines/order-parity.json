@@ -5706,6 +5706,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2699-splice-insert-hasown-index.ts": {
+   "order": [
+    "<repo>/tests/corpus/2699-splice-insert-hasown-index.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2700-wasi-core.ts": {
    "order": [
     "<repo>/tests/corpus/2700-wasi-core.ts"

@@ -291,8 +291,8 @@
       "apiEntries": 145,
       "static": {
         "supported": 0,
-        "partial": 3,
-        "refused": 35,
+        "partial": 4,
+        "refused": 34,
         "not-implemented": 107,
         "by-design": 0,
         "unreviewed": 0,
@@ -507,9 +507,9 @@
       "apiEntries": 276,
       "static": {
         "supported": 0,
-        "partial": 38,
+        "partial": 42,
         "refused": 0,
-        "not-implemented": 238,
+        "not-implemented": 234,
         "by-design": 0,
         "unreviewed": 0,
         "not-applicable": 0
@@ -23792,8 +23792,13 @@
         "inherited": true
       },
       "static": {
-        "status": "refused",
-        "evidence": "surface-manifest:unsupported:node-builtin.crypto.createHash"
+        "status": "partial",
+        "evidence": "surface-manifest:node-builtin.crypto.createHash",
+        "tests": [
+          "tests/corpus/1358-crypto-random.ts",
+          "tests/corpus/1534-crypto-hash-chain.ts",
+          "tests/corpus/2556-crypto-introspection.ts"
+        ]
       },
       "dynamic": {
         "status": "partial",
@@ -51246,8 +51251,12 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:fs"
+        "status": "partial",
+        "evidence": "surface-manifest:node-builtin.fs.promises.access",
+        "tests": [
+          "tests/corpus/1403-buffer-fs.ts",
+          "tests/corpus/2595-fs-arg-ladders.cjs"
+        ]
       },
       "dynamic": {
         "status": "partial",
@@ -51559,8 +51568,12 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:fs"
+        "status": "partial",
+        "evidence": "surface-manifest:node-builtin.fs.promises.lstat",
+        "tests": [
+          "tests/corpus/1403-buffer-fs.ts",
+          "tests/corpus/2595-fs-arg-ladders.cjs"
+        ]
       },
       "dynamic": {
         "status": "partial",
@@ -51623,8 +51636,12 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:fs"
+        "status": "partial",
+        "evidence": "surface-manifest:node-builtin.fs.promises.mkdtemp",
+        "tests": [
+          "tests/corpus/1403-buffer-fs.ts",
+          "tests/corpus/2595-fs-arg-ladders.cjs"
+        ]
       },
       "dynamic": {
         "status": "partial",
@@ -51836,8 +51853,12 @@
         "inherited": true
       },
       "static": {
-        "status": "not-implemented",
-        "evidence": "compiler-unmatched:fs"
+        "status": "partial",
+        "evidence": "surface-manifest:node-builtin.fs.promises.realpath",
+        "tests": [
+          "tests/corpus/1403-buffer-fs.ts",
+          "tests/corpus/2595-fs-arg-ladders.cjs"
+        ]
       },
       "dynamic": {
         "status": "partial",

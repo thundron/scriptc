@@ -2625,6 +2625,7 @@ export type IrSetIntrinsicMethod =
 export type IrStrIntrinsicMethod =
   | "length"
   | "charCodeAt"
+  | "codePointAt"
   | "charAt"
   | "indexOf"
   | "includes"
@@ -2633,6 +2634,7 @@ export type IrStrIntrinsicMethod =
   | "slice"
   | "substring"
   | "repeat"
+  | "replace"
   | "replaceAll"
   | "trim"
   | "trimStart"

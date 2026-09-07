@@ -57,6 +57,14 @@ ScrUnion *scr_union_new_bool(uint32_t tag, bool v) {
   return u;
 }
 
+ScrUnion *scr_str_code_point_at_union(ScrStr *s, double i,
+                                      uint32_t number_tag, ScrUnion *absent) {
+  double value;
+  return scr_str_code_point_at_raw(s, i, &value)
+      ? scr_union_new_f64(number_tag, value)
+      : scr_union_retain(absent);
+}
+
 ScrUnion *scr_union_new_ref(uint32_t tag, void *v, void *(*retain)(void *),
                              void (*release)(void *), ScrTraceFn trace) {
   ScrUnion *u = scr_union_alloc(tag);

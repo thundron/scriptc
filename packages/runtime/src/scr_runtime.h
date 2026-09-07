@@ -651,6 +651,7 @@ double scr_str_char_code_at(ScrStr *s, double i);
 /* codePointAt(i): the Unicode scalar at a leading UTF-16 position, the low
  * surrogate at a trailing position, or the supplied undefined union arm
  * outside [0, length). Returns +1. */
+bool scr_str_code_point_at_raw(ScrStr *s, double i, double *out);
 struct ScrUnion;
 struct ScrUnion *scr_str_code_point_at_union(ScrStr *s, double i,
                                              uint32_t number_tag,

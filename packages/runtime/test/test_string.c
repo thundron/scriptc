@@ -32,6 +32,8 @@ long scr_str_live_count(void); /* provided by scr_string.c */
  * runtime ABI. The walker count is code-point steps after a cache prime. */
 void scr_sidx_test_reset_steps(void);
 size_t scr_sidx_test_walk_steps(void);
+void scr_sidx_test_reset_purge_probes(void);
+size_t scr_sidx_test_purge_probes(void);
 void scr_sidx_test_reset_cache(void);
 size_t scr_sidx_test_entries(void);
 size_t scr_sidx_test_points(void);
@@ -270,6 +272,31 @@ static void accumulation_asserts(void) {
 static void sidx_fail(const char *what) {
   failed++;
   fprintf(stderr, "SIDX: %s\n", what);
+}
+
+static void unindexed_release_asserts(void) {
+  scr_sidx_test_reset_purge_probes();
+  for (size_t i = 0; i < 4096; i++) {
+    ScrStr *s = scr_str_new("temporary", 9);
+    scr_str_release(s);
+  }
+  if (scr_sidx_test_purge_probes() != 0)
+    sidx_fail("unindexed releases probed cache tables");
+
+  ScrStr *ascii = scr_str_new("indexed", 7);
+  (void)scr_str_utf16_len(ascii);
+  scr_sidx_test_reset_purge_probes();
+  scr_str_release(ascii);
+  if (scr_sidx_test_purge_probes() != 0)
+    sidx_fail("ASCII length retained a cursor entry");
+
+  ScrStr *indexed = scr_str_new("\xC3\xA9", 2);
+  (void)scr_str_utf16_len(indexed);
+  scr_sidx_test_reset_purge_probes();
+  scr_str_release(indexed);
+  if (scr_sidx_test_purge_probes() == 0 ||
+      scr_sidx_test_purge_probes() > 8)
+    sidx_fail("indexed release did not perform bounded purge");
 }
 
 /* The counter is deliberately about code-point decoder steps, not elapsed
@@ -661,6 +688,7 @@ int main(int argc, char **argv) {
   divergence_asserts();
   accumulation_asserts();
 #ifdef SCR_SIDX_TEST
+  unindexed_release_asserts();
   sparse_index_asserts();
   sparse_ascii_prefix_asserts();
   sparse_all_ascii_end_asserts();

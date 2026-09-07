@@ -44,6 +44,21 @@ static void scr_oom(void) {
 #define SCR_U16_UNKNOWN SIZE_MAX
 #define SCR_SIDX_MIN_BYTES ((size_t)64 * 1024)
 #define SCR_SIDX_STRIDE_BYTES ((size_t)4 * 1024)
+/* Heap capacities conservatively round down to a multiple of four; their two
+ * low bits record cache residency and proven ASCII. Immortal literals keep
+ * their exact unencoded capacity. */
+#define SCR_STR_SIDX_BIT ((size_t)1)
+#define SCR_STR_ASCII_BIT ((size_t)2)
+#define SCR_STR_FLAG_BITS (SCR_STR_SIDX_BIT | SCR_STR_ASCII_BIT)
+#define SCR_STR_CAP(s) \
+  ((s)->rc == SIZE_MAX ? (s)->cap : (s)->cap & ~SCR_STR_FLAG_BITS)
+#define SCR_STR_HAS_FLAG(s, flag) \
+  ((s)->rc != SIZE_MAX && ((s)->cap & (flag)) != 0)
+
+static inline void scr_str_mark_ascii(const ScrStr *s) {
+  if (s->rc != SIZE_MAX) ((ScrStr *)s)->cap |= SCR_STR_ASCII_BIT;
+}
+
 typedef struct {
   size_t cu; /* UTF-16 code-unit offset, always a code-point boundary */
   size_t cb; /* matching UTF-8 byte offset, never a continuation byte */
@@ -70,14 +85,22 @@ static SCR_TL unsigned scr_sidx_cursor_clock;
 static SCR_TL bool scr_sidx_cleanup_registered;
 
 static void scr_sidx_clear(ScrSidx *e) {
+  if (e->s && e->s->rc != SIZE_MAX)
+    ((ScrStr *)e->s)->cap &= ~SCR_STR_SIDX_BIT;
   free(e->points);
   memset(e, 0, sizeof(*e));
+}
+
+static void scr_sidx_cursor_clear(ScrSidx *e) {
+  if (e->s && e->s->rc != SIZE_MAX)
+    ((ScrStr *)e->s)->cap &= ~SCR_STR_SIDX_BIT;
+  e->s = NULL;
 }
 
 static void scr_sidx_reset_all(void) {
   for (int i = 0; i < SCR_SIDX_N; i++) {
     scr_sidx_clear(&scr_sidx_sparse_tab[i]);
-    scr_sidx_clear(&scr_sidx_cursor_tab[i]);
+    scr_sidx_cursor_clear(&scr_sidx_cursor_tab[i]);
   }
   scr_sidx_sparse_clock = 0;
   scr_sidx_cursor_clock = 0;
@@ -92,8 +115,11 @@ static void scr_sidx_register_cleanup(void) {
 
 #ifdef SCR_SIDX_TEST
 static SCR_TL size_t scr_sidx_walk_steps;
+static SCR_TL size_t scr_sidx_purge_probes;
 void scr_sidx_test_reset_steps(void) { scr_sidx_walk_steps = 0; }
 size_t scr_sidx_test_walk_steps(void) { return scr_sidx_walk_steps; }
+void scr_sidx_test_reset_purge_probes(void) { scr_sidx_purge_probes = 0; }
+size_t scr_sidx_test_purge_probes(void) { return scr_sidx_purge_probes; }
 void scr_sidx_test_reset_cache(void) { scr_sidx_reset_all(); }
 size_t scr_sidx_test_entries(void) {
   size_t n = 0;
@@ -108,19 +134,20 @@ size_t scr_sidx_test_points(void) {
   return n;
 }
 #define SCR_SIDX_STEP() (scr_sidx_walk_steps++)
+#define SCR_SIDX_PURGE_PROBE() (scr_sidx_purge_probes++)
 #else
 #define SCR_SIDX_STEP() ((void)0)
+#define SCR_SIDX_PURGE_PROBE() ((void)0)
 #endif
 
-static void scr_sidx_purge(const ScrStr *s) {
-  /* These are deliberately fixed four-entry tables, never an unbounded
-   * receiver registry. Releasing an unrelated temporary therefore does at
-   * most eight pointer comparisons and cannot grow with live strings. */
+static void scr_sidx_purge(ScrStr *s) {
   for (int i = 0; i < SCR_SIDX_N; i++) {
+    SCR_SIDX_PURGE_PROBE();
     if (scr_sidx_sparse_tab[i].s == s)
       scr_sidx_clear(&scr_sidx_sparse_tab[i]);
+    SCR_SIDX_PURGE_PROBE();
     if (scr_sidx_cursor_tab[i].s == s)
-      scr_sidx_clear(&scr_sidx_cursor_tab[i]);
+      scr_sidx_cursor_clear(&scr_sidx_cursor_tab[i]);
   }
 }
 
@@ -128,6 +155,17 @@ static void scr_sidx_init(ScrSidx *e, const ScrStr *s) {
   memset(e, 0, sizeof(*e));
   e->s = s;
   e->u16len = SCR_U16_UNKNOWN;
+  if (s->rc != SIZE_MAX) ((ScrStr *)s)->cap |= SCR_STR_SIDX_BIT;
+}
+
+static void scr_sidx_cursor_init(ScrSidx *e, const ScrStr *s) {
+  e->s = s;
+  e->u16len = SCR_U16_UNKNOWN;
+  e->cu = 0;
+  e->cb = 0;
+  e->indexed_cu = 0;
+  e->indexed_cb = 0;
+  if (s->rc != SIZE_MAX) ((ScrStr *)s)->cap |= SCR_STR_SIDX_BIT;
 }
 
 /* Short strings retain the historical hot cursor without contending with the
@@ -137,40 +175,41 @@ static void scr_sidx_init(ScrSidx *e, const ScrStr *s) {
  * receivers still shed their point buffer after proving identity mapping.
  * Both tiers remain fixed-size and allocation-free until a non-ASCII sparse
  * receiver actually needs checkpoints. */
-static ScrSidx *scr_sidx(const ScrStr *s) {
-  if (s->len >= SCR_SIDX_MIN_BYTES) {
-    for (int i = 0; i < SCR_SIDX_N; i++) {
-      if (scr_sidx_sparse_tab[i].s == s) return &scr_sidx_sparse_tab[i];
-    }
-    /* The only in-place mutation is append. A formerly short receiver can
-     * therefore cross the threshold with an exact, useful cursor frontier
-     * already in the cursor tier; transfer it before evicting a sparse slot.
-     * No checkpoint buffer can exist below the threshold, but moving the
-     * whole record also preserves the fail-open allocation state. */
-    for (int i = 0; i < SCR_SIDX_N; i++) {
-      ScrSidx *old = &scr_sidx_cursor_tab[i];
-      if (old->s != s) continue;
-      ScrSidx *e = &scr_sidx_sparse_tab[
-          scr_sidx_sparse_clock++ % SCR_SIDX_N];
-      scr_sidx_clear(e);
-      *e = *old;
-      memset(old, 0, sizeof(*old)); /* ownership moved to the sparse tier */
-      return e;
-    }
-    ScrSidx *e =
-        &scr_sidx_sparse_tab[scr_sidx_sparse_clock++ % SCR_SIDX_N];
+static ScrSidx *scr_sidx_large(const ScrStr *s) {
+  for (int i = 0; i < SCR_SIDX_N; i++) {
+    if (scr_sidx_sparse_tab[i].s == s) return &scr_sidx_sparse_tab[i];
+  }
+  /* The only in-place mutation is append. A formerly short receiver can
+   * therefore cross the threshold with an exact, useful cursor frontier
+   * already in the cursor tier; transfer it before evicting a sparse slot.
+   * No checkpoint buffer can exist below the threshold, but moving the
+   * whole record also preserves the fail-open allocation state. */
+  for (int i = 0; i < SCR_SIDX_N; i++) {
+    ScrSidx *old = &scr_sidx_cursor_tab[i];
+    if (old->s != s) continue;
+    ScrSidx *e = &scr_sidx_sparse_tab[
+        scr_sidx_sparse_clock++ % SCR_SIDX_N];
     scr_sidx_clear(e);
-    scr_sidx_init(e, s);
+    *e = *old;
+    memset(old, 0, sizeof(*old)); /* ownership moved to the sparse tier */
     return e;
   }
-  ScrSidx *tab = scr_sidx_cursor_tab;
-  unsigned *clock = &scr_sidx_cursor_clock;
-  for (int i = 0; i < SCR_SIDX_N; i++) {
-    if (tab[i].s == s) return &tab[i];
-  }
-  ScrSidx *e = &tab[(*clock)++ % SCR_SIDX_N];
+  ScrSidx *e =
+      &scr_sidx_sparse_tab[scr_sidx_sparse_clock++ % SCR_SIDX_N];
   scr_sidx_clear(e);
   scr_sidx_init(e, s);
+  return e;
+}
+
+static inline ScrSidx *scr_sidx(const ScrStr *s) {
+  if (s->len >= SCR_SIDX_MIN_BYTES) return scr_sidx_large(s);
+  for (int i = 0; i < SCR_SIDX_N; i++) {
+    if (scr_sidx_cursor_tab[i].s == s) return &scr_sidx_cursor_tab[i];
+  }
+  ScrSidx *e =
+      &scr_sidx_cursor_tab[scr_sidx_cursor_clock++ % SCR_SIDX_N];
+  scr_sidx_cursor_clear(e);
+  scr_sidx_cursor_init(e, s);
   return e;
 }
 
@@ -180,6 +219,8 @@ static ScrSidx *scr_sidx(const ScrStr *s) {
  * receiver may move from the cursor tier to the sparse tier on its next
  * lookup, so invalidate either possible entry. */
 static void scr_sidx_concat_append(const ScrStr *s, size_t oldlen) {
+  ((ScrStr *)s)->cap &= ~SCR_STR_ASCII_BIT;
+  if (!SCR_STR_HAS_FLAG(s, SCR_STR_SIDX_BIT)) return;
   for (int i = 0; i < SCR_SIDX_N; i++) {
     ScrSidx *entries[] = {&scr_sidx_sparse_tab[i], &scr_sidx_cursor_tab[i]};
     for (size_t j = 0; j < sizeof(entries) / sizeof(entries[0]); j++) {
@@ -194,11 +235,12 @@ static void scr_sidx_concat_append(const ScrStr *s, size_t oldlen) {
 /* ── allocation ─────────────────────────────────────────────────────── */
 
 static ScrStr *scr_str_alloc(size_t len, size_t cap) {
+  if (cap > SIZE_MAX - sizeof(ScrStr) - 1) scr_oom();
   ScrStr *s = malloc(sizeof(ScrStr) + cap + 1);
   if (!s) scr_oom();
   s->rc = 1;
   s->len = len;
-  s->cap = cap;
+  s->cap = cap & ~SCR_STR_FLAG_BITS;
 #ifdef SCR_RC_AUDIT
   scr_live_strings++;
 #endif
@@ -227,10 +269,12 @@ static SCR_TL ScrStr *scr_str_spare;
 static ScrStr *scr_str_take_spare(size_t len) {
 #ifndef SCR_RC_AUDIT
   ScrStr *s = scr_str_spare;
-  if (s && s->cap >= len && s->cap / 4 <= len) {
+  size_t cap = s ? SCR_STR_CAP(s) : 0;
+  if (s && cap >= len && cap / 4 <= len) {
     scr_str_spare = NULL;
     s->rc = 1;
-    s->len = len; /* keeps its larger cap */
+    s->len = len;
+    s->cap = cap;
     return s;
   }
 #else
@@ -250,22 +294,25 @@ ScrStr *scr_str_alloc_raw(size_t len, size_t cap) {
 }
 
 ScrStr *scr_str_regrow(ScrStr *s, size_t newcap) {
-  scr_sidx_purge(s); /* realloc may move; the old address may be recycled */
+  if (newcap > SIZE_MAX - sizeof(ScrStr) - 1) scr_oom();
+  if (SCR_STR_HAS_FLAG(s, SCR_STR_SIDX_BIT))
+    scr_sidx_purge(s); /* realloc may move; the old address may be recycled */
   ScrStr *r = realloc(s, sizeof(ScrStr) + newcap + 1);
   if (!r) scr_oom();
-  r->cap = newcap;
+  r->cap = newcap & ~SCR_STR_FLAG_BITS;
   return r;
 }
 
 void scr_str_release(ScrStr *s) {
   if (!s || s->rc == SIZE_MAX) return; /* NULL: an uninitialized `let` local */
   if (--s->rc == 0) {
-    scr_sidx_purge(s); /* the address may be recycled by the next malloc */
+    if (SCR_STR_HAS_FLAG(s, SCR_STR_SIDX_BIT))
+      scr_sidx_purge(s); /* the address may be recycled by the next malloc */
 #ifdef SCR_RC_AUDIT
     scr_live_strings--;
 #endif
 #ifndef SCR_RC_AUDIT
-    if (s->cap >= 512) {
+    if (SCR_STR_CAP(s) >= 512) {
       ScrStr *old = scr_str_spare;
       scr_str_spare = s;
       if (!old) return;
@@ -284,7 +331,7 @@ ScrStr *scr_str_concat(ScrStr *a, ScrStr *b) {
    * concat chains (`a + b + c`, template literals), where each intermediate
    * result reaches the next concat as a sole-reference temp. Any string
    * with rc > 1 might be aliased and is copied, never mutated. */
-  if (a->rc == 1 && a != b && a->cap >= newlen) {
+  if (a->rc == 1 && a != b && SCR_STR_CAP(a) >= newlen) {
     size_t oldlen = a->len;
     memcpy(a->data + a->len, b->data, b->len);
     a->len = newlen;
@@ -306,8 +353,11 @@ ScrStr *scr_str_concat(ScrStr *a, ScrStr *b) {
    * can still benefit from the spare-block cache above. */
   size_t newcap = newlen;
   if (a->rc == 1) {
-    size_t grown = a->cap + (a->cap >> 1) + 16;
-    if (grown > newcap) newcap = grown;
+    size_t cap = SCR_STR_CAP(a);
+    if (cap <= SIZE_MAX - (cap >> 1) - 16) {
+      size_t grown = cap + (cap >> 1) + 16;
+      if (grown > newcap) newcap = grown;
+    }
   } else if (newlen >= 512 && newlen <= (SIZE_MAX - sizeof(ScrStr) - 1) / 2) {
     newcap = newlen + (newlen >> 1);
   }
@@ -631,6 +681,7 @@ static void scr_sidx_finish(const ScrStr *s, ScrSidx *e) {
   if (e->indexed_cb != s->len) return;
   e->u16len = e->indexed_cu;
   if (e->u16len == s->len) { /* proven all ASCII: identity needs no index */
+    scr_str_mark_ascii(s);
     free(e->points);
     e->points = NULL;
     e->npoints = 0;
@@ -675,6 +726,14 @@ static void scr_sidx_materialize_identity_prefix(const ScrStr *s, ScrSidx *e) {
  * restores identity mapping with zero retained checkpoint memory. */
 static size_t scr_sidx_len(const ScrStr *s, ScrSidx *e) {
   if (e->u16len != SCR_U16_UNKNOWN) return e->u16len;
+  if (s->len < SCR_SIDX_MIN_BYTES && e->indexed_cb == 0) {
+    bool ascii;
+    e->u16len = scr_utf16_units_span(s->data, s->len, &ascii);
+    if (ascii) scr_str_mark_ascii(s);
+    e->indexed_cu = e->u16len;
+    e->indexed_cb = s->len;
+    return e->u16len;
+  }
   while (e->indexed_cb < s->len) scr_sidx_extend_one(s, e);
   scr_sidx_finish(s, e);
   return e->u16len;
@@ -870,6 +929,21 @@ double scr_str_last_index_of(ScrStr *s, ScrStr *needle) {
 }
 
 double scr_str_utf16_len(ScrStr *s) {
+  if (SCR_STR_HAS_FLAG(s, SCR_STR_ASCII_BIT)) return (double)s->len;
+  if (s->len < SCR_SIDX_MIN_BYTES &&
+      !SCR_STR_HAS_FLAG(s, SCR_STR_SIDX_BIT)) {
+    bool ascii;
+    size_t units = scr_utf16_units_span(s->data, s->len, &ascii);
+    if (ascii) {
+      scr_str_mark_ascii(s);
+      return (double)units;
+    }
+    ScrSidx *e = scr_sidx(s);
+    e->u16len = units;
+    e->indexed_cu = units;
+    e->indexed_cb = s->len;
+    return (double)units;
+  }
   return (double)scr_sidx_len(s, scr_sidx(s));
 }
 
@@ -878,6 +952,8 @@ double scr_str_char_code_at(ScrStr *s, double i) {
   if (!(idx >= 0)) return NAN; /* negative or -Infinity */
   /* UTF-16 length <= byte length always, so this also fences the cast. */
   if (idx >= (double)s->len) return NAN;
+  if (SCR_STR_HAS_FLAG(s, SCR_STR_ASCII_BIT))
+    return (double)(unsigned char)s->data[(size_t)idx];
   ScrSidx *e = scr_sidx(s);
   if (e->u16len == s->len) return (double)(unsigned char)s->data[(size_t)idx];
   bool mid;
@@ -890,21 +966,26 @@ double scr_str_char_code_at(ScrStr *s, double i) {
   return mid ? (double)(0xDC00 + (v & 0x3FF)) : (double)(0xD800 + (v >> 10));
 }
 
-ScrUnion *scr_str_code_point_at_union(ScrStr *s, double i,
-                                      uint32_t number_tag, ScrUnion *absent) {
+bool scr_str_code_point_at_raw(ScrStr *s, double i, double *out) {
   double idx = scr_to_integer_or_infinity(i);
-  if (!(idx >= 0) || idx >= (double)s->len) return scr_union_retain(absent);
+  if (!(idx >= 0) || idx >= (double)s->len) return false;
+  if (SCR_STR_HAS_FLAG(s, SCR_STR_ASCII_BIT)) {
+    *out = (double)(unsigned char)s->data[(size_t)idx];
+    return true;
+  }
   ScrSidx *e = scr_sidx(s);
   if (e->u16len == s->len) {
-    return scr_union_new_f64(number_tag, (double)(unsigned char)s->data[(size_t)idx]);
+    *out = (double)(unsigned char)s->data[(size_t)idx];
+    return true;
   }
   bool mid;
   size_t off = scr_u16_to_byte_c(s, e, (size_t)idx, &mid);
-  if (off >= s->len) return scr_union_retain(absent);
+  if (off >= s->len) return false;
   size_t adv;
   uint32_t cp = scr_utf8_decode(s->data + off, &adv);
   if (mid && cp >= 0x10000) cp = 0xDC00 + ((cp - 0x10000) & 0x3FF);
-  return scr_union_new_f64(number_tag, (double)cp);
+  *out = (double)cp;
+  return true;
 }
 
 double scr_str_index_of(ScrStr *s, ScrStr *needle, double fromIndex) {
@@ -1664,7 +1745,9 @@ double scr_string_to_number(ScrStr *s) {
 ScrStr *scr_f64_to_scrstr(double x) {
   char buf[32];
   size_t len = scr_f64_to_str(x, buf);
-  return scr_str_new(buf, len);
+  ScrStr *s = scr_str_new(buf, len);
+  scr_str_mark_ascii(s);
+  return s;
 }
 
 /* ── encodeURIComponent / encodeURI ───────────────────────────────────

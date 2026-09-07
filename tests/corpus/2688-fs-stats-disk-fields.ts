@@ -1,4 +1,4 @@
-// Stats.blocks/nlink/atimeMs across path stat, promise stat, lstat, and
+// Stats.dev/ino/blocks/nlink/atimeMs across path stat, promise stat, lstat, and
 // FileHandle.stat. blocks is Node's 512-byte allocation count (the disk-usage
 // idiom); timestamp facts stay bounded because the two differential sides use
 // distinct scratch files created at slightly different instants.
@@ -21,6 +21,8 @@ const now = Date.now();
 const syncStats = statSync(file);
 console.log(
   "sync:",
+  syncStats.dev > 0,
+  syncStats.ino > 0,
   syncStats.blocks,
   syncStats.blocks * 512 >= syncStats.size,
   syncStats.nlink,
@@ -32,6 +34,8 @@ async function main(): Promise<void> {
   const promiseStats = await stat(file);
   console.log(
     "promise:",
+    promiseStats.dev === syncStats.dev,
+    promiseStats.ino === syncStats.ino,
     promiseStats.blocks === syncStats.blocks,
     promiseStats.nlink === syncStats.nlink,
     promiseStats.atimeMs === syncStats.atimeMs,
@@ -40,6 +44,8 @@ async function main(): Promise<void> {
   const linkStats = lstatSync(file);
   console.log(
     "lstat:",
+    linkStats.dev === syncStats.dev,
+    linkStats.ino === syncStats.ino,
     linkStats.blocks === syncStats.blocks,
     linkStats.nlink === syncStats.nlink,
     linkStats.atimeMs === syncStats.atimeMs,
@@ -49,6 +55,8 @@ async function main(): Promise<void> {
   const handleStats = await handle.stat();
   console.log(
     "handle:",
+    handleStats.dev === syncStats.dev,
+    handleStats.ino === syncStats.ino,
     handleStats.blocks === syncStats.blocks,
     handleStats.nlink === syncStats.nlink,
     handleStats.atimeMs === syncStats.atimeMs,

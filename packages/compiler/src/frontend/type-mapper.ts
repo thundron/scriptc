@@ -501,6 +501,8 @@ export function formatIrType(t: IrType, shapes: ShapeRegistry, unions: UnionRegi
       return "Stats";
     case "fileHandle":
       return "FileHandle";
+    case "hash":
+      return "Hash";
     case "spawnRes":
       return "SpawnSyncReturns";
     case "child":
@@ -1766,6 +1768,17 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     )
   ) {
     return { kind: "fileHandle" };
+  }
+  if (
+    psym?.name === "Hash" &&
+    checker.declarationsOf(psym).some(
+      (d) =>
+        (ts.isInterfaceDeclaration(d) || ts.isClassDeclaration(d)) &&
+        ctx.isStdlibFile(d.getSourceFile()) &&
+        isDeclaredInAmbientModule(d, "crypto"),
+    )
+  ) {
+    return { kind: "hash" };
   }
   // child_process.SpawnSyncReturns: @types/node's generic interface (the
   // Buffer/string split is re-checked at the stdout/stderr READ — status

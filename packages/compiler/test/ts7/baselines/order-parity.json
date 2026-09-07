@@ -5700,6 +5700,12 @@
    ],
    "diags": []
   },
+  "<repo>/tests/corpus/2698-crypto-incremental-hash.ts": {
+   "order": [
+    "<repo>/tests/corpus/2698-crypto-incremental-hash.ts"
+   ],
+   "diags": []
+  },
   "<repo>/tests/corpus/2700-wasi-core.ts": {
    "order": [
     "<repo>/tests/corpus/2700-wasi-core.ts"

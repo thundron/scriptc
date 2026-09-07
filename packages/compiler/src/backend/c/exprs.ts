@@ -4332,6 +4332,10 @@ function emitFilesystemLibCall(state: LibCallState): Temp {
             return finish(`scr_fs_stat(${arg(0)})`);
           case "stats.isSymbolicLink":
             return finish(`scr_stats_is_symlink(${arg(0)})`);
+          case "stats.dev":
+            return finish(`scr_stats_dev(${arg(0)})`);
+          case "stats.ino":
+            return finish(`scr_stats_ino(${arg(0)})`);
           case "stats.blocks":
             return finish(`scr_stats_blocks(${arg(0)})`);
           case "stats.nlink":
@@ -4453,6 +4457,10 @@ function emitFilesystemLibCall(state: LibCallState): Temp {
             return finish(`scr_fsp_mkdtemp(${arg(0)})`);
           case "fsp.open":
             return finish(`scr_fsp_open(${arg(0)}, ${arg(1)}, ${arg(2)})`);
+          case "fsp.openFlags":
+            return finish(`scr_fsp_open_flags(${arg(0)}, ${arg(1)}, ${arg(2)})`);
+          case "fs.constONofollow":
+            return finish(`scr_fs_constant_o_nofollow()`);
           case "fileHandle.fd":
             return finish(`scr_file_handle_fd(${arg(0)})`);
           case "fileHandle.close":
@@ -5162,6 +5170,14 @@ function emitCryptoBytesLibCall(state: LibCallState): Temp {
             return finish(`scr_crypto_hash_digest_str(${arg(0)}, ${arg(1)}, ${arg(2)})`);
           case "crypto.hashDigestBytes":
             return finish(`scr_crypto_hash_digest_bytes(${arg(0)}, ${arg(1)}, ${arg(2)})`);
+          case "crypto.hashNew":
+            return finish(`scr_hash_new(${arg(0)})`);
+          case "crypto.hashUpdateStr":
+            return finish(`scr_hash_update_str(${arg(0)}, ${arg(1)})`);
+          case "crypto.hashUpdateBytes":
+            return finish(`scr_hash_update_bytes(${arg(0)}, ${arg(1)})`);
+          case "crypto.hashDigest":
+            return finish(`scr_hash_digest(${arg(0)}, ${arg(1)})`);
           // The Buffer statics (scr_bytes.c): fromStr decodes Node-
           // leniently (never throws), concat copies its borrowed list.
           case "buffer.fromStr":

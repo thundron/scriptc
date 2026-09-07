@@ -1144,6 +1144,13 @@ export const AMBIENT_SURFACE_FNS: readonly AmbientSurfaceRow[] = [
     fns: ["process.exit", "process.exiting"],
     note: "process.exit and the process._exiting flag read are one surface",
   },
+  {
+    id: "node-builtin.fs.constants.O_NOFOLLOW",
+    kind: "node-builtin",
+    name: "fs.constants.O_NOFOLLOW",
+    fns: ["fs.constONofollow"],
+    note: "the target platform's no-follow open flag",
+  },
   // ── the tls CA store (lowerTlsCaCall / lowerTlsRootCertificates): the
   // host's trust anchors, read and replaced. Dedicated paths, and
   // rootCertificates is a VALUE read with no call form at all, so none of
@@ -1364,8 +1371,7 @@ export const BUILTIN_MODULE_FENCE_HINTS: Record<string, Record<string, string | 
   },
   crypto: {
     createHash:
-      "the one lowered shape is the composed chain " +
-      'createHash("sha256").update(data).digest("hex") — the Hash handle itself has no lowering',
+      'sha256 and sha1 Hash handles support repeated string or Buffer/Uint8Array updates and hex/base64 string digests',
     hash:
       "the one-shot digest has no lowering — the composed chain " +
       'createHash("sha256").update(data).digest("hex") is the lowered hashing surface',

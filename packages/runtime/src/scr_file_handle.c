@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +43,8 @@ struct ScrStats {
   bool is_dir;
   bool is_symlink;
   double size;
+  double dev;
+  double ino;
   double blocks;
   double nlink;
   double atime_ms;
@@ -251,12 +254,9 @@ static bool scr_file_handle_mode_valid(double mode) {
   return true;
 }
 
-ScrFileHandle *scr_file_handle_open(ScrStr *path, ScrStr *flags, double mode) {
-  if (!scr_file_handle_path_valid(path)) return NULL;
-  int of = scr_file_handle_open_flags(flags);
-  if (of < 0) return NULL;
-  if (!scr_file_handle_mode_valid(mode)) return NULL;
-  int fd = open(path->data, of | O_BINARY, (mode_t)mode);
+static ScrFileHandle *scr_file_handle_open_raw(ScrStr *path, int flags,
+                                                double mode) {
+  int fd = open(path->data, flags | O_BINARY, (mode_t)mode);
   if (fd < 0) {
     scr_fs_throw(errno, "open", path);
     return NULL;
@@ -266,6 +266,40 @@ ScrFileHandle *scr_file_handle_open(ScrStr *path, ScrStr *flags, double mode) {
   h->rc = 1;
   h->fd = fd;
   return h;
+}
+
+ScrFileHandle *scr_file_handle_open(ScrStr *path, ScrStr *flags, double mode) {
+  if (!scr_file_handle_path_valid(path)) return NULL;
+  int of = scr_file_handle_open_flags(flags);
+  if (of < 0) return NULL;
+  if (!scr_file_handle_mode_valid(mode)) return NULL;
+  return scr_file_handle_open_raw(path, of, mode);
+}
+
+static ScrFileHandle *scr_file_handle_open_numeric(ScrStr *path, double flags,
+                                                    double mode) {
+  if (!scr_file_handle_path_valid(path)) return NULL;
+  if (!(isfinite(flags) && trunc(flags) == flags &&
+        flags >= (double)INT_MIN && flags <= (double)INT_MAX)) {
+    char recv[48];
+    char msg[160];
+    scr_num_received(flags, recv);
+    int len = snprintf(msg, sizeof msg,
+      "The value of \"flags\" is out of range. It must be an integer. Received %s",
+      recv);
+    scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
+    return NULL;
+  }
+#if !defined(O_NOFOLLOW)
+  if (flags == (double)INT_MIN) {
+    static const char msg[] = "O_NOFOLLOW is unavailable on this platform";
+    scr_throw_error_msg_code(SCR_ERR_ERROR, msg, sizeof msg - 1,
+                             "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM");
+    return NULL;
+  }
+#endif
+  if (!scr_file_handle_mode_valid(mode)) return NULL;
+  return scr_file_handle_open_raw(path, (int)flags, mode);
 }
 
 ScrFileHandle *scr_file_handle_retain(ScrFileHandle *h) {
@@ -405,6 +439,8 @@ ScrStats *scr_file_handle_stat(ScrFileHandle *h) {
   out->is_dir = S_ISDIR(st.st_mode);
   out->is_symlink = false; /* fstat follows the open descriptor. */
   out->size = (double)st.st_size;
+  out->dev = (double)st.st_dev;
+  out->ino = (double)st.st_ino;
 #if defined(_WIN32)
   out->blocks = st.st_size <= 0 ? 0.0 : (double)(((uint64_t)st.st_size + 511) >> 9);
   out->nlink = (double)st.st_nlink;
@@ -414,6 +450,8 @@ ScrStats *scr_file_handle_stat(ScrFileHandle *h) {
   if (os_handle != INVALID_HANDLE_VALUE) {
     BY_HANDLE_FILE_INFORMATION basic;
     if (GetFileInformationByHandle(os_handle, &basic)) {
+      out->dev = (double)basic.dwVolumeSerialNumber;
+      out->ino = (double)(((uint64_t)basic.nFileIndexHigh << 32) | basic.nFileIndexLow);
       out->nlink = (double)basic.nNumberOfLinks;
       out->atime_ms = scr_file_handle_filetime_ms(basic.ftLastAccessTime);
       out->mtime_ms = scr_file_handle_filetime_ms(basic.ftLastWriteTime);
@@ -447,6 +485,20 @@ ScrPromise *scr_fsp_open(ScrStr *path, ScrStr *flags, double mode) {
   ScrFileHandle *h = scr_file_handle_open(path, flags, mode);
   return scr_promise_settled_ref(h, &scr_file_handle_retain_v,
                                  &scr_file_handle_release_v, NULL);
+}
+
+ScrPromise *scr_fsp_open_flags(ScrStr *path, double flags, double mode) {
+  ScrFileHandle *h = scr_file_handle_open_numeric(path, flags, mode);
+  return scr_promise_settled_ref(h, &scr_file_handle_retain_v,
+                                 &scr_file_handle_release_v, NULL);
+}
+
+double scr_fs_constant_o_nofollow(void) {
+#ifdef O_NOFOLLOW
+  return (double)O_NOFOLLOW;
+#else
+  return (double)INT_MIN;
+#endif
 }
 
 ScrPromise *scr_file_handle_close_promise(ScrFileHandle *h) {

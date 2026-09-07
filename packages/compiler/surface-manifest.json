@@ -567,7 +567,7 @@
       "kind": "node-builtin",
       "name": "crypto.createHash",
       "status": "static",
-      "note": "the one lowered shape is the composed chain createHash(\"sha256\").update(data).digest(\"hex\") — the Hash handle itself has no lowering"
+      "note": "sha256 and sha1 Hash handles support repeated string or Buffer/Uint8Array updates and hex/base64 string digests"
     },
     {
       "id": "node-builtin.crypto.createHmac",
@@ -899,6 +899,13 @@
       "kind": "node-builtin",
       "name": "fs.closeSync",
       "status": "static"
+    },
+    {
+      "id": "node-builtin.fs.constants.O_NOFOLLOW",
+      "kind": "node-builtin",
+      "name": "fs.constants.O_NOFOLLOW",
+      "status": "static",
+      "note": "the target platform's no-follow open flag"
     },
     {
       "id": "node-builtin.fs.copyFileSync",

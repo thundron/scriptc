@@ -188,6 +188,10 @@ async function main(): Promise<void> {
     console.log("open rejection:", err.name, err.code);
   }
 
+  const numericFlags = await open(scratch, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  console.log("numeric flags:", numericFlags.fd >= 0);
+  await numericFlags.close();
+
   fs.unlinkSync(scratch);
 }
 

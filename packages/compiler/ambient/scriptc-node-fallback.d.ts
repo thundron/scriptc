@@ -1017,6 +1017,8 @@ declare module "node:fs" {
     readonly R_OK: number;
     readonly W_OK: number;
     readonly X_OK: number;
+    readonly O_RDONLY: number;
+    readonly O_NOFOLLOW: number;
   };
   /* A stat(2) snapshot (statSync follows symlinks, lstatSync does not —
    * Node's split) — immutable; the supported surface is exactly these
@@ -1027,6 +1029,8 @@ declare module "node:fs" {
     isDirectory(): boolean;
     isSymbolicLink(): boolean;
     readonly size: number;
+    readonly dev: number;
+    readonly ino: number;
     readonly blocks: number;
     readonly nlink: number;
     readonly atimeMs: number;
@@ -1139,7 +1143,7 @@ declare module "fs/promises" {
     appendFile(data: string | Uint8Array, encoding?: "utf8" | "utf-8" | null): Promise<void>;
     stat(): Promise<import("node:fs").Stats>;
   }
-  export function open(path: string, flags?: string, mode?: number): Promise<FileHandle>;
+  export function open(path: string, flags?: string | number, mode?: number): Promise<FileHandle>;
   export function readFile(path: string, encoding: "utf8" | "utf-8"): Promise<string>;
   export function readFile(path: string): Promise<Buffer>;
   export function writeFile(
@@ -1352,11 +1356,9 @@ declare module "node:url" {
 declare module "crypto" {
   export function randomUUID(): string;
   export function randomBytes(size: number): Buffer;
-  /* The lowered Hash surface is exactly the COMPOSED chain
-   * createHash("sha256" | "sha1").update(data).digest("hex" | "base64")
-   * — fused into one call, the Hash handle never materializes (holding
-   * one fences). sha1 exists for the RFC 6455 Sec-WebSocket-Accept
-   * hash. */
+  /* sha256 and sha1 Hash handles accept repeated string or Uint8Array
+   * updates and one hex or base64 string digest. sha1 exists for the
+   * RFC 6455 Sec-WebSocket-Accept hash. */
   export interface Hash {
     update(data: string | Uint8Array): Hash;
     digest(encoding: "hex" | "base64"): string;

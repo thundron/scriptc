@@ -1550,6 +1550,7 @@ static const char *scr_errno_name(int e, char *fallback, size_t cap) {
   case EFBIG: return "EFBIG";
   case EPIPE: return "EPIPE";
   case ESPIPE: return "ESPIPE";
+  case ELOOP: return "ELOOP";
   default:
     snprintf(fallback, cap, "E%d", e);
     return fallback;
@@ -1578,6 +1579,7 @@ static const char *scr_errno_text(int e) {
   case EFBIG: return "file too large";
   case EPIPE: return "broken pipe";
   case ESPIPE: return "invalid seek";
+  case ELOOP: return "too many symbolic links encountered";
   default: return strerror(e);
   }
 }
@@ -2922,6 +2924,8 @@ struct ScrStats {
   bool is_dir;
   bool is_symlink; /* lstat only — a followed stat never sees one */
   double size;
+  double dev;
+  double ino;
   double blocks;   /* allocated size in 512-byte units (Node/libuv) */
   double nlink;
   double atime_ms;
@@ -2945,6 +2949,8 @@ bool scr_stats_is_file(ScrStats *s) { return s->is_file; }
 bool scr_stats_is_dir(ScrStats *s) { return s->is_dir; }
 bool scr_stats_is_symlink(ScrStats *s) { return s->is_symlink; }
 double scr_stats_size(ScrStats *s) { return s->size; }
+double scr_stats_dev(ScrStats *s) { return s->dev; }
+double scr_stats_ino(ScrStats *s) { return s->ino; }
 double scr_stats_blocks(ScrStats *s) { return s->blocks; }
 double scr_stats_nlink(ScrStats *s) { return s->nlink; }
 double scr_stats_atime_ms(ScrStats *s) { return s->atime_ms; }
@@ -2969,6 +2975,8 @@ static ScrStats *scr_stats_of_crt(const struct stat *st) {
   s->is_dir = S_ISDIR(st->st_mode);
   s->is_symlink = false;
   s->size = (double)st->st_size;
+  s->dev = (double)st->st_dev;
+  s->ino = (double)st->st_ino;
   s->blocks = st->st_size <= 0 ? 0.0 : (double)(((uint64_t)st->st_size + 511) >> 9);
   s->nlink = (double)st->st_nlink;
   s->atime_ms = (double)st->st_atime * 1000.0;
@@ -3191,6 +3199,8 @@ static ScrStats *scr_stats_of_path(const ScrStr *path, const char *op,
   s->is_symlink = is_link;
   s->size = is_link && link_size >= 0 ? link_size : s->is_dir ? 0.0
     : have_standard ? (double)standard.EndOfFile.QuadPart : (double)size;
+  s->dev = (double)basic.dwVolumeSerialNumber;
+  s->ino = (double)(((uint64_t)basic.nFileIndexHigh << 32) | basic.nFileIndexLow);
   s->blocks = have_standard
     ? (double)((uint64_t)standard.AllocationSize.QuadPart >> 9)
     : size == 0 ? 0.0 : (double)((size + 511) >> 9);
@@ -3221,6 +3231,8 @@ static ScrStats *scr_stats_of(const struct stat *st) {
   s->blocks = (double)st->st_blocks;
   s->nlink = (double)st->st_nlink;
   s->size = (double)st->st_size;
+  s->dev = (double)st->st_dev;
+  s->ino = (double)st->st_ino;
   return s;
 }
 #endif
@@ -3663,6 +3675,128 @@ static ScrStr *scr_digest_encode(const unsigned char *d, size_t n, const ScrStr 
     buf[o++] = i + 2 < n ? b64[v & 63] : '=';
   }
   return scr_str_new(buf, o);
+}
+
+struct ScrHash {
+  size_t rc;
+  uint8_t algorithm;
+  bool finalized;
+  uint64_t total;
+  size_t used;
+  unsigned char block[64];
+  uint32_t state[8];
+};
+
+static void scr_hash_finalized(void) {
+  static const char msg[] = "Digest already called";
+  scr_throw_error_msg_code(SCR_ERR_ERROR, msg, sizeof msg - 1,
+                           "ERR_CRYPTO_HASH_FINALIZED");
+}
+
+ScrHash *scr_hash_new(ScrStr *alg) {
+  ScrHash *hash = calloc(1, sizeof(ScrHash));
+  if (!hash) scr_trap("scriptc: out of memory\n");
+  hash->rc = 1;
+  if (alg->len == 6 && memcmp(alg->data, "sha256", 6) == 0) {
+    static const uint32_t initial[8] = {
+      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    };
+    hash->algorithm = 2;
+    memcpy(hash->state, initial, sizeof initial);
+  } else if (alg->len == 4 && memcmp(alg->data, "sha1", 4) == 0) {
+    static const uint32_t initial[5] = {
+      0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0
+    };
+    hash->algorithm = 1;
+    memcpy(hash->state, initial, sizeof initial);
+  } else {
+    free(hash);
+    scr_trap("scriptc: unfenced hash algorithm\n");
+  }
+  return hash;
+}
+
+ScrHash *scr_hash_retain(ScrHash *hash) {
+  if (hash && hash->rc != SIZE_MAX) hash->rc++;
+  return hash;
+}
+
+void scr_hash_release(ScrHash *hash) {
+  if (!hash || hash->rc == SIZE_MAX) return;
+  if (--hash->rc == 0) free(hash);
+}
+
+void *scr_hash_retain_v(void *hash) { return scr_hash_retain(hash); }
+void scr_hash_release_v(void *hash) { scr_hash_release(hash); }
+
+static void scr_hash_block(ScrHash *hash, const unsigned char *data) {
+  if (hash->algorithm == 2) scr_sha256_block(hash->state, data);
+  else scr_sha1_block(hash->state, data);
+}
+
+static ScrHash *scr_hash_update(ScrHash *hash, const unsigned char *data,
+                                size_t len) {
+  if (hash->finalized) {
+    scr_hash_finalized();
+    return NULL;
+  }
+  hash->total += (uint64_t)len;
+  if (hash->used != 0) {
+    size_t take = 64 - hash->used;
+    if (take > len) take = len;
+    memcpy(hash->block + hash->used, data, take);
+    hash->used += take;
+    data += take;
+    len -= take;
+    if (hash->used == 64) {
+      scr_hash_block(hash, hash->block);
+      hash->used = 0;
+    }
+  }
+  while (len >= 64) {
+    scr_hash_block(hash, data);
+    data += 64;
+    len -= 64;
+  }
+  if (len != 0) {
+    memcpy(hash->block, data, len);
+    hash->used = len;
+  }
+  return scr_hash_retain(hash);
+}
+
+ScrHash *scr_hash_update_str(ScrHash *hash, ScrStr *data) {
+  return scr_hash_update(hash, (const unsigned char *)data->data, data->len);
+}
+
+ScrHash *scr_hash_update_bytes(ScrHash *hash, ScrBytes *data) {
+  return scr_hash_update(hash, data->data, data->len);
+}
+
+ScrStr *scr_hash_digest(ScrHash *hash, ScrStr *enc) {
+  if (hash->finalized) {
+    scr_hash_finalized();
+    return NULL;
+  }
+  hash->finalized = true;
+  unsigned char tail[128];
+  size_t rem = hash->used;
+  memcpy(tail, hash->block, rem);
+  tail[rem] = 0x80;
+  size_t pad = rem + 1 + 8 <= 64 ? 64 : 128;
+  memset(tail + rem + 1, 0, pad - rem - 1 - 8);
+  uint64_t bits = hash->total * 8;
+  for (int i = 0; i < 8; i++) tail[pad - 1 - i] = (unsigned char)(bits >> (8 * i));
+  scr_hash_block(hash, tail);
+  if (pad == 128) scr_hash_block(hash, tail + 64);
+  unsigned char digest[32];
+  size_t words = hash->algorithm == 2 ? 8 : 5;
+  for (size_t i = 0; i < words; i++) {
+    for (int b = 0; b < 4; b++)
+      digest[i * 4 + (size_t)b] = (unsigned char)(hash->state[i] >> (24 - 8 * b));
+  }
+  return scr_digest_encode(digest, words * 4, enc);
 }
 
 /* ── MD5 (RFC 1321) — island npm code only (the static frontend fences

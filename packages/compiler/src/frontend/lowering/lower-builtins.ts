@@ -33,7 +33,7 @@ import { CRYPTO_CIPHERS, CRYPTO_CONSTANTS, CRYPTO_CURVES, CRYPTO_HASHES } from "
 import { timerStyleCallback } from "./lower-calls.js";
 import { registerHttpClientFnBinding, voidizedCallback } from "./lower-server.js";
 import { pairsSnapshotHelper } from "./pairs-snapshot.js";
-import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FILEHANDLE_T, FSWATCHER_T, PROCSTREAM_T, IrExpr, IrFunction, IrLibFn, IrLocal, IrStmt, IrType, JSVAL, NULL_T, SEARCH_PARAMS_T, SPAWNRES_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, funcOf, isUnitType, typeEquals, typeKey } from "../../ir/ir.js";
+import { BOOL, BYTES_U8, CHILD_T, CHILDSTREAM_T, DYN, F64, FILEHANDLE_T, FSWATCHER_T, HASH_T, PROCSTREAM_T, IrExpr, IrFunction, IrLibFn, IrLocal, IrStmt, IrType, JSVAL, NULL_T, SEARCH_PARAMS_T, SPAWNRES_T, STRING, SrcLoc, UNDEFINED_T, VOID, arrayOf, canBoxFuncIntoDyn, canConvertToDyn, funcOf, isUnitType, typeEquals, typeKey } from "../../ir/ir.js";
 import { boolLit, countedFor, numLit, strLit, varRef } from "../../ir/build.js";
 
 /** Lower an optional builtin argument whose checker type is statically
@@ -882,8 +882,8 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     if (bi.module === "fs" && bi.member === "watch") {
       return lowerFsWatchCall(lowerer, expr, loc);
     }
-    // fs/promises.open(path[, flags[, mode]]) — string flags and numeric
-    // creation mode, with Node's "r"/0o666 defaults. The runtime wraps
+    // fs/promises.open(path[, flags[, mode]]) — string or numeric flags and
+    // numeric creation mode, with Node's "r"/0o666 defaults. The runtime wraps
     // the descriptor in a shared FileHandle and settles/rejects exactly
     // like the existing fs/promises operations.
     if (bi.module === "fs/promises" && bi.member === "open") {
@@ -891,21 +891,25 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
         lowerer.noLowering(
           `fs.promises.open with ${expr.arguments.length} arguments`,
           expr,
-          "use open(path[, stringFlags[, numericMode]])",
+          "use open(path[, stringOrNumericFlags[, numericMode]])",
         );
       }
       const path = lowerer.lowerExprExpecting(expr.arguments[0]!, STRING);
       const defaultFlags = { kind: "strLit", value: "r", type: STRING, loc } satisfies IrExpr;
       const defaultMode = { kind: "numLit", value: 0o666, type: F64, loc } satisfies IrExpr;
-      const flags = expr.arguments[1]
-        ? lowerBuiltinOptionalDefault(lowerer, expr.arguments[1]!, STRING, defaultFlags)
+      const flagsNode = expr.arguments[1];
+      const numericFlags = flagsNode && lowerer.mapTypeOf(lowerer.typeOf(flagsNode))?.kind === "f64";
+      const flags = flagsNode
+        ? numericFlags
+          ? lowerer.lowerExprExpecting(flagsNode, F64)
+          : lowerBuiltinOptionalDefault(lowerer, flagsNode, STRING, defaultFlags)
         : defaultFlags;
       const mode = expr.arguments[2]
         ? lowerBuiltinOptionalDefault(lowerer, expr.arguments[2]!, F64, defaultMode)
         : defaultMode;
       return {
         kind: "libCall",
-        fn: "fsp.open",
+        fn: numericFlags ? "fsp.openFlags" : "fsp.open",
         args: [path, flags, mode],
         type: { kind: "promise", inner: FILEHANDLE_T },
         loc,
@@ -4009,6 +4013,25 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     bi: { module: string; member: string },
     loc: SrcLoc,): IrExpr | null {
     if (bi.module !== "crypto") return null;
+    if (bi.member === "createHash") {
+      const algorithm = expr.arguments[0];
+      const type = algorithm ? lowerer.typeOf(algorithm) : undefined;
+      if (expr.arguments.length !== 1 || !type?.isStringLiteralType() ||
+          (type.value !== "sha256" && type.value !== "sha1")) {
+        lowerer.noLowering(
+          "createHash with this algorithm",
+          expr,
+          'sha256 and sha1 are the lowered algorithms: createHash("sha256")',
+        );
+      }
+      return {
+        kind: "libCall",
+        fn: "crypto.hashNew",
+        args: [lowerer.lowerExprExpecting(algorithm!, STRING)],
+        type: HASH_T,
+        loc,
+      };
+    }
     const LISTS: Record<string, readonly string[] | undefined> = {
       getCiphers: CRYPTO_CIPHERS,
       getHashes: CRYPTO_HASHES,
@@ -4388,6 +4411,71 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     };
   }
 
+/** Stateful node:crypto Hash calls. */
+  export function lowerHashMethodCall(lowerer: Lowerer, call: ts.CallExpression,
+    access: ts.PropertyAccessExpression,): IrExpr | null {
+    if (lowerer.chainBlocked(access, call)) return null;
+    if (lowerer.mapTypeOf(lowerer.typeOf(access.expression))?.kind !== "hash") return null;
+    if (!lowerer.isStdlibMember(access)) return null;
+    const name = access.name.text;
+    const loc = locOf(call);
+    const receiver = lowerer.lowerExpr(access.expression);
+    if (name === "update") {
+      if (call.arguments.length !== 1) {
+        lowerer.noLowering(
+          `Hash.update with ${call.arguments.length} arguments`,
+          call,
+          "one string or Buffer/Uint8Array argument is supported",
+        );
+      }
+      const input = call.arguments[0]!;
+      const inputType = lowerer.mapTypeOf(lowerer.typeOf(input));
+      if (inputType?.kind === "string") {
+        return {
+          kind: "libCall",
+          fn: "crypto.hashUpdateStr",
+          args: [receiver, lowerer.lowerExprExpecting(input, STRING)],
+          type: HASH_T,
+          loc,
+        };
+      }
+      if (inputType?.kind === "bytes") {
+        return {
+          kind: "libCall",
+          fn: "crypto.hashUpdateBytes",
+          args: [receiver, lowerer.lowerExprExpecting(input, BYTES_U8)],
+          type: HASH_T,
+          loc,
+        };
+      }
+      lowerer.noLowering(
+        `Hash.update of '${inputType ? lowerer.fmt(inputType) : lowerer.checker.typeToString(lowerer.typeOf(input))}' values`,
+        input,
+        "string and Buffer/Uint8Array inputs are supported",
+      );
+    }
+    if (name === "digest") {
+      const encoding = call.arguments[0];
+      const type = encoding ? lowerer.typeOf(encoding) : undefined;
+      if (call.arguments.length !== 1 || !type?.isStringLiteralType() ||
+          (type.value !== "hex" && type.value !== "base64")) {
+        lowerer.noLowering(
+          "Hash.digest with this encoding",
+          call,
+          'hex and base64 string digests are supported: hash.digest("hex")',
+        );
+      }
+      return {
+        kind: "libCall",
+        fn: "crypto.hashDigest",
+        args: [receiver, lowerer.lowerExprExpecting(encoding!, STRING)],
+        type: STRING,
+        loc,
+      };
+    }
+    return null;
+  }
+
 /** Calls on an fs/promises FileHandle. The promise-returning methods run
  * through the same synchronous descriptor primitives as fs.readSync /
  * writeSync, then settle so failures reject at await. read/write retain
@@ -4762,10 +4850,12 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     if (kind === "child") return null; // pid/exitCode/killed live in lowerIntrinsicProperty
     if (
       kind === "stats" &&
-      (name === "blocks" || name === "nlink" || name === "atimeMs" || name === "mtimeMs")
+      (name === "dev" || name === "ino" || name === "blocks" || name === "nlink" || name === "atimeMs" || name === "mtimeMs")
     ) {
       const receiver = lowerer.lowerExpr(expr.expression);
       const fn = `stats.${name}` as
+        | "stats.dev"
+        | "stats.ino"
         | "stats.blocks"
         | "stats.nlink"
         | "stats.atimeMs"
@@ -5241,25 +5331,23 @@ function optionMember(p: ts.ObjectLiteralElementLike): { name: string; value: ts
     lowerer.unsupported("SC1090", expr, `JSON methods as values (call '${member}' directly)`);
   }
 
-/** `constants.X_OK` where `constants` is a named fs import: the access-
-   * mode bits bake as number literals (POSIX values — Node's own on the
-   * supported hosts). Other fs.constants members (COPYFILE_*, O_*) fence
-   * by name. Null for non-fs-constants receivers. */
+/** Supported properties where `constants` is a named fs import. */
   export function lowerFsConstantsProperty(lowerer: Lowerer, expr: ts.PropertyAccessExpression): IrExpr | null {
     if (expr.questionDotToken) return null;
     if (!ts.isIdentifier(expr.expression)) return null;
     const bi = lowerer.builtinImportOf(expr.expression);
     if (!bi || bi.module !== "fs" || bi.member !== "constants") return null;
-    const MODES: Record<string, number | undefined> = { F_OK: 0, X_OK: 1, W_OK: 2, R_OK: 4 };
+    const MODES: Record<string, number | undefined> = { F_OK: 0, X_OK: 1, W_OK: 2, R_OK: 4, O_RDONLY: 0 };
     const value = own(MODES, expr.name.text);
-    if (value === undefined) {
-      lowerer.noLowering(
-        `fs.constants.${expr.name.text}`,
-        expr,
-        "F_OK, R_OK, W_OK, and X_OK are the lowered constants",
-      );
+    if (value !== undefined) return { kind: "numLit", value, type: F64, loc: locOf(expr) };
+    if (expr.name.text === "O_NOFOLLOW") {
+      return { kind: "libCall", fn: "fs.constONofollow", args: [], type: F64, loc: locOf(expr) };
     }
-    return { kind: "numLit", value, type: F64, loc: locOf(expr) };
+    lowerer.noLowering(
+      `fs.constants.${expr.name.text}`,
+      expr,
+      "F_OK, R_OK, W_OK, X_OK, O_RDONLY, and O_NOFOLLOW are the lowered constants",
+    );
   }
 
 /** `process.stdin/stdout/stderr.isTTY` → isatty(3) on the stream's fd

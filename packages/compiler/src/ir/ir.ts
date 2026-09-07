@@ -119,6 +119,9 @@ export type IrType =
    * open descriptor, matching Node's ownership safety without its GC
    * warning. Holds no references and cannot participate in a cycle. */
   | { kind: "fileHandle" }
+  /** A node:crypto Hash: heap, refcounted, mutable incremental digest state.
+   * Holds no references and cannot participate in a cycle. */
+  | { kind: "hash" }
   /** A child_process.spawnSync result (scr_child.c): heap, refcounted,
    * IMMUTABLE — the reaped child's status plus its captured utf8 stdout/
    * stderr. Holds only strings — never part of a cycle, no trace. Same
@@ -312,6 +315,7 @@ export type IrType =
 const POINTER_HANDLE_KINDS = [
   "stats",
   "fileHandle",
+  "hash",
   "spawnRes",
   "child",
   "netServer",
@@ -391,6 +395,7 @@ export const RUNTIME_RC_STEMS: Record<IrType["kind"], string> = {
   symbol: "scr_sym",
   stats: "scr_stats",
   fileHandle: "scr_file_handle",
+  hash: "scr_hash",
   spawnRes: "scr_spawn_res",
   child: "scr_child",
   netServer: "scr_net_server",
@@ -442,7 +447,7 @@ export const REF_TRUTHY_KINDS: ReadonlySet<string> = new Set([
   // symbol is not a JS object, but every symbol is truthy — the same
   // constant-true answer.
   "symbol",
-  "date", "array", "map", "set", "regex", "url", "searchParams", "stats", "fileHandle", "spawnRes", "child",
+  "date", "array", "map", "set", "regex", "url", "searchParams", "stats", "fileHandle", "hash", "spawnRes", "child",
   "netServer", "netSocket", "http2Session", "http2Stream", "dgramSocket", "testCtx", "httpReq", "httpRes", "httpClientReq",
   "secureCtx", "fsWatcher", "childStream", "procStream", "bytes", "func", "object", "record", "promise",
   // A generator object is a JS object: always truthy.
@@ -462,6 +467,7 @@ export const SEARCH_PARAMS_T: IrType = { kind: "searchParams" };
 export const SYMBOL_T: IrType = { kind: "symbol" };
 export const STATS_T: IrType = { kind: "stats" };
 export const FILEHANDLE_T: IrType = { kind: "fileHandle" };
+export const HASH_T: IrType = { kind: "hash" };
 export const SPAWNRES_T: IrType = { kind: "spawnRes" };
 export const CHILD_T: IrType = { kind: "child" };
 export const NETSERVER_T: IrType = { kind: "netServer" };
@@ -3040,6 +3046,10 @@ export type IrLibFn =
    * Buffer/typed array's bytes. Pure; never throw. */
   | "crypto.hashDigestStr"
   | "crypto.hashDigestBytes"
+  | "crypto.hashNew"
+  | "crypto.hashUpdateStr"
+  | "crypto.hashUpdateBytes"
+  | "crypto.hashDigest"
   /** crypto.randomBytes(n) → a real u8 Buffer (+1). THROWS Node's
    * RangeError on out-of-range sizes, exactly like the composed
    * randomBytesToString (which keeps its one-libCall lowering — the two
@@ -3172,6 +3182,8 @@ export type IrLibFn =
    * results are call-site record shapes ({ bytesRead/bytesWritten,
    * buffer }) assembled by the backends around the fixed runtime ABI. */
   | "fsp.open"
+  | "fsp.openFlags"
+  | "fs.constONofollow"
   | "fileHandle.fd"
   | "fileHandle.close"
   | "fileHandle.read"
@@ -4248,6 +4260,8 @@ export type IrLibFn =
   | "crypto.x509ValidTo"
   | "crypto.x509ValidToStr"
   | "stats.isSymbolicLink"
+  | "stats.dev"
+  | "stats.ino"
   | "stats.blocks"
   | "stats.nlink"
   | "stats.atimeMs"
@@ -7230,6 +7244,9 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dyn.defineProps",
   "process.chdir",
   "text.decodeFatal",
+  "crypto.hashUpdateStr",
+  "crypto.hashUpdateBytes",
+  "crypto.hashDigest",
   "fs.realpathSync",
   "fs.readFileSync",
   "fs.writeFileSync",

@@ -2340,6 +2340,8 @@ bool scr_stats_is_file(ScrStats *s);
 bool scr_stats_is_dir(ScrStats *s);
 bool scr_stats_is_symlink(ScrStats *s); /* lstat snapshots only */
 double scr_stats_size(ScrStats *s);
+double scr_stats_dev(ScrStats *s);
+double scr_stats_ino(ScrStats *s);
 double scr_stats_blocks(ScrStats *s); /* allocated size in 512-byte units */
 double scr_stats_nlink(ScrStats *s);
 double scr_stats_atime_ms(ScrStats *s); /* ms with the sub-second fraction */
@@ -2369,6 +2371,8 @@ ScrPromise *scr_fsp_lstat(ScrStr *path);
 ScrPromise *scr_fsp_access(ScrStr *path, double mode);
 ScrPromise *scr_fsp_mkdtemp(ScrStr *prefix);
 ScrPromise *scr_fsp_open(ScrStr *path, ScrStr *flags, double mode);
+ScrPromise *scr_fsp_open_flags(ScrStr *path, double flags, double mode);
+double scr_fs_constant_o_nofollow(void);
 ScrPromise *scr_file_handle_close_promise(ScrFileHandle *h);
 ScrPromise *scr_file_handle_read_file_promise(ScrFileHandle *h, ScrStr *encoding);
 ScrPromise *scr_file_handle_read_file_bytes_promise(ScrFileHandle *h, ScrStr *encoding);
@@ -2658,15 +2662,19 @@ bool scr_children_wait(double max_wait_ms);
  * RangeError on out-of-range sizes; both draw from arc4random_buf. */
 ScrStr *scr_crypto_random_uuid(void);
 ScrStr *scr_crypto_random_string(double n, ScrStr *enc); /* +1, or throws */
-/* The composed createHash(alg).update(data).digest(enc) chain, fused by
- * the compiler (no Hash handle exists). alg is "sha256" | "sha1" and enc
- * "hex" | "base64" — compile-time literals, frontend-fenced (sha1 exists
- * for the RFC 6455 Sec-WebSocket-Accept hash). Strings hash their UTF-8
- * bytes (Node's default input encoding; ScrStr storage IS utf8), the
- * bytes form a Buffer/typed array's raw bytes. Borrowed; +1 string.
- * Never throw. */
+/* Hash strings use UTF-8 bytes; Buffer/typed-array updates use raw bytes.
+ * Algorithms and digest encodings are compile-time fenced. */
 ScrStr *scr_crypto_hash_digest_str(ScrStr *alg, ScrStr *data, ScrStr *enc);
 ScrStr *scr_crypto_hash_digest_bytes(ScrStr *alg, ScrBytes *data, ScrStr *enc);
+typedef struct ScrHash ScrHash;
+ScrHash *scr_hash_new(ScrStr *alg);
+ScrHash *scr_hash_retain(ScrHash *hash);
+void scr_hash_release(ScrHash *hash);
+void *scr_hash_retain_v(void *hash);
+void scr_hash_release_v(void *hash);
+ScrHash *scr_hash_update_str(ScrHash *hash, ScrStr *data);
+ScrHash *scr_hash_update_bytes(ScrHash *hash, ScrBytes *data);
+ScrStr *scr_hash_digest(ScrHash *hash, ScrStr *enc);
 /* One-shot raw digest/HMAC by algorithm name ("md5" | "sha1" | "sha256")
  * — the island crypto shim's bridge (scr_island.c host hooks). Digest
  * bytes into out (≥32); returns the digest length, 0 for an unknown

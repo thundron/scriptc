@@ -8794,16 +8794,17 @@ export class Lowerer {
     if (!expr.questionDotToken && ts.isPropertyAccessExpression(expr.expression)) {
       const inner = this.builtinMemberOf(expr.expression);
       if (inner && inner.module === "fs" && inner.member === "constants") {
-        const MODES: Record<string, number | undefined> = { F_OK: 0, X_OK: 1, W_OK: 2, R_OK: 4 };
+        const MODES: Record<string, number | undefined> = { F_OK: 0, X_OK: 1, W_OK: 2, R_OK: 4, O_RDONLY: 0 };
         const value = own(MODES, expr.name.text);
-        if (value === undefined) {
-          this.noLowering(
-            `fs.constants.${expr.name.text}`,
-            expr,
-            "F_OK, R_OK, W_OK, and X_OK are the lowered constants",
-          );
+        if (value !== undefined) return { kind: "numLit", value, type: F64, loc };
+        if (expr.name.text === "O_NOFOLLOW") {
+          return { kind: "libCall", fn: "fs.constONofollow", args: [], type: F64, loc };
         }
-        return { kind: "numLit", value, type: F64, loc };
+        this.noLowering(
+          `fs.constants.${expr.name.text}`,
+          expr,
+          "F_OK, R_OK, W_OK, X_OK, O_RDONLY, and O_NOFOLLOW are the lowered constants",
+        );
       }
     }
     const bi = this.builtinMemberOf(expr);
@@ -8828,7 +8829,7 @@ export class Lowerer {
     }
     if (bi.member === "constants" && bi.module === "fs") {
       // A bare `fs.constants` read (not one of the baked bits above).
-      this.noLowering(`fs.constants`, expr, "F_OK, R_OK, W_OK, and X_OK are the lowered constants");
+      this.noLowering(`fs.constants`, expr, "F_OK, R_OK, W_OK, X_OK, O_RDONLY, and O_NOFOLLOW are the lowered constants");
     }
     if (builtinModuleFnOf(this, bi.module, bi.member)) {
       this.unsupported(

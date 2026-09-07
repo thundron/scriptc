@@ -54,6 +54,8 @@ export function cType(t: IrType): string {
       return "ScrStats *";
     case "fileHandle":
       return "ScrFileHandle *";
+    case "hash":
+      return "ScrHash *";
     case "spawnRes":
       return "ScrSpawnRes *";
     case "child":

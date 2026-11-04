@@ -4,6 +4,7 @@ import { mkdtempSync, copyFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { wasmApi, type WasmMemory } from "./wasm-test-api.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "../../../..");
@@ -22,7 +23,12 @@ function fnv(s: string): number {
 }
 
 function hasZig(): boolean {
-  try { execFileSync("zig", ["version"], { stdio: "ignore" }); return true; } catch { return false; }
+  try {
+    execFileSync("zig", ["version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 describe.runIf(hasZig())("toUpperCase/toLowerCase in the wasm reactor", () => {
@@ -36,12 +42,27 @@ describe.runIf(hasZig())("toUpperCase/toLowerCase in the wasm reactor", () => {
         env: { ...process.env, SCRIPTC_CC: "zigcc", SCRIPTC_TARGET: "wasm32-wasi" },
       });
 
-      const WA = (globalThis as unknown as { WebAssembly: any }).WebAssembly;
-      const mod = new WA.Module(readFileSync(join(dir, ".scriptc", "lib.wasm")));
-      let inst: any;
-      const wasi = new Proxy({}, { get: () => () => 0 });
-      inst = new WA.Instance(mod, { wasi_snapshot_preview1: wasi });
-      const ex = inst.exports;
+      const mod = new wasmApi.Module(readFileSync(join(dir, ".scriptc", "lib.wasm")));
+      const state: { memory: WasmMemory | null } = { memory: null };
+      const wasi = new Proxy<Record<string, (...args: number[]) => number>>(
+        {},
+        { get: () => () => 0 },
+      );
+      const inst = new wasmApi.Instance(mod, {
+        wasi_snapshot_preview1: wasi,
+        scriptc: {
+          panic: (p: number, n: number) => {
+            throw new Error(Buffer.from(state.memory!.buffer, p, n).toString());
+          },
+        },
+      });
+      state.memory = inst.exports.memory as WasmMemory;
+      const ex = inst.exports as {
+        _initialize: () => void;
+        kc_init: () => void;
+        kc_up: (index: number) => number;
+        kc_lo: (index: number) => number;
+      };
       ex._initialize();
       ex.kc_init();
 

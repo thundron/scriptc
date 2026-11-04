@@ -186,6 +186,39 @@ export function lowerFsVectorOrTruncateCall(
   return { kind: "libCall", fn: fn.fn, args, type: vector ? F64 : VOID, loc };
 }
 
+const NUMERIC_OPEN_BITS: Record<string, number | undefined> = {
+  O_RDONLY: 0,
+  O_WRONLY: 1,
+  O_RDWR: 2,
+  O_CREAT: 4,
+  O_EXCL: 8,
+  O_NOFOLLOW: 16,
+  O_NONBLOCK: 32,
+  O_TRUNC: 64,
+  O_APPEND: 128,
+};
+
+function numericOpenMask(lowerer: Lowerer, input: ts.Expression): number | null {
+  let node = input;
+  while (ts.isParenthesizedExpression(node) || ts.isAsExpression(node)) node = node.expression;
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.BarToken) {
+    const left = numericOpenMask(lowerer, node.left);
+    const right = numericOpenMask(lowerer, node.right);
+    return left === null || right === null ? null : left | right;
+  }
+  if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)) {
+    const imported = lowerer.builtinImportOf(node.expression);
+    if (imported?.module === "fs" && imported.member === "constants")
+      return NUMERIC_OPEN_BITS[node.name.text] ?? null;
+  }
+  if (ts.isPropertyAccessExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+    const imported = lowerer.builtinMemberOf(node.expression);
+    if (imported?.module === "fs" && imported.member === "constants")
+      return NUMERIC_OPEN_BITS[node.name.text] ?? null;
+  }
+  return null;
+}
+
 // Numeric open flags are interpreted symbolically at the call site. The
 // O_* bit values differ between Darwin and Linux, so emit a stable mask
 // and let the target runtime select its own native constants.
@@ -197,40 +230,7 @@ export function lowerFsNumericOpenCall(
   if (expr.arguments.nodes.length > 3 || expr.arguments.nodes.some(ts.isSpreadElement)) {
     lowerer.noLowering("openSync with numeric flags and this argument shape", expr);
   }
-  const bits: Record<string, number | undefined> = {
-    O_RDONLY: 0,
-    O_WRONLY: 1,
-    O_RDWR: 2,
-    O_CREAT: 4,
-    O_EXCL: 8,
-    O_NOFOLLOW: 16,
-    O_NONBLOCK: 32,
-    O_TRUNC: 64,
-    O_APPEND: 128,
-  };
-  const flagsOf = (input: ts.Expression): number | null => {
-    let node = input;
-    while (ts.isParenthesizedExpression(node) || ts.isAsExpression(node)) node = node.expression;
-    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.BarToken) {
-      const left = flagsOf(node.left);
-      const right = flagsOf(node.right);
-      return left === null || right === null ? null : left | right;
-    }
-    if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)) {
-      const imported = lowerer.builtinImportOf(node.expression);
-      if (imported?.module === "fs" && imported.member === "constants") {
-        return bits[node.name.text] ?? null;
-      }
-    }
-    if (ts.isPropertyAccessExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-      const imported = lowerer.builtinMemberOf(node.expression);
-      if (imported?.module === "fs" && imported.member === "constants") {
-        return bits[node.name.text] ?? null;
-      }
-    }
-    return null;
-  };
-  const mask = flagsOf(expr.arguments.nodes[1]!);
+  const mask = numericOpenMask(lowerer, expr.arguments.nodes[1]!);
   if (mask === null) {
     lowerer.noLowering(
       "openSync with computed numeric flags",
@@ -303,15 +303,29 @@ export function lowerFsPromisesOpenCall(
   const path = lowerFsPath(lowerer, expr.arguments.nodes[0]!);
   const defaultFlags: IrExpr = { kind: "strLit", value: "r", type: STRING, loc };
   const defaultMode: IrExpr = { kind: "numLit", value: 0o666, type: F64, loc };
-  const flags = expr.arguments.nodes[1]
-    ? lowerBuiltinOptionalDefault(lowerer, expr.arguments.nodes[1]!, STRING, defaultFlags)
-    : defaultFlags;
+  const flagsNode = expr.arguments.nodes[1];
+  const numericFlags =
+    flagsNode !== undefined && lowerer.mapTypeOf(lowerer.typeOf(flagsNode))?.kind === "f64";
+  let flags: IrExpr = defaultFlags;
+  if (flagsNode !== undefined && numericFlags) {
+    const mask = numericOpenMask(lowerer, flagsNode);
+    if (mask === null) {
+      lowerer.noLowering(
+        "fs.promises.open with computed numeric flags",
+        flagsNode,
+        "use an inline bitwise OR of fs.constants O_* members",
+      );
+    }
+    flags = numLit(mask, loc);
+  } else if (flagsNode !== undefined) {
+    flags = lowerBuiltinOptionalDefault(lowerer, flagsNode, STRING, defaultFlags);
+  }
   const mode = expr.arguments.nodes[2]
     ? lowerBuiltinOptionalDefault(lowerer, expr.arguments.nodes[2]!, F64, defaultMode)
     : defaultMode;
   return {
     kind: "libCall",
-    fn: "fsp.open",
+    fn: numericFlags ? "fsp.openFlags" : "fsp.open",
     args: [path, flags, mode],
     type: { kind: "promise", inner: FILEHANDLE_T },
     loc,

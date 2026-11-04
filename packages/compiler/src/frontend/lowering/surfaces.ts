@@ -623,7 +623,6 @@ export const STR_METHODS: Record<
   // instead of counting from the end; start > end swaps).
   substring: { method: "substring", result: STRING, minArgs: 0, maxArgs: 2 },
   repeat: { method: "repeat", result: STRING, minArgs: 1, maxArgs: 1 },
-  replaceAll: { method: "replaceAll", result: STRING, minArgs: 2, maxArgs: 2 },
   trim: { method: "trim", result: STRING, minArgs: 0, maxArgs: 0 },
   trimStart: { method: "trimStart", result: STRING, minArgs: 0, maxArgs: 0 },
   trimEnd: { method: "trimEnd", result: STRING, minArgs: 0, maxArgs: 0 },
@@ -726,12 +725,13 @@ export const STDLIB_SURFACE = {
   } as Record<string, StdlibFnEntry | undefined>,
   /** Methods on `string` receivers beyond the static strIntrinsic set
    * (split/pad/trimStart/trimEnd moved to STR_METHODS — static now).
-   * replace takes a STRING pattern (replaceAll lowers statically). `at`
+   * replace/replaceAll take STRING patterns (no regex is declared). `at`
    * returns `string`: out of range, the engine yields undefined and the
    * validated exit refuses it with a catchable TypeError (the documented
    * divergence from `string | undefined`). */
   string: {
     replace: { args: [STRING, STRING], ret: STRING },
+    replaceAll: { args: [STRING, STRING], ret: STRING },
     at: { args: [F64], ret: STRING },
   } as Record<string, StdlibFnEntry | undefined>,
 

@@ -113,6 +113,7 @@ export async function compilePackedLibrary(
           "-target",
           target.linkerTargetTriple,
           "-mexec-model=reactor",
+          "-Wl,--gc-sections",
           ...executableOptimizationLinkerArgs(target.platform, optimization),
           ...wasmExports.map((name) => `-Wl,--export=${name}`),
         ],

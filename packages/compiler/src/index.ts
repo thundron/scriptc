@@ -70,6 +70,8 @@ export type {
   AnalyzeResult,
 } from "./compile-types.js";
 import { compilePackedLibrary } from "./backend/library-pack.js";
+import { emitWasmGlue, type WasmValueClass } from "./backend/wasm-glue.js";
+import { optimizeWasmIfAvailable } from "./backend/wasm-opt.js";
 import { node24FetchCompatProfile } from "./compat/fetch-profile.js";
 import { libFnSignatures } from "./ir/builtin-signatures.js";
 import { type FunctionLayout, parseFunctionLayout } from "./backend/llvm/function-layout.js";
@@ -2570,6 +2572,34 @@ function libraryNativeFeatures(mod: IrModule, backend: "llvm"): EarlyLibraryNati
   };
 }
 
+function wasmGlueClass(valueClass: string): WasmValueClass {
+  if (valueClass === "f64" || valueClass === "void" || valueClass === "bytes") return valueClass;
+  if (valueClass === "string" || valueClass === "cstring") return "string";
+  if (valueClass === "bool" || valueClass === "u8" || valueClass === "u32" || valueClass === "i32")
+    return "i32";
+  throw new Error(`wasm-glue: ABI class '${valueClass}' is not supported`);
+}
+
+async function emitLibraryWasmGlue(profile: LibraryProfile, wasmPath: string): Promise<void> {
+  const stem = basename(wasmPath, ".wasm");
+  const glue = emitWasmGlue({
+    stem,
+    initSymbol: profile.initSymbol,
+    imports: profile.callbacks.map((callback) => ({
+      module: "scriptc",
+      name: callback.name,
+      params: callback.params.map(wasmGlueClass),
+      result: wasmGlueClass(callback.returns),
+    })),
+    exports: profile.exports.map((entry) => ({
+      name: entry.symbol,
+      params: entry.params.map(wasmGlueClass),
+      result: wasmGlueClass(entry.returns),
+    })),
+  });
+  await writeFile(join(dirname(wasmPath), `${stem}.mjs`), glue);
+}
+
 async function compileLibraryNative(
   profile: LibraryProfile,
   llvmPath: string,
@@ -2589,6 +2619,8 @@ async function compileLibraryNative(
       wasmTarget,
       libraryWasmExports(profile),
     );
+    if (profile.optimization === "release") await optimizeWasmIfAvailable(archivePath);
+    await emitLibraryWasmGlue(profile, archivePath);
     return;
   }
   const localizeSymbols = libraryLocalizeSymbols(profile);

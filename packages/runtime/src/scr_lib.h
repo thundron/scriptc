@@ -580,6 +580,7 @@ ScrPromise *scr_fsp_opendir(ScrStr *path, double buffer_size);
 ScrPromise *scr_dir_close_promise(ScrDir *d);
 ScrPromise *scr_fsp_rename(ScrStr *oldpath, ScrStr *newpath);
 ScrPromise *scr_fsp_open(ScrStr *path, ScrStr *flags, double mode);
+ScrPromise *scr_fsp_open_flags(ScrStr *path, double flags, double mode);
 ScrPromise *scr_file_handle_close_promise(ScrFileHandle *h);
 ScrPromise *scr_file_handle_utimes_promise(ScrFileHandle *h, const ScrDyn *atime, const ScrDyn *mtime);
 ScrPromise *scr_file_handle_read_file_promise(ScrFileHandle *h, ScrStr *encoding);

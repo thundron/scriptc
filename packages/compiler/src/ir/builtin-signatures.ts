@@ -3842,6 +3842,10 @@ function buildLibFnSignatures() {
       argTypes: [STRING, STRING, F64],
       result: { kind: "promise", inner: FILEHANDLE_T },
     },
+    "fsp.openFlags": {
+      argTypes: [STRING, F64, F64],
+      result: { kind: "promise", inner: FILEHANDLE_T },
+    },
     "fileHandle.fd": { argTypes: [FILEHANDLE_T], result: F64 },
     "fileHandle.close": { argTypes: [FILEHANDLE_T], result: { kind: "promise", inner: VOID } },
     "fileHandle.sync": { argTypes: [FILEHANDLE_T], result: { kind: "promise", inner: VOID } },

@@ -219,6 +219,7 @@ test("npm links the installed native executable without an interpreter", () => {
     NODE_PATH: "",
     npm_config_cache: join(f.root, "npm-cache"),
     npm_config_update_notifier: "false",
+    npm_config_ignore_scripts: "false",
   };
   const pack = (directory: string): string => {
     const result = execFileSync(npm, ["pack", "--json", "--ignore-scripts"], {

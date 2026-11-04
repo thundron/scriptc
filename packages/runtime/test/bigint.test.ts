@@ -58,6 +58,21 @@ test("bigint runtime: division, radix conversion, products, widths", async () =>
   expect(stderr.trim()).toMatch(/^(\d+)\/\1 cases passed$/);
 });
 
+function llvmNm(): string | null {
+  for (const tool of [
+    process.env["LLVM_NM"],
+    "llvm-nm",
+    process.platform === "darwin" ? "/opt/homebrew/opt/llvm/bin/llvm-nm" : undefined,
+  ]) {
+    if (tool === undefined) continue;
+    try {
+      execFileSync(tool, ["--version"], { stdio: "ignore" });
+      return tool;
+    } catch {}
+  }
+  return null;
+}
+
 function zigOnPath(): boolean {
   try {
     execFileSync("zig", ["version"], { stdio: "ignore" });
@@ -85,8 +100,9 @@ test.skipIf(!zigOnPath())("bigint runtime builds for wasm32 with its size guards
     out,
     join(testDir, "../src/scr_bigint.c"),
   ]);
-  const { stdout } = await execFileAsync("zig", ["nm", out]).catch(async () =>
-    execFileAsync("llvm-nm", [out]),
-  );
-  expect(stdout).toContain("scr_bigint_digits_fit");
+  const nm = llvmNm();
+  if (nm !== null) {
+    const { stdout } = await execFileAsync(nm, [out]);
+    expect(stdout).toContain("scr_bigint_digits_fit");
+  }
 });

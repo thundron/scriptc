@@ -18,8 +18,13 @@ import {
   type ZlibOptions,
 } from "node:zlib";
 
-const digest = (bytes: Buffer): string =>
-  `${bytes.length} ${createHash("sha256").update(bytes).digest("hex").slice(0, 16)}`;
+// Gzip byte 9 identifies the target OS (Darwin 19, WASI/Linux 3); normalize
+// that metadata byte while requiring identical compressed content and trailer.
+const digest = (bytes: Buffer, gzip = false): string => {
+  const hashed = gzip ? Buffer.from(bytes) : bytes;
+  if (gzip && hashed.length >= 10) hashed[9] = 0;
+  return `${bytes.length} ${createHash("sha256").update(hashed).digest("hex").slice(0, 16)}`;
+};
 
 const words = ["stream", "pipeline", "émetteur", "π", "buffer", "deflate", "\u0000", "window"];
 const parts: string[] = [];
@@ -40,7 +45,7 @@ for (const level of [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9]) {
   const deflated = deflateSync(text, { level });
   console.log("deflate", level, digest(deflated), inflateSync(deflated).equals(text));
   console.log("raw", level, digest(deflateRawSync(binary, { level })));
-  console.log("gzip", level, digest(gzipSync(text, { level })));
+  console.log("gzip", level, digest(gzipSync(text, { level }), true));
 }
 
 const variants: [string, ZlibOptions][] = [
@@ -63,16 +68,16 @@ for (const [label, options] of variants) {
 
 for (const level of [1, 6, 9]) {
   const gz = gzipSync(large, { level });
-  console.log("1 MiB gzip", level, digest(gz), gunzipSync(gz).equals(large));
+  console.log("1 MiB gzip", level, digest(gz, true), gunzipSync(gz).equals(large));
   const raw = deflateRawSync(large, { level, windowBits: 10 });
   console.log("1 MiB raw windowBits 10", level, digest(raw), inflateRawSync(raw, { windowBits: 10 }).equals(large));
 }
 
-function collect(stream: Deflate | Gzip, label: string, done: () => void): void {
+function collect(stream: Deflate | Gzip, label: string, done: () => void, gzip = false): void {
   const chunks: Buffer[] = [];
   stream.on("data", (chunk: Buffer) => chunks.push(chunk));
   stream.on("end", () => {
-    console.log(label, digest(Buffer.concat(chunks)));
+    console.log(label, digest(Buffer.concat(chunks), gzip));
     done();
   });
 }
@@ -80,7 +85,7 @@ function collect(stream: Deflate | Gzip, label: string, done: () => void): void 
 const flushed = createDeflate({ level: 6 });
 collect(flushed, "stream sync flush", () => {
   const changed = createGzip({ level: 1 });
-  collect(changed, "stream params", () => console.log("done"));
+  collect(changed, "stream params", () => console.log("done"), true);
   changed.write(text.subarray(0, 8000));
   changed.flush(constants.Z_FULL_FLUSH, () => {
     changed.params(9, constants.Z_DEFAULT_STRATEGY, () => {

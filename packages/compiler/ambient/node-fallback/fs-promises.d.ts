@@ -102,7 +102,11 @@ declare module "fs/promises" {
     stat(): Promise<import("node:fs").Stats>;
     [Symbol.asyncDispose](): Promise<void>;
   }
-  export function open(path: string | URL, flags?: string, mode?: number): Promise<FileHandle>;
+  export function open(
+    path: string | URL,
+    flags?: string | number,
+    mode?: number,
+  ): Promise<FileHandle>;
   export function link(
     existingPath: string | Uint8Array | URL,
     newPath: string | Uint8Array | URL,

@@ -1,6 +1,6 @@
-text-decoder-label.ts:16:31 - error SC1090: the reference to 'forwardLabel' (a binding form with no lowering) is not supported yet
+text-decoder-label.ts:21:31 - error SC1090: the reference to 'forwardLabel' (a binding form with no lowering) is not supported yet
 
-  15 |   // @ts-expect-error Deliberately retain the runtime TDZ shape.
-  16 |   console.log(new TextDecoder(forwardLabel).decode(bytes));
+  20 |   // @ts-expect-error Deliberately retain the runtime TDZ shape.
+  21 |   console.log(new TextDecoder(forwardLabel).decode(bytes));
      |                               ^~~~~~~~~~~~
-  17 |   const forwardLabel = "windows-1252" as const;
+  22 |   const forwardLabel = "windows-1252" as const;

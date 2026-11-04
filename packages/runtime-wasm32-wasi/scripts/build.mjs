@@ -45,7 +45,7 @@ process.env.SCRIPTC_RUNTIME_PACK_CONFIG = JSON.stringify({
     minimum_os: "WASI Preview 1",
   },
   targetArgs: ["-target", "wasm32-wasi"],
-  compileFlags: [],
+  compileFlags: ["-ffunction-sections", "-fdata-sections"],
   systemLibraries: [
     { name: "wasi-emulated-signal", predicate: true },
     { name: "wasi-emulated-process-clocks", predicate: true },

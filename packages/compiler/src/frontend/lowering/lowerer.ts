@@ -18041,11 +18041,6 @@ export class Lowerer {
       const symbol = this.checker.getSymbolAtLocation(expr);
       const decl = symbol ? symbol.declarations[0] : undefined;
       if (!decl) return null;
-      const named = builtinImportOf(this, expr);
-      if (named && named.module === "path" &&
-          (named.member === "posix" || named.member === "win32")) {
-        return `path/${named.member}`;
-      }
       // The DEFAULT-import twin: Node's default export of a CJS builtin
       // IS the module object, so `import path from "node:path"` exposes
       // exactly the namespace form's member surface for EVERY supported

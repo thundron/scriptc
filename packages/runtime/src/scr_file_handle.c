@@ -229,8 +229,17 @@ static bool scr_file_handle_mode_valid(double mode) {
   return true;
 }
 
-ScrFileHandle *scr_file_handle_open(ScrStr *path, ScrStr *flags, double mode) {
+static ScrFileHandle *scr_file_handle_from_fd(int fd) {
   scr_file_handle_dyn_install();
+  ScrFileHandle *h = calloc(1, sizeof(ScrFileHandle));
+  if (!h) scr_trap("scriptc: out of memory\n");
+  h->rc = 1;
+  h->fd = fd;
+  h->refs = 1;
+  return h;
+}
+
+ScrFileHandle *scr_file_handle_open(ScrStr *path, ScrStr *flags, double mode) {
   if (!scr_file_handle_path_valid(path)) return NULL;
   int of = scr_file_handle_open_flags(flags);
   if (of < 0) return NULL;
@@ -240,12 +249,7 @@ ScrFileHandle *scr_file_handle_open(ScrStr *path, ScrStr *flags, double mode) {
     scr_fs_throw(errno, "open", path);
     return NULL;
   }
-  ScrFileHandle *h = calloc(1, sizeof(ScrFileHandle));
-  if (!h) scr_trap("scriptc: out of memory\n");
-  h->rc = 1;
-  h->fd = fd;
-  h->refs = 1;
-  return h;
+  return scr_file_handle_from_fd(fd);
 }
 
 ScrFileHandle *scr_file_handle_retain(ScrFileHandle *h) {
@@ -468,6 +472,13 @@ ScrStats *scr_file_handle_stat(ScrFileHandle *h) {
 
 ScrPromise *scr_fsp_open(ScrStr *path, ScrStr *flags, double mode) {
   ScrFileHandle *h = scr_file_handle_open(path, flags, mode);
+  return scr_promise_settled_ref(h, &scr_file_handle_retain_v,
+                                 &scr_file_handle_release_v, NULL);
+}
+
+ScrPromise *scr_fsp_open_flags(ScrStr *path, double flags, double mode) {
+  double fd = scr_fs_open_numeric(path, flags, mode);
+  ScrFileHandle *h = scr_exc_pending() ? NULL : scr_file_handle_from_fd((int)fd);
   return scr_promise_settled_ref(h, &scr_file_handle_retain_v,
                                  &scr_file_handle_release_v, NULL);
 }

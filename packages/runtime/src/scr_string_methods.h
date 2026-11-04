@@ -41,6 +41,7 @@ extern SCR_TL ScrStrScan scr_str_scan;
  * which half i addresses. NaN when ToIntegerOrInfinity(i) is outside
  * [0, length) — note charCodeAt(1.5) is index 1, matching Node. */
 double scr_str_char_code_at(ScrStr *s, double i);
+bool scr_str_code_point_at_raw(ScrStr *s, double i, double *out);
 
 /* Converts a non-ASCII s whose units fit the budget to UTF-16 at once and
  * publishes it in scr_str_scan, for a loop about to read it between the

@@ -1056,7 +1056,7 @@ static inline void scr_dyn_copy_prop_at(ScrDyn *target, const ScrDyn *source, si
   if (source->v.obj.layout) {
     ScrDynProp prop = scr_dyn_obj_prop_at(source, i);
     ScrDynEntry entry = {(char *)prop.key, prop.key_len, prop.value, NULL, NULL,
-                         false, false, false, true, true, true};
+                         false, false, false, false, true, true, true};
     scr_dyn_copy_entry(target, source, &entry);
     return;
   }

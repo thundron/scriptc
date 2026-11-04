@@ -13,7 +13,7 @@
     "bench:runtime": "node scripts/bench-runtime.mjs",
     "bench:ast-access": "node scripts/bench-ast-access.mjs",
     "bench:backend-analysis": "node scripts/bench-backend-analysis.mjs",
-    "test": "vitest run",
+    "test": "node scripts/check-test-environment.mjs && vitest run",
     "test:ts7": "node scripts/test-ts7.mjs",
     "test:checker-identity": "node scripts/checker-identity.mjs",
     "generate:ts7-ast": "node scripts/generate-ts7-ast-schema.mjs",

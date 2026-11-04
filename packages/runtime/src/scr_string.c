@@ -2329,6 +2329,22 @@ double scr_str_char_code_at(ScrStr *s, double i) {
   return mid ? (double)(0xDC00 + (v & 0x3FF)) : (double)(0xD800 + (v >> 10));
 }
 
+bool scr_str_code_point_at_raw(ScrStr *s, double i, double *out) {
+  double first = scr_str_char_code_at(s, i);
+  if (isnan(first)) return false;
+  uint32_t high = (uint32_t)first;
+  if (high >= 0xD800 && high <= 0xDBFF) {
+    double second = scr_str_char_code_at(s, scr_to_integer_or_infinity(i) + 1.0);
+    if (!isnan(second)) {
+      uint32_t low = (uint32_t)second;
+      if (low >= 0xDC00 && low <= 0xDFFF)
+        first = (double)(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00));
+    }
+  }
+  *out = first;
+  return true;
+}
+
 double scr_str_index_of(ScrStr *s, ScrStr *needle, double fromIndex) {
   /* A proven-ASCII receiver: byte offsets are UTF-16 indexes, and a needle
    * with other bytes is never found. A start index that is not positive

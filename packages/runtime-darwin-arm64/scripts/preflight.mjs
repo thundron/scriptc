@@ -16,6 +16,6 @@ try {
 
 process.stderr.write(
   "\n@scriptc/runtime-darwin-arm64: runtime-pack.json/artifacts are MISSING (native link will fail).\n" +
-  "  Build it:   pnpm --filter @scriptc/runtime-darwin-arm64 run build:native\n\n",
+    "  Build it:   pnpm --filter @scriptc/runtime-darwin-arm64 run build:native\n\n",
 );
 process.exit(0);

@@ -1046,6 +1046,7 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "dir.closeSync": "scr_dir_close",
   "dir.close": "scr_dir_close_promise",
   "fsp.open": "scr_fsp_open",
+  "fsp.openFlags": "scr_fsp_open_flags",
   "fileHandle.fd": "scr_file_handle_fd",
   "fileHandle.close": "scr_file_handle_close_promise",
   "fileHandle.sync": "scr_file_handle_sync_promise",

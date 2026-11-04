@@ -1,0 +1,94 @@
+class-interface-refinements.ts:8:26 - error SC2002: record shapes must match exactly or width-coerce: expected 'Box', got '{ current: number; read: () => number; value: number }'
+
+  7 | // An interface cannot manufacture a native class from a structural mock.
+  8 | const mock: NumericBox = { value: 1, current: 1, read: () => 1 };
+    |                          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  9 | console.log(mock.current);
+
+  hint: width subtyping compiles as a copy (each expected field copied off the source; extra fields drop) — this pair is outside the copy's rules; build a literal with exactly the expected fields instead
+
+class-interface-refinements.ts:12:16 - error SC2001: values of type 'AddedStorage' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, Dates, functions, classes, records, unions of those, and 'unknown')
+
+  11 | interface AddedStorage extends Box { extra: string; }
+  12 | function added(view: AddedStorage): string { return view.extra; }
+     |                ^~~~
+  13 | console.log(added(new Box() as AddedStorage));
+
+class-interface-refinements.ts:13:13 - error SC2004: uses of 'added' inherit the blocker on its declaration
+
+  12 | function added(view: AddedStorage): string { return view.extra; }
+  13 | console.log(added(new Box() as AddedStorage));
+     |             ^~~~~
+  14 | 
+
+  hint: the declaration of 'added' did not compile — fix the diagnostic reported there and these sites clear with it
+
+class-interface-refinements.ts:16:18 - error SC2001: values of type 'ChangedMethod' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, Dates, functions, classes, records, unions of those, and 'unknown')
+
+  15 | interface ChangedMethod extends Box { read(): number; }
+  16 | function changed(view: ChangedMethod): number { return view.read(); }
+     |                  ^~~~
+  17 | console.log(changed(new Box() as ChangedMethod));
+
+class-interface-refinements.ts:17:13 - error SC2004: uses of 'changed' inherit the blocker on its declaration
+
+  16 | function changed(view: ChangedMethod): number { return view.read(); }
+  17 | console.log(changed(new Box() as ChangedMethod));
+     |             ^~~~~~~
+  18 | 
+
+  hint: the declaration of 'changed' did not compile — fix the diagnostic reported there and these sites clear with it
+
+class-interface-refinements.ts:20:18 - error SC2006: values of type 'Indexed' cannot be compiled: this index signature is outside the supported shape (string or number keys; values limited to numbers, strings, booleans, records, classes, arrays, unions, functions, Maps, Sets, RegExps, Dates, Promises, or 'unknown')
+
+  19 | type Indexed = Box & { [name: string]: number };
+  20 | function indexed(view: Indexed, key: string): number { return view[key]!; }
+     |                  ^~~~
+  21 | console.log(indexed(new Box() as Indexed, "value"));
+
+  hint: string- and number-keyed index signatures over the supported value types compile directly; symbol keys and dual signatures with unequal value types have no lowering
+
+class-interface-refinements.ts:21:13 - error SC2004: uses of 'indexed' inherit the blocker on its declaration
+
+  20 | function indexed(view: Indexed, key: string): number { return view[key]!; }
+  21 | console.log(indexed(new Box() as Indexed, "value"));
+     |             ^~~~~~~
+  22 | 
+
+  hint: the declaration of 'indexed' did not compile — fix the diagnostic reported there and these sites clear with it
+
+class-interface-refinements.ts:27:20 - error SC2008: values of type 'Both' cannot be compiled: this intersection resolves to no runtime shape
+
+  26 | type Both = Box & Other;
+  27 | function ambiguous(view: Both): string { return view.other; }
+     |                    ^~~~
+  28 | console.log(ambiguous(new Box() as Both));
+
+  hint: restate the intersection as a single interface or type literal with the combined members; mixin-produced intersections compile where the mixin chain pins one instantiation
+
+class-interface-refinements.ts:28:13 - error SC2004: uses of 'ambiguous' inherit the blocker on its declaration
+
+  27 | function ambiguous(view: Both): string { return view.other; }
+  28 | console.log(ambiguous(new Box() as Both));
+     |             ^~~~~~~~~
+  29 | 
+
+  hint: the declaration of 'ambiguous' did not compile — fix the diagnostic reported there and these sites clear with it
+
+class-interface-refinements.ts:32:14 - error SC2002: record shapes must match exactly or width-coerce: expected 'Box', got '{ current: number; read: () => number; value: number }'
+
+  31 | const record = { value: 3, current: 3, read: () => 3 };
+  32 | console.log((record as BaseView).current);
+     |              ^~~~~~~~~~~~~~~~~~
+  33 | 
+
+  hint: width subtyping compiles as a copy (each expected field copied off the source; extra fields drop) — this pair is outside the copy's rules; build a literal with exactly the expected fields instead
+
+class-interface-refinements.ts:39:14 - error SC1090: asserting a 'Mimic' instance as the unrelated class 'Box' (neither class extends the other, and class identity is nominal in compiled code) is not supported yet
+
+  38 | }
+  39 | console.log((new Mimic() as BaseView).current);
+     |              ^~~~~~~~~~~~~~~~~~~~~~~
+  40 | 
+
+  hint: narrow with `instanceof Box` where the value can really be one, or declare a shared base class and assert through it

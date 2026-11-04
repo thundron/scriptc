@@ -1,0 +1,6 @@
+runtime-optional-refined-union.ts:11:36 - error SC1090: a direct read from a runtime-optional capture with multiple value arms are not supported yet
+
+  10 |   for (const item of items) {
+  11 |     if (hasRect(item)) console.log(item.rect.width);
+     |                                    ^~~~
+  12 |   }

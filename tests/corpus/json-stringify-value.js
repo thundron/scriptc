@@ -1,0 +1,13 @@
+const stringify = JSON.stringify;
+console.log(stringify === JSON.stringify, stringify.name, stringify.length);
+console.log(stringify("Hello, world!"));
+console.log(stringify({ answer: 42, values: [true, null, "quote\""] }));
+console.log(typeof stringify(), typeof stringify(undefined), typeof stringify(() => 1));
+console.log(stringify({ a: 1 }, null, 2));
+console.log(stringify({ a: 1 }, false, "--"));
+console.log(stringify({ a: 1 }, undefined, 20));
+console.log(stringify({ a: 1 }, undefined, -1));
+console.log(stringify({ a: 1 }, undefined, NaN));
+console.log(stringify({ a: 1 }, (key, value) => key === "a" ? value + 1 : value));
+console.log(["a", "b"].map(stringify).join(" "));
+console.log(stringify.call(null, { a: 1 }));

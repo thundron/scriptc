@@ -81,7 +81,10 @@ function runLane(cmd: string, args: string[], driver: string | null): Promise<Pr
 async function build(entry: string): Promise<string> {
   const hash = createHash("sha256");
   hash.update(entry).update(readFileSync(entry));
-  const key = hash.update(sanitize ? "san" : "plain").digest("hex").slice(0, 16);
+  const key = hash
+    .update(sanitize ? "san" : "plain")
+    .digest("hex")
+    .slice(0, 16);
   const outDir = join(cacheDir, `dgram-${key}`);
   mkdirSync(outDir, { recursive: true });
   const result = await compile(entry, {
@@ -91,7 +94,7 @@ async function build(entry: string): Promise<string> {
     // Pinned: a networking suite whose flake surface is already the
     // sockets — the compiled lane stays the C reference so any diff is
     // network behavior, never a backend-lane change.
-    backend: "c",
+    backend: "llvm",
   });
   if (!result.ok) {
     throw new Error(
@@ -111,17 +114,21 @@ const cases = globSync(join(fixturesRoot, "cases/*/main.ts"))
   }));
 
 describe(`dgram differential (${cases.length} programs${sanitize ? ", sanitized" : ""})`, () => {
-  test.for(cases.map((c) => [c.name, c] as const))("%s", async ([, c]) => {
-    const binary = await build(c.entry);
-    // Sequential, not parallel: both lanes bind ephemeral ports and drive
-    // real sockets — parallelism buys little and interleaves kernel state.
-    const nodeRes = await runLane("node", [c.entry], c.driver);
-    const nativeRes = await runLane(binary, [], c.driver);
-    expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
-    if (!nodeRes.stdout.equals(nativeRes.stdout)) {
-      expect.unreachable("stdout differed at byte level but not after utf8 decode");
-    }
-    expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
-    expect(nativeRes.driverStdout).toBe(nodeRes.driverStdout);
-  }, 120_000);
+  test.for(cases.map((c) => [c.name, c] as const))(
+    "%s",
+    async ([, c]) => {
+      const binary = await build(c.entry);
+      // Sequential, not parallel: both lanes bind ephemeral ports and drive
+      // real sockets — parallelism buys little and interleaves kernel state.
+      const nodeRes = await runLane("node", [c.entry], c.driver);
+      const nativeRes = await runLane(binary, [], c.driver);
+      expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+      if (!nodeRes.stdout.equals(nativeRes.stdout)) {
+        expect.unreachable("stdout differed at byte level but not after utf8 decode");
+      }
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+      expect(nativeRes.driverStdout).toBe(nodeRes.driverStdout);
+    },
+    120_000,
+  );
 });

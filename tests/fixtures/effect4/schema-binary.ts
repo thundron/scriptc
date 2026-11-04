@@ -1,0 +1,1 @@
+import * as Schema from "effect/Schema";import * as SchemaBinary from "effect/encoding/SchemaBinary";const S=SchemaBinary.toCodec(Schema.Struct({n:Schema.Int}));const bytes=Schema.encodeSync(S)({n:42});console.log(JSON.stringify(Schema.decodeSync(S)(bytes)))

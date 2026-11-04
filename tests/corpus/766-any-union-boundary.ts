@@ -1,4 +1,3 @@
-// @dynamic
 // Crossings INTO the island beyond the JSON set: undefined/null-armed
 // unions (a runtime tag switch — unit arms become the engine's OWN
 // undefined/null, so a property spelled `tag: maybeUndefined` exists with
@@ -38,6 +37,9 @@ console.log(`${hw.length}`, `${hw[1]}`, `${hw.constructor.name}`);
 const floats = new Float32Array([1.5, -0.25]);
 const hf: any = floats;
 console.log(`${hf.length}`, `${hf[1]}`, `${hf.constructor.name}`);
+const doubles = new Float64Array([Math.PI, -0.1]);
+const hd: any = doubles;
+console.log(`${hd.length}`, `${hd[0]}`, `${hd[1]}`, `${hd.constructor.name}`);
 
 // A bytes-armed union, both arms.
 function payload(flag: boolean): Uint8Array | string {

@@ -1,0 +1,1 @@
+import * as Effect from "effect/Effect";import * as Exit from "effect/Exit";import * as Cause from "effect/Cause";const controller=new AbortController();const p=Effect.runPromiseExit(Effect.never,{signal:controller.signal});controller.abort();p.then((x:Exit.Exit<never,never>)=>console.log(Exit.isFailure(x)&&Cause.hasInterrupts(x.cause)))

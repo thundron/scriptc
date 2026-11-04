@@ -18,7 +18,7 @@ new-target-field-initializer.ts:9:20 - error SC2004: uses of 'a' inherit the blo
 
    8 | const a = new A();
    9 | console.log(typeof a.d);
-     |                    ^~~
+     |                    ^
   10 | 
 
   hint: the declaration of 'a' did not compile — fix the diagnostic reported there and these sites clear with it

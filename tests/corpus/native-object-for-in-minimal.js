@@ -1,0 +1,11 @@
+const parent = JSON.parse('{"first":1,"second":2}');
+const child = Object.create(parent);
+console.log(Object.keys(parent).join(','));
+console.log(Object.getOwnPropertyNames(parent).join(','));
+console.log('first' in child);
+const parentKeys = [];
+for (const key in parent) parentKeys.push(key);
+console.log(parentKeys.join(','));
+const keys = [];
+for (const key in child) keys.push(key);
+console.log(keys.join(','));

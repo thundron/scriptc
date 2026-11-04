@@ -1,13 +1,6 @@
-// @deferred-fences: 2
-// The collect-time classification probes (trap/nullish/dead) resolve
-// initializer symbols; that resolution must NOT flush a reached
-// declaration's DEFERRED collection diagnostics onto the build. At
-// 0.0.10 the probe on `const i = new B()` flushed B's deferred
-// "constructor-assigned fields shadowing methods" fence eagerly, failing
-// this JS build at compile time where the JS-input design defers the
-// fence to runtime (checkJsFiles_noErrorLocation / multipleDeclarations /
-// jsdocTemplateClass corpus regressions). The fenced constructor never
-// runs here, so the compiled binary matches Node.
+// Collect-time initializer classification must not execute the guarded
+// constructor. Constructor-assigned fields that shadow methods now lower
+// statically, including in this untaken branch.
 class A {
   constructor() {}
   foo() {

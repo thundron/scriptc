@@ -1,0 +1,1 @@
+import * as Schema from "effect/Schema";import * as SchemaAOTCompiler from "effect/schema/SchemaAOTCompiler";const source=SchemaAOTCompiler.compile([{ast:Schema.Struct({n:Schema.Int}).ast,operations:["decode","is","make"]}]);console.log(source.includes("install"),source.includes("globalThis.Function"))

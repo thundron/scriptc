@@ -1,5 +1,7 @@
 #include "diagnostics.h"
 #include "emit.h"
+#include "profile.h"
+#include "runtime-unit.h"
 #include "target.h"
 
 #include "llvm/ADT/StringRef.h"
@@ -56,6 +58,10 @@ int version(int Argc, char **Argv) {
       {"supported_targets", std::move(SupportedTargets)},
       {"default_target", scriptc::DefaultTarget},
       {"data_layout", Machine->createDataLayout().getStringRepresentation()},
+      // Commands and options added within one protocol version, for callers
+      // that also run against older helpers.
+      {"features", json::Array{"runtime-unit-profile", "profile-functions",
+                                "runtime-unit-optional-bitcode"}},
   };
   outs() << formatv("{0}\n", json::Value(std::move(Response)));
   return 0;
@@ -72,6 +78,14 @@ int main(int Argc, char **Argv) {
     report_fatal_error("scriptc LLVM fatal diagnostic self-test");
   if (Argc >= 2 && StringRef(Argv[1]) == "version")
     return version(Argc, Argv);
+  if (Argc >= 2 && StringRef(Argv[1]) == "runtime-unit")
+    return scriptc::runtimeUnit(Argc, Argv);
+  if (Argc >= 2 && StringRef(Argv[1]) == "prune-import")
+    return scriptc::pruneImport(Argc, Argv);
+  if (Argc >= 2 && StringRef(Argv[1]) == "merge-profiles")
+    return scriptc::mergeProfiles(Argc, Argv);
+  if (Argc >= 2 && StringRef(Argv[1]) == "profile-functions")
+    return scriptc::profileFunctions(Argc, Argv);
   if (Argc >= 2 && StringRef(Argv[1]) == "emit") {
     std::optional<scriptc::EmitOptions> Options =
         scriptc::parseEmitOptions(Argc, Argv);
@@ -81,9 +95,12 @@ int main(int Argc, char **Argv) {
           "emit requires --input <file> --output <file> and accepts "
           "--filetype <obj|asm> --target <triple> --opt-level <0|1|2|3|s|z> "
           "--relocation-model pic --diagnostic-format json "
-          "--source-path <path>");
+          "--source-path <path> --import-bitcode <file> --cache-dir <dir> "
+          "--profile-generate <pattern> --profile-use <file.profdata>");
     return scriptc::emit(*Options);
   }
   return scriptc::reportError("usage",
-                              "expected 'version --format=json' or 'emit'");
+                              "expected 'version --format=json', 'emit', 'runtime-unit', "
+                              "'prune-import', 'merge-profiles', or "
+                              "'profile-functions'");
 }

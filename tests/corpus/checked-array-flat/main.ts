@@ -1,0 +1,14 @@
+import { flatten } from "./operations.mjs";
+const inner = [1, 2];
+const outer = [inner, [3]];
+const record = { value: 4 };
+const inputs = new Map<string, unknown>();
+inputs.set("outer", outer);
+inputs.set("record", record);
+const zero = flatten(inputs, 0);
+const one = flatten(inputs, 1);
+const two = flatten(inputs, 2);
+console.log(zero[0] === outer, one[0] === inner, two[3] === record);
+console.log(JSON.stringify(zero), JSON.stringify(one), JSON.stringify(two));
+inner.push(6);
+console.log(JSON.stringify(flatten(inputs, 2)));

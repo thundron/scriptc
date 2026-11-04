@@ -6,8 +6,8 @@
 // ignored), `T | undefined` taking the undefined arm when the argument is
 // absent, surplus arguments dropped (JS call semantics). Async callbacks
 // return a real thenable the package can await; a rejection crosses as a
-// real engine Error. Differential vs Node byte-for-byte.
-import { catching, chainCatchLog, chainLog, collectTwice, extraArgs, fire, maybe, withBool, withNumbers, withOptions, withString } from "typedcb";
+// real engine Error. Results are compared with Node.
+import { catching, chainCatchLog, chainLog, classifyCaught, collectTwice, extraArgs, fire, maybe, opaqueRoundTrip, withBool, withNumbers, withOptions, withString } from "typedcb";
 
 interface Opts {
   name: string;
@@ -49,6 +49,19 @@ const thrown: string = catching((n: number) => {
 }, 5);
 console.log(thrown);
 
+console.log("reference", classifyCaught((n: number) => {
+  if (n > 0) throw new ReferenceError("missing");
+  return n;
+}, 1));
+console.log("eval", classifyCaught((n: number) => {
+  if (n > 0) throw new EvalError("eval");
+  return n;
+}, 1));
+console.log("uri", classifyCaught((n: number) => {
+  if (n > 0) throw new URIError("uri");
+  return n;
+}, 1));
+
 // A function with a DEFAULTED parameter as a value (commander's
 // option-collector pattern): the completed signature's `string[] |
 // undefined` param takes the undefined arm when the package omits the
@@ -59,6 +72,10 @@ function collect(value: string, previous: string[] = []): string[] {
 }
 const collected: string = collectTwice(collect);
 console.log(collected);
+
+// Unknown callback arguments retain engine identity, including cyclic data
+// and callable values; scalar values normalize without losing -0 or NaN.
+console.log(opaqueRoundTrip((value: unknown): unknown => value));
 
 // Async callbacks: the package awaits a real thenable (and logs
 // island-side). The fulfillment marshals back; a rejection arrives as a

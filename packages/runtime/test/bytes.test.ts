@@ -19,17 +19,28 @@ let scratch: string;
 beforeAll(async () => {
   await mkdir(join(testDir, "build"), { recursive: true });
   await execFileAsync("clang", [
-    "-std=c11", "-O1", "-Wall", "-Wextra",
-    "-fsanitize=address", "-DSCR_RC_AUDIT",
-    "-I", join(testDir, "../src"),
-    "-o", bin,
+    "-std=c11",
+    "-O1",
+    "-Wall",
+    "-Wextra",
+    "-fsanitize=address,undefined",
+    "-DSCR_RC_AUDIT",
+    "-I",
+    join(testDir, "../src"),
+    "-o",
+    bin,
     join(testDir, "test_bytes.c"),
+    join(testDir, "../src/scr_bytes.test.c"),
     join(testDir, "../src/scr_bytes.c"),
+    join(testDir, "../src/scr_shared.c"),
     join(testDir, "../src/scr_bytes_io.c"),
+    join(testDir, "../src/scr_fs_cp.c"),
     join(testDir, "../src/scr_zlib.c"),
     join(testDir, "../src/scr_lib.c"),
+    join(testDir, "../src/scr_hash.c"),
     join(testDir, "../src/scr_string.c"),
     join(testDir, "../src/scr_array.c"),
+    join(testDir, "../src/scr_arena.c"),
     join(testDir, "../src/scr_map.c"),
     join(testDir, "../src/scr_exception.c"),
     join(testDir, "../src/scr_error.c"),
@@ -40,11 +51,14 @@ beforeAll(async () => {
     join(testDir, "../src/scr_object.c"),
     join(testDir, "../src/scr_union.c"),
     join(testDir, "../src/scr_cycle.c"),
+    join(testDir, "../src/scr_alloc.c"),
     join(testDir, "../src/scr_json.c"),
+    join(testDir, "../src/scr_bigint.c"),
     join(testDir, "../src/scr_async.c"),
     join(testDir, "../src/scr_child.c"),
     join(testDir, "../src/scr_path.c"),
     join(testDir, "../src/scr_url.c"),
+    join(testDir, "../src/scr_url_params.c"),
     "-Wno-deprecated-declarations",
     "-lz",
     ...(process.platform === "linux" ? ["-D_GNU_SOURCE", "-lm"] : []),
@@ -57,17 +71,17 @@ afterAll(async () => {
 });
 
 test("bytes runtime: coercions, encodings, zlib, fs, RC", async () => {
-  const { stderr } = await execFileAsync(bin, [scratch]);
+  const { stderr } = await execFileAsync(bin, [scratch], {
+    env: { ...process.env, UBSAN_OPTIONS: "halt_on_error=1" },
+  });
   expect(stderr.trim().split("\n").pop()).toMatch(/^(\d+)\/\1 cases passed$/);
 });
 
-// JS reads undefined / ignores writes out of bounds on typed arrays; both
-// are unrepresentable, so the runtime traps (documented divergence, the
-// array runtime's exact discipline).
+// Statically typed numeric reads cannot represent undefined and still trap.
+// Invalid writes are ignored and covered by the runtime assertions above.
 test.each([
   ["--crash-get-oob", "typed array index 1 out of bounds (length 1)"],
   ["--crash-get-frac", "typed array index 0.5 out of bounds (length 1)"],
-  ["--crash-set-oob", "typed array index 1 out of bounds (length 1)"],
 ])("trap aborts (%s)", async (mode, message) => {
   const err = await execFileAsync(bin, [mode]).then(
     () => {

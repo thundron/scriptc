@@ -1,102 +1,49 @@
-/**
- * The explicitly external C toolchain path.
- *
- * This module is deliberately narrow at the executable boundary: normal
- * macOS arm64 LLVM builds emit a program object through the bundled helper
- * and hand it to `linker.ts`.  Generated C, `--from-c`, sanitizer builds,
- * cross targets, and the temporary LLVM fallback continue to use this path.
- * Keeping that distinction here prevents a platform linker driver from
- * accidentally becoming the abstraction that compiles scriptc programs.
- */
-import {
-  compileC,
-  compileLibArchive,
-  configuredTargetPlatform,
-  type CcOptions,
-  type LibArchiveOptions,
-} from "./native-toolchain.js";
+/** External LLVM/C compilation for instrumented runtime development and
+ * caller-supplied native sources. Production program objects use the
+ * bundled LLVM helper and precompiled runtime packs. */
+import { compileC } from "./native/executable.js";
+import { compileLibArchive } from "./native/library.js";
+import { type CcOptions, type LibArchiveOptions } from "./native/contracts.js";
 
+export { CcCompileError, subprocessFailureDetail } from "./native/process.js";
+export { compileC } from "./native/executable.js";
+export { compileLibArchive } from "./native/library.js";
 export {
-  CcCompileError,
-  compileC,
-  compileLibArchive,
   compilerDriverSupportsPersistentCache,
-  configuredTargetPlatform,
   executableNativeEnvironmentFingerprint,
+} from "./native/tool-identity.js";
+export {
+  configuredTargetPlatform,
   isAndroidTarget,
   isIosTarget,
   isMobileTarget,
   mobileLibraryTarget,
   mobileTargetRefusal,
-  prepareBuildCacheRoot,
-  resolveCc,
-  resolveBuildCacheRoot,
-  runtimeSrcDir,
-  subprocessFailureDetail,
+} from "./target-platform.js";
+export { prepareBuildCacheRoot, resolveBuildCacheRoot } from "./build-cache.js";
+export { resolveCc, targetPlatform, type CcDriver } from "./native/driver.js";
+export { runtimeSrcDir } from "./native/runtime-inputs.js";
+export {
   toolchainEnvironmentCachePolicy,
   toolchainEnvironmentFingerprint,
-  targetPlatform,
-  type CcDriver,
-  type CcOptions,
-  type LibArchiveOptions,
+} from "./toolchain-environment.js";
+export { type CcOptions, type LibArchiveOptions } from "./native/contracts.js";
+export {
   type NativeCacheWarmProfile,
   type WarmNativeCachesOptions,
   type WarmNativeCachesResult,
   warmNativeCaches,
-} from "./native-toolchain.js";
+} from "./native/cache-warm.js";
 
-export {
-  ANDROID_MIN_API,
-  IPHONEOS_MIN_VERSION,
-} from "./native-toolchain.js";
+export { ANDROID_MIN_API, IPHONEOS_MIN_VERSION } from "./target-platform.js";
 
 /** Compile a caller-provided C or LLVM source file through an external C
- * toolchain.  The CLI uses this only for its explicit `--from-c` escape
- * hatch; generated program C uses the same implementation only on the
- * documented legacy/fallback routes. */
+ * toolchain.  Runtime development and native embedding tests also use this utility. */
 export async function compileExternalC(options: CcOptions): Promise<void> {
   await compileC(options);
 }
 
-/** Build a library archive through the external C toolchain. Library packs
- * are intentionally out of scope for the first executable-linking split. */
+/** Build an instrumented development library through the external toolchain. */
 export async function compileExternalCLibrary(options: LibArchiveOptions): Promise<void> {
   await compileLibArchive(options);
-}
-
-/** Internal migration guard used by CI to ensure an LLVM-tier executable did
- * not regress from helper-object linking to compiling its generated .ll.
- * Explicit `--backend=c` and `--from-c` remain deliberate developer paths. */
-export function legacyCExecutablePipelineEnabled(
-  env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  return env["SCRIPTC_LEGACY_C_PIPELINE"] !== "0";
-}
-
-/** `SCRIPTC_CC` selects the external C compiler route during the migration.
- * An unset value lets every supported LLVM-tier target use its helper plus
- * runtime pack and reserve `SCRIPTC_LINKER` for the platform-linker driver. */
-export function legacyCExecutablePathRequested(
-  env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  const configured = env["SCRIPTC_CC"];
-  return configured !== undefined && configured !== "";
-}
-
-export class LegacyCExecutablePipelineDisabledError extends Error {
-  constructor() {
-    super(
-      "the legacy generated-C executable pipeline is disabled (SCRIPTC_LEGACY_C_PIPELINE=0); " +
-      "use the supported LLVM helper/runtime-pack route or remove the internal comparison switch",
-    );
-    this.name = "LegacyCExecutablePipelineDisabledError";
-  }
-}
-
-export function assertLegacyCExecutablePipelineEnabled(
-  env: NodeJS.ProcessEnv = process.env,
-): void {
-  if (!legacyCExecutablePipelineEnabled(env)) {
-    throw new LegacyCExecutablePipelineDisabledError();
-  }
 }

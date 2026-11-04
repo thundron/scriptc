@@ -1,0 +1,1348 @@
+/** Shared frontend orchestration. Hosts supply a program loader so Node
+ * and native callers use the same npm selection, preflight and lowering. */
+import {
+  beginShapeOverlayBuild,
+  excludeRefusedOverlay,
+  recordShapeOverlayMemo,
+  restoreShapeOverlayState,
+  setShapeOverlayDropped,
+  shapeOverlayActive,
+  shapeOverlayEnabled,
+  shapeOverlayMemoPlainFences,
+  shapeOverlayReport,
+} from "./shape-inference/index.js";
+import type { ScrDiagnostic } from "../diagnostics/diagnostic.js";
+import type { IrModule } from "../ir/ir.js";
+import type { SrcLoc } from "../ir/ir.js";
+import type { NpmStaticStatus } from "../coverage/report.js";
+import { entryExportFacts, type EntryExport } from "./lib-exports.js";
+import { entryContractFacts, type ContractFacts } from "./lib-contract.js";
+import {
+  canonicalBuiltinModule,
+  npmBuiltinAliasOf,
+  checkModuleOrder,
+  checkPreflight,
+  isNodeTypesPath,
+  locOf,
+  npmStaticDepSf7,
+  npmStaticLoadableFiles,
+  requiresOf,
+  resolveImport,
+  resolveNpmImport,
+  type LoadResult,
+} from "./program.js";
+import {
+  definitelyTypedMismatch,
+  npmStaticFileDegrades,
+  npmStaticIneligibleReason,
+  npmStaticOffenders,
+  npmStaticPackageOfPath,
+} from "./npm-static.js";
+import { clearResolveCaches, resolveBareModule, resolveWorkspaceSourceModule } from "./resolve.js";
+import { isShimmedImport } from "./package-shims.js";
+import { provenanceEntryFor } from "./provenance-registry.js";
+import { isJsSourceFileName } from "./tsc-codes.js";
+import { isRelativeSpecifier, packageNameOfSpecifier } from "./workspace-registry.js";
+import { lowerToIr, type LowerOptions, type LowerResult } from "./lowering/lowerer.js";
+import type { FrontendServices } from "./services.js";
+import type { Ladder, LadderRung } from "./npm-static-ladder.js";
+import {
+  isIdentifier,
+  isImportDeclaration,
+  isExportDeclaration,
+  isStringLiteral,
+  isStringLiteralLike,
+  SyntaxKind,
+  type SourceFile,
+} from "./ts7/adapter.js";
+import { moduleSourceCandidates } from "./module-source-candidates.js";
+import { CONTRACT_TYPES_MODULE } from "./contract-types.js";
+import { THREADS_MODULE } from "./threads-import.js";
+import { NODE_API_MODULE } from "./node-api-import.js";
+import { erasedTypeOnlyImport } from "./type-only-imports.js";
+import { EXPERIMENTAL_MODULE } from "./experimental-import.js";
+import { readProjectConfig } from "../project-config.js";
+import { recordFrontendIslandReads, setFrontendIslands } from "../node-islands/boundary.js";
+import { typePatchDiagnostics } from "./type-patches/layer.js";
+import { packageDirOf } from "../node-islands/origin.js";
+import {
+  scanFiles,
+  type NodeIslandScan,
+  type RefusalKind,
+  type RefusalRecord,
+} from "../node-islands/scan.js";
+
+/** Where a package-anchored preflight diagnostic sits, as
+ * `<package path>:<line>` — the SC2013 refusal that drops the package
+ * reports only at the consumer's import, so its reason carries the inner
+ * location. */
+function packageDiagWhere(load: LoadResult, loc: SrcLoc): string {
+  const file = loc.file.split("\\").join("/");
+  const at = file.lastIndexOf("/node_modules/");
+  const shown = at >= 0 ? file.slice(at + "/node_modules/".length) : file;
+  const text = load.program.getSourceFile(loc.file)?.text;
+  if (text === undefined) return shown;
+  let line = 1;
+  for (let i = 0; i < loc.start && i < text.length; i++) if (text.charCodeAt(i) === 10) line++;
+  return `${shown}:${line}`;
+}
+
+export interface ProgramLoadOptions {
+  npmStatic?: readonly string[];
+  externalTypes?: Readonly<Record<string, string>> | undefined;
+}
+
+/** A load owns its program resources until LoadResult.dispose(). Host
+ * transports may own additional resources around the whole frontend. */
+export type ProgramLoader = (
+  entryPath: string,
+  options: ProgramLoadOptions,
+) => LoadResult & {
+  services: FrontendServices;
+  dispose: () => void;
+};
+
+/* ── the frontend, one pipeline shape ───────────────────────────────────
+ * Load → preflight → lowering all ride the ONE tsgo program (program.ts +
+ * lowering/ over the ts7 adapter) — the native TypeScript compiler is the
+ * only frontend since the phase-4 flip retired the 5.9.3 pipeline
+ * (typescript@5.9.3 survives solely behind the source-string parser and
+ * transpilation islands enforced by scripts/test-ts7.mjs). Everything after
+ * lowering is IR-world, so analyze() and compile() consume this one
+ * Frontend shape. */
+export interface Frontend {
+  preflight: ScrDiagnostic[];
+  /** The entry source file's text for diagnostics and source annotations. */
+  entryText: () => string;
+  /** Library mode's resolution input: the profile's export names resolved
+   * through the entry module's export table (call before dispose — it
+   * reads the ts7 AST). */
+  entryExports: (names: readonly string[]) => Map<string, EntryExport>;
+  /** The contract sidecar's projection input: the entry file's exported
+   * function signatures and convention consts, plus the whole graph's
+   * exported type declarations, in declaration order (call before
+   * dispose — it reads the ts7 AST). */
+  entryContract: () => ContractFacts;
+  sourceTexts: () => Map<string, string>;
+  /** `valid`: the caller's IR validation; a module it rejects with the
+   * shape overlay on is lowered again without the overlay. */
+  lower: (opts: LowerOptions, valid?: (module: IrModule) => boolean) => LowerResult;
+  /** Each requested or detected package's native compilation outcome,
+   * including the first refusal reason for ineligible packages. */
+  npmStatic: NpmStaticStatus[];
+  /** Each judged npm package's first import site, used to anchor refusals. */
+  npmImportSites: ReadonlyMap<string, SrcLoc>;
+  /** The Node island detector's input (report-only): the program's
+   * modules with their pre-scan markers, package import edges, and how
+   * each refused package was refused. Call before dispose. */
+  nodeIslandScan?: ((opts: { userJs: boolean }) => NodeIslandScan) | undefined;
+  /** Diagnostics that do not fail a build: unknown settings in the
+   * project's scriptc configuration (SC8004), which builds do not use. */
+  warnings?: ScrDiagnostic[];
+  /** Releases the frontend's resources (the spawned tsgo server). Call
+   * exactly once, after the last lower(). */
+  dispose: () => void;
+}
+
+/** Hosts own transport lifetimes; shared compiler stages own the frontend. */
+/** How a frontend loads the program, beyond its npm package selection. */
+export interface FrontendOptions {
+  /** Packages that run in Node islands (scope-B NI-4): never compiled,
+   * typed by their declarations. */
+  islandPackages?: ReadonlySet<string>;
+  /** Program modules that run in Node islands (DESIGN.md note 1 §3.2):
+   * their bodies are never compiled; their imports lower to island loads.
+   * Absolute file paths. */
+  islandModules?: ReadonlySet<string>;
+  /** The Node island report (coverage): the project's scriptc settings and
+   * the detector's scan of the program and its npm packages. Builds do not
+   * read either. */
+  nodeIslands?: boolean;
+  /** The detector's scan alone, for a build that may run packages in Node
+   * islands (executable/prepare.ts decides which). */
+  islandScan?: boolean;
+}
+
+export type FrontendFactory = (
+  entryPath: string,
+  npmStatic?: readonly string[] | "auto" | "lib",
+  externalTypes?: Readonly<Record<string, string>>,
+  libraryNpmStatic?: readonly string[],
+  options?: FrontendOptions,
+) => Frontend;
+
+/** Adds the program modules a literal `import()` reaches to `scanned`,
+ * with their own static import graphs: they load at the call, outside the
+ * startup module order, and their npm imports are dependencies all the
+ * same (a workspace package loaded on demand, the vercel.ts config parser
+ * shape). An opted-in package's JavaScript reached that way joins too,
+ * with every file its literal require() and import edges load: those
+ * files are outside the module order as well, and the packages THEY
+ * require (a compiled CommonJS dist requiring a sibling package) are
+ * dependencies the selection must see. */
+function addDynamicImportGraph(load: LoadResult, scanned: Set<SourceFile>): void {
+  const queue = [...scanned];
+  const added = new Set<SourceFile>();
+  while (queue.length > 0) {
+    const sf = queue.pop()!;
+    const packageJs = sf.fileName.includes("/node_modules/");
+    if (packageJs && !added.has(sf)) continue;
+    const specs: { spec: string; kind: "import" | "require" }[] = [];
+    // Every literal import() in the file, read from the syntax: a comment
+    // can stand between the keyword and its parenthesis. A file without
+    // the keyword has none. Package JavaScript loads its literal require()
+    // calls the same way, nested ones included.
+    const calls =
+      packageJs || sf.text.includes("import") ? moduleSourceCandidates(load.program, sf).calls : [];
+    for (const call of calls) {
+      const arg = call.arguments.nodes[0];
+      if (arg === undefined || !isStringLiteralLike(arg)) continue;
+      if (call.expression.kind === SyntaxKind.ImportKeyword)
+        specs.push({ spec: arg.text, kind: "import" });
+      else if (packageJs && isIdentifier(call.expression) && call.expression.text === "require")
+        specs.push({ spec: arg.text, kind: "require" });
+    }
+    // The startup graph's static edges are already in the module order.
+    if (added.has(sf)) {
+      for (const stmt of sf.statements.nodes) {
+        if (
+          (isImportDeclaration(stmt) || isExportDeclaration(stmt)) &&
+          stmt.moduleSpecifier &&
+          isStringLiteral(stmt.moduleSpecifier) &&
+          !(isImportDeclaration(stmt) ? erasedTypeOnlyImport(stmt) : stmt.isTypeOnly)
+        )
+          specs.push({ spec: stmt.moduleSpecifier.text, kind: "import" });
+      }
+    }
+    for (const { spec, kind } of specs) {
+      if (canonicalBuiltinModule(spec) !== null) continue;
+      // Only the JavaScript of a package the selection already opted in:
+      // a package's declarations load nothing.
+      const dep =
+        resolveImport(load.program, sf, spec, kind) ??
+        npmStaticDepSf7(load.program, sf, spec, kind);
+      if (dep === null || scanned.has(dep)) continue;
+      if (dep.fileName.includes("/node_modules/") && !isJsSourceFileName(dep.fileName)) continue;
+      // An import() whose graph Node refuses rejects: nothing in it loads.
+      if (kind === "import" && load.dynamicImportRejections?.has(dep)) continue;
+      scanned.add(dep);
+      added.add(dep);
+      queue.push(dep);
+    }
+  }
+}
+
+function detectAutoPackages(
+  load: LoadResult,
+  statuses: NpmStaticStatus[],
+  mode: "auto" | "lib" = "auto",
+  judged?: Set<string>,
+  sites?: Map<string, SrcLoc>,
+  transitive: Set<string> = new Set(),
+  witness?: Set<string>,
+): string[] {
+  const chosen: string[] = [];
+  // Whether the package was already decided, recording that the answer
+  // depends on it: `judged` starts with the frontend's island packages, so a
+  // rung's outcome is a function of the island set through exactly the names
+  // this walk asks about (see LadderRung).
+  const judgedAlready = (pkg: string): boolean => {
+    witness?.add(pkg);
+    return judged?.has(pkg) ?? false;
+  };
+  // package → the resolved types file AND the file whose import found it:
+  // the runtime-JS probe below must resolve from the SAME importing file,
+  // or a package visible only to a nested package.json realm (a pnpm
+  // monorepo's packages/*/node_modules, unreachable from the entry's own
+  // walk-up) answers "no runtime JS" for perfectly ordinary installs.
+  const seen = new Map<
+    string,
+    { typesFile: string; fromFile: string; spec: string; owner: string | null }
+  >();
+  // A transitive package's files outside the module order (reached through
+  // nested require() calls the graph walk does not model) still name its
+  // dependencies.
+  const scanned = new Set([...load.moduleOrder, load.entry]);
+  addDynamicImportGraph(load, scanned);
+  const transitiveFiles =
+    transitive.size === 0
+      ? []
+      : load.program.getImplementationSourceFiles().filter((sf) => {
+          const pkg = npmStaticPackageOfPath(sf.fileName);
+          return !scanned.has(sf) && pkg !== null && transitive.has(pkg);
+        });
+  for (const sf of [...scanned, ...transitiveFiles]) {
+    if (mode === "auto" && sf.fileName.includes("/node_modules/")) continue;
+    // `--npm-static=pkg...` opts pkg's whole dependency closure in: every
+    // package its compiled files import is selected the same explicit way,
+    // without the declaration eligibility bar.
+    const owner = npmStaticPackageOfPath(sf.fileName);
+    const viaTransitive = owner !== null && transitive.has(owner);
+    const edges: { spec: string; loc: SrcLoc; nested?: true }[] = [];
+    for (const stmt of sf.statements.nodes) {
+      if (
+        (isImportDeclaration(stmt) || isExportDeclaration(stmt)) &&
+        stmt.moduleSpecifier &&
+        isStringLiteral(stmt.moduleSpecifier)
+      ) {
+        // `import type` and `export type … from` erase under Node's type
+        // stripping: Node never loads the package, so it is no dependency
+        // to compile (its declarations still type the program).
+        if (isImportDeclaration(stmt) ? erasedTypeOnlyImport(stmt) : stmt.isTypeOnly) continue;
+        edges.push({ spec: stmt.moduleSpecifier.text, loc: locOf(stmt) });
+      } else if (mode === "lib" && !viaTransitive) {
+        // CJS packages spell their dep edges as top-level requires; the
+        // import-statement scan alone would miss every one of them.
+        for (const req of requiresOf(stmt, load.program))
+          edges.push({ spec: req.spec, loc: locOf(req.node) });
+      }
+    }
+    // A program file's literal require() calls outside top-level require
+    // statements (inside functions, in expressions) name packages the
+    // program loads at run time too. They count only to refuse a package
+    // that ships no declarations, which then runs in a Node island; any
+    // other package keeps the top-level edge rule.
+    if (
+      mode === "lib" &&
+      !viaTransitive &&
+      owner === null &&
+      !sf.fileName.includes("/node_modules/") &&
+      // Any spelling of a call (`require (`, a comment before the paren):
+      // the syntax scan below decides.
+      /\brequire\b/.test(sf.text)
+    ) {
+      const topLevel = new Set(edges.map((e) => `${e.spec}@${e.loc.start}`));
+      for (const call of moduleSourceCandidates(load.program, sf).calls) {
+        const arg = call.arguments.nodes[0];
+        if (
+          arg === undefined ||
+          !isStringLiteralLike(arg) ||
+          !isIdentifier(call.expression) ||
+          call.expression.text !== "require"
+        )
+          continue;
+        const loc = locOf(call);
+        if (topLevel.has(`${arg.text}@${loc.start}`)) continue;
+        edges.push({ spec: arg.text, loc, nested: true });
+      }
+    }
+    // Transitive selection counts every literal require() and import()
+    // anywhere in the package, nested ones included.
+    if (viaTransitive) {
+      for (const call of moduleSourceCandidates(load.program, sf).calls) {
+        const arg = call.arguments.nodes[0];
+        if (
+          arg !== undefined &&
+          isStringLiteralLike(arg) &&
+          (call.expression.kind === SyntaxKind.ImportKeyword ||
+            (isIdentifier(call.expression) && call.expression.text === "require"))
+        )
+          edges.push({ spec: arg.text, loc: locOf(call) });
+      }
+    }
+    for (const { spec, loc, nested } of edges) {
+      if (load.externalTypes?.has(spec)) continue;
+      // scriptc's own packages are not npm dependencies: contract types are
+      // declarations only, and @scriptc/threads and @scriptc/experimental
+      // exports lower at their use sites (threads-import.ts,
+      // experimental-import.ts), typed by their declarations.
+      if (
+        spec === CONTRACT_TYPES_MODULE ||
+        spec === THREADS_MODULE ||
+        spec === EXPERIMENTAL_MODULE ||
+        spec === NODE_API_MODULE
+      )
+        continue;
+      // Attested entries already resolve to program sources, so the
+      // published package's declaration eligibility does not apply.
+      if (provenanceEntryFor(spec) !== null) continue;
+      // Packages scriptc implements itself, or that the project marks never
+      // loaded, are not npm dependencies (package-shims.ts).
+      if (isShimmedImport(sf.fileName, spec)) continue;
+      if (resolveWorkspaceSourceModule(sf.fileName, spec) !== null) continue;
+      if (isRelativeSpecifier(spec) || spec.startsWith("node:") || spec.startsWith("#")) continue;
+      // Bare builtin names ("fs", "path") are the builtin machinery's
+      // business (and the SC4005 async_free gate's, in library mode) —
+      // never npm candidates. Auto keeps its original path (the
+      // @types/node answer skips them below), unchanged.
+      if (mode === "lib" && canonicalBuiltinModule(spec) !== null) continue;
+      // npm packages served as builtins (graceful-fs as fs) never compile
+      // their JavaScript.
+      if (npmBuiltinAliasOf(spec) !== null) continue;
+      // Explicit attempts name the runtime package. Types-first resolution
+      // may instead identify its @types twin, which has no runtime to admit.
+      if (judgedAlready(packageNameOfSpecifier(spec))) continue;
+      const npm = resolveNpmImport(sf.fileName, spec);
+      if (npm !== null && isNodeTypesPath(npm.typesFile)) continue;
+      // The runtime package Node loads. Types-first resolution answers an
+      // @types twin's declarations for a package that ships none, but
+      // selection and every refusal name the package that has the code.
+      const js =
+        mode === "lib" && (npm === null || npm.packageName.startsWith("@types/"))
+          ? resolveBareModule(sf.fileName, spec, "js-only")
+          : null;
+      const runtimePkg = js !== null && js.packageName !== npm?.packageName ? js.packageName : null;
+      // Nested requires only refuse packages without own declarations.
+      if (
+        nested === true &&
+        !(npm === null && runtimePkg !== null) &&
+        !(npm !== null && !/\.d\.(ts|mts|cts)$/.test(npm.typesFile))
+      )
+        continue;
+      if (npm === null || runtimePkg !== null) {
+        if (mode !== "lib" || runtimePkg === null || judgedAlready(runtimePkg)) continue;
+        judged!.add(runtimePkg);
+        sites!.set(runtimePkg, loc);
+        if (viaTransitive) {
+          transitive.add(runtimePkg);
+          chosen.push(runtimePkg);
+          continue;
+        }
+        // Both answers compile the JavaScript with inferred types; the
+        // declarations only check the importer, and an inferred surface
+        // the program does not typecheck against still refuses the package
+        // below. A DefinitelyTyped twin qualifies; a package without
+        // declarations qualifies as a dependency of another package, whose
+        // JavaScript importer has no declarations to check.
+        const refusal =
+          npm === null
+            ? owner === null && !sf.fileName.includes("/node_modules/")
+              ? "it ships no own .d.ts declaration surface"
+              : null
+            : definitelyTypedMismatch(runtimePkg, npm.typesFile);
+        if (refusal === null) {
+          chosen.push(runtimePkg);
+          continue;
+        }
+        statuses.push({
+          package: runtimePkg,
+          status: "refused",
+          detail: refusal,
+          hint: npmStaticOptInHint(runtimePkg, owner),
+        });
+        continue;
+      }
+      if (judgedAlready(npm.packageName)) continue;
+      // An @types twin with no runtime package installed has nothing to
+      // compile (Node cannot load it either).
+      if (viaTransitive && !npm.packageName.startsWith("@types/")) {
+        judged!.add(npm.packageName);
+        sites!.set(npm.packageName, loc);
+        transitive.add(npm.packageName);
+        chosen.push(npm.packageName);
+        continue;
+      }
+      if (!seen.has(npm.packageName)) {
+        seen.set(npm.packageName, { typesFile: npm.typesFile, fromFile: sf.fileName, spec, owner });
+        sites?.set(npm.packageName, loc);
+      }
+    }
+  }
+  for (const [pkg, { typesFile, fromFile, spec, owner }] of seen) {
+    // npmStaticIneligibleReason reads the package's island membership.
+    witness?.add(pkg);
+    judged?.add(pkg);
+    // A package without a root entry (no "main", "exports" or index file)
+    // can still serve the subpath the program imports.
+    const jsEntry =
+      resolveBareModule(fromFile, pkg, "js-only") ?? resolveBareModule(fromFile, spec, "js-only");
+    const reason = npmStaticIneligibleReason(
+      pkg,
+      typesFile,
+      jsEntry !== null && isJsSourceFileName(jsEntry.typesFile) ? jsEntry.typesFile : null,
+      mode === "lib" && isJsSourceFileName(typesFile) && fromFile.includes("/node_modules/"),
+    );
+    if (reason === null) chosen.push(pkg);
+    else
+      statuses.push({
+        package: pkg,
+        status: "refused",
+        detail: mode === "lib" ? reason : `auto: ${reason}`,
+        // Naming a package bypasses the declaration and shipped-JS
+        // heuristics; it cannot supply JavaScript that does not resolve.
+        ...(mode === "lib" && jsEntry !== null ? { hint: npmStaticOptInHint(pkg, owner) } : {}),
+      });
+  }
+  return chosen;
+}
+
+/** How to compile a package the declaration bar refused anyway: name it,
+ * or (for a dependency of an opted-in package) opt in that package's
+ * whole dependency closure. */
+function npmStaticOptInHint(pkg: string, importer: string | null): string {
+  return importer === null
+    ? `to compile it anyway, name it with --npm-static=${pkg} (or --npm-static=${pkg}... to include its dependencies)`
+    : `to compile it anyway, name it with --npm-static=${pkg}, or use --npm-static=${importer}... to include all of ${importer}'s dependencies`;
+}
+
+/** The opted-in packages a consumer-anchored tsc message NAMES: module
+ * specifiers in `Module '"spec"'` phrasings, and resolved file paths in
+ * `import("…")` type spellings — the two ways the checker points at an
+ * import surface from the importer's side. */
+function packagesNamedByDiag(message: string, optedIn: ReadonlySet<string>): Set<string> {
+  const hits = new Set<string>();
+  for (const m of message.matchAll(/Module '"([^"]+)"'/g)) {
+    const spec = m[1]!;
+    const prefix = packageNameOfSpecifier(spec);
+    if (optedIn.has(prefix)) hits.add(prefix);
+  }
+  for (const m of message.matchAll(/import\("([^"]+)"\)/g)) {
+    const pkg = npmStaticPackageOfPath(m[1]!);
+    if (pkg !== null && optedIn.has(pkg)) hits.add(pkg);
+  }
+  return hits;
+}
+
+/** The modules of packages the drop-and-reload loop is about to remove,
+ * scanned on the program that still holds them. Report-only: a detector
+ * failure here never changes the build's outcome. */
+function scanDroppedPackages(
+  load: LoadResult,
+  packages: readonly string[],
+  into: { modules: NodeIslandScan["modules"]; edges: NodeIslandScan["edges"] },
+): void {
+  if (packages.length === 0) return;
+  try {
+    const wanted = new Set(packages);
+    const files = load.program.getImplementationSourceFiles().filter((sf) => {
+      if (sf.isDeclarationFile) return false;
+      const at = packageDirOf(sf.fileName);
+      return at !== null && wanted.has(at.name);
+    });
+    const scanned = scanFiles(load.program, files, { userJs: false, dropped: true, edges: true });
+    for (const module of scanned.modules) into.modules.push(module);
+    for (const edge of scanned.edges) into.edges.push(edge);
+  } catch {
+    /* report-only detection */
+  }
+}
+
+export function runFrontend(
+  entryPath: string,
+  loadProgram: ProgramLoader,
+  npmStatic?: readonly string[] | "auto" | "lib",
+  externalTypes?: Readonly<Record<string, string>>,
+  libraryNpmStatic: readonly string[] = [],
+  options: FrontendOptions = {},
+): Frontend {
+  // A preflight or package probe may throw after its host has opened. Track
+  // only live loads, releasing each immediately on normal fallback; this
+  // also closes both the current program and a failed temporary probe.
+  const active: ReturnType<ProgramLoader>[] = [];
+  const trackedLoader: ProgramLoader = (path, options) => {
+    const load = loadProgram(path, options);
+    active.push(load);
+    return {
+      ...load,
+      dispose: () => {
+        const index = active.indexOf(load);
+        if (index < 0) return;
+        active.splice(index, 1);
+        load.dispose();
+      },
+    };
+  };
+  try {
+    // Every executable and library closes over its dependencies. Explicit
+    // selections bypass eligibility heuristics, but never compilation checks.
+    const explicit: readonly string[] =
+      npmStatic !== undefined && typeof npmStatic !== "string" ? npmStatic : [];
+    // A trailing "..." (`--npm-static=fs-extra...`) selects the package and
+    // its whole dependency closure, which the library fixpoint discovers.
+    const transitive = new Set<string>();
+    const names = [...libraryNpmStatic, ...explicit].map((name) => {
+      if (!name.endsWith("...") || name.length === 3) return name;
+      const base = name.slice(0, -3);
+      transitive.add(base);
+      return base;
+    });
+    const islands = options.islandPackages ?? new Set<string>();
+    setFrontendIslands(islands);
+    try {
+      return loadFrontend(
+        entryPath,
+        trackedLoader,
+        "lib",
+        externalTypes,
+        [...new Set(names)].filter((name) => !islands.has(name)),
+        transitive,
+        options,
+      );
+    } finally {
+      setFrontendIslands(new Set());
+    }
+  } catch (error) {
+    for (const load of active) {
+      // Preserve the original failure and attempt every remaining cleanup.
+      try {
+        load.dispose();
+      } catch {
+        /* best effort after a failed load */
+      }
+    }
+    throw error;
+  }
+}
+
+/** Everything a rung's answer is a function of besides the island set: the
+ * entry, the npm-static list the rung loads with, the external-type map that
+ * decides what that load compiles, and the packages a `pkg...` selection
+ * opted in transitively. The last is not in the list: `runFrontend` strips
+ * the `...` before the load, so `pkg` and `pkg...` load the same list and
+ * answer differently — the transitive walk skips the declaration bar. */
+function ladderKey(
+  entryPath: string,
+  requested: readonly string[],
+  externalTypes: Readonly<Record<string, string>> | undefined,
+  transitive: ReadonlySet<string>,
+): string {
+  const types =
+    externalTypes === undefined
+      ? ""
+      : Object.keys(externalTypes)
+          .sort()
+          .map((spec) => `${spec}=${externalTypes[spec]}`)
+          .join("\n");
+  return `${entryPath}\n${requested.join("\n")}\n${[...transitive].sort().join("\n")}\n\n${types}`;
+}
+
+/** The recorded answer for this rung under an island set that answers the
+ * same about every package the recorded walk asked about.
+ *
+ * The island set is the one input the key does not spell out: it reaches a
+ * rung only by naming packages — a judged package is skipped, an island's
+ * undeclared subpath files serve their any-surface stub, and its imports
+ * pass the preflight fences — so the rung records every package whose
+ * membership it read together with the answers it ran under. Two island sets
+ * that agree on each of those packages leave every read unchanged, and a walk
+ * whose reads are unchanged cannot diverge. */
+function ladderRead(
+  ladder: Ladder,
+  key: string,
+  islands: ReadonlySet<string>,
+): LadderRung | undefined {
+  const entries = ladder.get(key);
+  if (entries === undefined) return undefined;
+  for (const entry of entries) {
+    let same = true;
+    for (const pkg of entry.witness)
+      if (islands.has(pkg) !== entry.islands.has(pkg)) {
+        same = false;
+        break;
+      }
+    if (same) return entry;
+  }
+  return undefined;
+}
+
+/** A file path as the frontend and the island decision spell it. */
+function normalizeFile(file: string): string {
+  return file.replaceAll("\\", "/");
+}
+
+/** Rounds of dropping single refused overlay annotations before the
+ * fallback drops whole files' overlays. */
+const OVERLAY_ANNOTATION_ROUNDS = 4;
+
+function loadFrontend(
+  entryPath: string,
+  loadProgram: ProgramLoader,
+  npmStatic?: readonly string[] | "auto" | "lib",
+  externalTypes?: Readonly<Record<string, string>>,
+  libraryNpmStatic: readonly string[] = [],
+  transitive: Set<string> = new Set(),
+  options: FrontendOptions = {},
+): Frontend {
+  // Resolver package/workspace metadata is intentionally shared across the
+  // several load attempts of ONE auto-detection fixpoint, but never across
+  // separate compiles in a long-lived process.  A cache miss must observe
+  // package.json edits before it can publish a new early-library entry.
+  clearResolveCaches();
+  beginShapeOverlayBuild();
+  const statuses: NpmStaticStatus[] = [];
+  const npmSites = new Map<string, SrcLoc>();
+  // Program modules that run in Node islands (DESIGN.md note 1 §3.2): their
+  // bodies are not lowered, so their sloppy semantics stay Node's, and a
+  // diagnostic anchored in one does not fail the program the build does not
+  // compile.
+  const islandModules =
+    options.islandModules === undefined || options.islandModules.size === 0
+      ? null
+      : new Set([...options.islandModules].map(normalizeFile));
+  const inIslandModule = (loc: SrcLoc | undefined): boolean =>
+    islandModules !== null && loc !== undefined && islandModules.has(normalizeFile(loc.file));
+  const withoutIslandModules = (diags: ScrDiagnostic[]): ScrDiagnostic[] =>
+    islandModules === null ? diags : diags.filter((d) => !inIslandModule(d.loc));
+  // Node island detection (the report, or a build that may run islands):
+  // how each package was refused, and the modules of packages removed from
+  // the program.
+  const scanIslands = options.nodeIslands === true || options.islandScan === true;
+  const refusals: RefusalRecord[] = [];
+  const droppedScan: { modules: NodeIslandScan["modules"]; edges: NodeIslandScan["edges"] } = {
+    modules: [],
+    edges: [],
+  };
+  const recordRefusal = (pkg: string, kind: RefusalKind, diag: ScrDiagnostic | null): void => {
+    refusals.push({ package: pkg, kind, diag });
+  };
+  // Explicit library attempts bypass only the auto-selection heuristics.
+  // The shared preflight/lowering refusal and dependency-closure checks remain.
+  // Node island packages are judged already: they stay out of the
+  // program, typed by their declarations (scope-B NI-4).
+  const judged = new Set<string>(libraryNpmStatic);
+  if (options.islandPackages !== undefined)
+    for (const name of options.islandPackages) judged.add(name);
+  let requested: string[] = [];
+  let reusableScout: ReturnType<typeof loadProgram> | null = null;
+  let reusablePreflight: ScrDiagnostic[] | null = null;
+  let scoutServices: FrontendServices | undefined;
+  if (npmStatic === "auto" || npmStatic === "lib") {
+    const scout = loadProgram(entryPath, { externalTypes });
+    scoutServices = scout.services;
+    let retained = false;
+    try {
+      const scoutPreflight = checkPreflight(scout);
+      requested =
+        npmStatic === "lib"
+          ? [
+              ...libraryNpmStatic,
+              ...detectAutoPackages(scout, statuses, "lib", judged, npmSites, transitive),
+            ]
+          : detectAutoPackages(scout, statuses);
+      // With no package to opt in, the scout already IS the final frontend:
+      // same roots, resolution posture, preflight, and module order. Retain it
+      // instead of spawning a second tsgo server and checking the whole graph
+      // again — the common library-mode path has no bare npm imports.
+      if (requested.length === 0) {
+        reusableScout = scout;
+        reusablePreflight = scoutPreflight;
+        retained = true;
+      }
+    } finally {
+      if (!retained) scout.dispose();
+    }
+  } else if (npmStatic !== undefined) {
+    requested = [...new Set(npmStatic)];
+  }
+
+  // One exact --external-types mapping makes the containing package an
+  // external host boundary, which cannot simultaneously be compiled as a
+  // package-wide --npm-static program graph. External wins; retain the
+  // npm-static refusal record so explicit and auto requests both
+  // explain why the package did not compile statically.
+  if (requested.length > 0 && externalTypes !== undefined) {
+    const externalSpecifiersByPackage = new Map<string, string[]>();
+    for (const specifier of Object.keys(externalTypes)) {
+      const pkg = packageNameOfSpecifier(specifier);
+      const specs = externalSpecifiersByPackage.get(pkg) ?? [];
+      specs.push(specifier);
+      externalSpecifiersByPackage.set(pkg, specs);
+    }
+    requested = requested.filter((pkg) => {
+      const specs = externalSpecifiersByPackage.get(pkg);
+      if (specs === undefined) return true;
+      statuses.push({
+        package: pkg,
+        status: "refused",
+        detail: `mapped as an external host module by --external-types (${specs.map((s) => JSON.stringify(s)).join(", ")})`,
+      });
+      recordRefusal(pkg, "external", null);
+      return false;
+    });
+  }
+
+  // Package-anchored preflight failures and attributable consumer errors
+  // remove that package from the active source graph. Reloading restores
+  // its declarations for analysis; the recorded refusal stops executable
+  // and library builds with a package-specific diagnostic.
+  //
+  // `held` is the fixpoint's working program: the ladder below answers a rung
+  // with no load at all, so it may be absent until the converged rung needs
+  // one. `load` is the program the rest of the pipeline reads.
+  const islandsForLadder = options.islandPackages ?? new Set<string>();
+  // Only the library fixpoint walks rungs, and an overlay build keeps its
+  // first program's diagnostics for the fallback below: no memo there.
+  const ladder =
+    npmStatic === "lib" && !shapeOverlayEnabled() && scoutServices !== undefined
+      ? scoutServices.npmStaticLadder
+      : null;
+  let held: ReturnType<typeof loadProgram> | null = reusableScout;
+  let preflight: ScrDiagnostic[] = reusablePreflight ?? [];
+  if (held === null && ladder === null) {
+    held = loadProgram(entryPath, { npmStatic: requested, externalTypes });
+    preflight = checkPreflight(held);
+  }
+  // Shape inference never makes the preflight fail: when the overlay's
+  // program reports diagnostics the program without it does not (its type
+  // references can load package files the program would not), the build
+  // continues without the overlay.
+  if (held !== null && preflight.length > 0 && held.shapeOverlayState !== undefined) {
+    restoreShapeOverlayState(held.shapeOverlayState);
+    if (shapeOverlayActive()) {
+      const key = (d: ScrDiagnostic): string => `${d.code}|${d.loc.file}|${d.loc.start}`;
+      setShapeOverlayDropped(true);
+      const plain = loadProgram(entryPath, { npmStatic: requested, externalTypes });
+      const plainPreflight = checkPreflight(plain);
+      const known = new Set(plainPreflight.map(key));
+      if (preflight.some((d) => !known.has(key(d)))) {
+        held.dispose();
+        held = plain;
+        preflight = plainPreflight;
+        if (process.env["SCRIPTC_DEBUG_SHAPE_FALLBACK"] !== undefined)
+          process.stderr.write(
+            `[shape-fallback] preflight: the overlay's program failed; overlay off\n`,
+          );
+      } else {
+        plain.dispose();
+        setShapeOverlayDropped(false);
+      }
+    }
+  }
+  // Library mode's fixpoint: the opted-in packages' files joined the
+  // program just now, and THEIR bare edges (import statements and
+  // top-level requires) name packages the scout could not see. Judge each
+  // by the same bar — eligible ones join the set and the frontend
+  // reloads; ineligible ones record a refusal. Bounded by the dependency
+  // count (every iteration settles
+  // at least one new package for good).
+  //
+  // A rung's only consumer is the next `detectAutoPackages`, which reads the
+  // module order and the dynamic-import rejections. Its diagnostics are read
+  // only if it turns out to be the fixpoint's LAST rung, so they wait for the
+  // single full preflight below (which completes this walk rather than
+  // repeating it). A rung this build already walked answers from the ladder,
+  // and the load that would only reproduce its program is skipped.
+  let walked = false;
+  if (npmStatic === "lib") {
+    for (;;) {
+      const key = ladder === null ? "" : ladderKey(entryPath, requested, externalTypes, transitive);
+      const known = ladder === null ? undefined : ladderRead(ladder, key, islandsForLadder);
+      let grown: readonly string[];
+      if (known !== undefined) {
+        grown = known.grown;
+        for (const status of known.statuses) statuses.push(status);
+        for (const [pkg, loc] of known.sites) npmSites.set(pkg, loc);
+        for (const pkg of known.judged) judged.add(pkg);
+        for (const pkg of known.transitive) transitive.add(pkg);
+      } else {
+        const witness = new Set<string>();
+        const statusMark = statuses.length;
+        const siteMark = new Set(npmSites.keys());
+        const judgedMark = new Set(judged);
+        const transitiveMark = new Set(transitive);
+        // Everything this rung reads the island set through: the boundary's
+        // own answers while the load and its structure walk run, and the
+        // judged lookups in the walk below.
+        recordFrontendIslandReads(witness);
+        try {
+          if (held === null) {
+            held = loadProgram(entryPath, { npmStatic: requested, externalTypes });
+            checkModuleOrder(held);
+            walked = true;
+          }
+          grown = detectAutoPackages(held, statuses, "lib", judged, npmSites, transitive, witness);
+        } finally {
+          recordFrontendIslandReads(null);
+        }
+        if (grown.length > 0 && ladder !== null) {
+          const sites: (readonly [string, SrcLoc])[] = [];
+          for (const [pkg, loc] of npmSites) if (!siteMark.has(pkg)) sites.push([pkg, loc]);
+          const entries = ladder.get(key) ?? [];
+          entries.push({
+            grown,
+            statuses: statuses.slice(statusMark),
+            sites,
+            judged: [...judged].filter((pkg) => !judgedMark.has(pkg)),
+            transitive: [...transitive].filter((pkg) => !transitiveMark.has(pkg)),
+            islands: new Set(islandsForLadder),
+            witness: [...witness],
+          });
+          ladder.set(key, entries);
+        }
+      }
+      if (grown.length === 0) break;
+      requested = [...requested, ...grown];
+      if (held !== null) {
+        held.dispose();
+        held = null;
+      }
+    }
+  }
+  if (held === null) {
+    // The converged rung's answer came from the ladder; the frontend still
+    // owns the one program it lowers.
+    held = loadProgram(entryPath, { npmStatic: requested, externalTypes });
+    checkModuleOrder(held);
+    walked = true;
+  }
+  let load = held;
+  if (walked) preflight = checkPreflight(load);
+  const effective = new Set(requested);
+  // Packages refused only because the program does not typecheck against
+  // their inferred surface (no offender, no package-anchored diagnostic).
+  const typecheckRefused = new Set<string>();
+  while (effective.size > 0) {
+    const reasons = new Map<string, string>(npmStaticOffenders());
+    const kinds = new Map<string, { kind: RefusalKind; diag: ScrDiagnostic | null }>();
+    for (const pkg of reasons.keys()) kinds.set(pkg, { kind: "offender", diag: null });
+    // Bundler interop the rewrite could not finish refuses its package
+    // only where the compiled program can load the file.
+    if (npmStaticFileDegrades().size > 0) {
+      const loadable = npmStaticLoadableFiles(load.program, load.moduleOrder);
+      for (const [file, { pkg, reason }] of npmStaticFileDegrades()) {
+        if (!reasons.has(pkg) && (loadable === null || loadable.has(file))) {
+          reasons.set(pkg, reason);
+          kinds.set(pkg, { kind: "degrade", diag: null });
+        }
+      }
+    }
+    for (const d of preflight) {
+      const pkg = npmStaticPackageOfPath(d.loc.file);
+      if (pkg !== null && !reasons.has(pkg)) {
+        reasons.set(pkg, `${d.code} at ${packageDiagWhere(load, d.loc)}: ${d.message}`);
+        kinds.set(pkg, { kind: "preflight", diag: d });
+      }
+    }
+    if (![...reasons.keys()].some((p) => effective.has(p))) {
+      const named = new Map<string, number>();
+      for (const d of preflight) {
+        if (d.code !== "SC0001") continue;
+        for (const pkg of packagesNamedByDiag(d.message, effective)) {
+          named.set(pkg, (named.get(pkg) ?? 0) + 1);
+        }
+      }
+      for (const [pkg, count] of named) {
+        typecheckRefused.add(pkg);
+        kinds.set(pkg, { kind: "typecheck", diag: null });
+        reasons.set(
+          pkg,
+          `its inferred export surface breaks ${count} import site${count === 1 ? "" : "s"} in program files (bundler-emitted surfaces type only as far as inference reaches)`,
+        );
+      }
+    }
+    const dropping = [...reasons.keys()].filter((p) => effective.has(p));
+    if (dropping.length === 0) break;
+    if (scanIslands) scanDroppedPackages(load, dropping, droppedScan);
+    for (const p of dropping) {
+      effective.delete(p);
+      statuses.push({ package: p, status: "refused", detail: reasons.get(p)! });
+      const kind = kinds.get(p);
+      recordRefusal(p, kind?.kind ?? "offender", kind?.diag ?? null);
+    }
+    load.dispose();
+    load = loadProgram(entryPath, { npmStatic: [...effective], externalTypes });
+    preflight = checkPreflight(load);
+  }
+  // The last resort, ALL modes: an opt-in can change the PROGRAM's OWN
+  // typecheck through errors that name no package at all (declaration
+  // shapes outside the safe overload projection — generic overloads,
+  // declaration-only members, or a .d.ts type-GUARD an inferred JS
+  // function cannot reproduce). Those SC0001s anchor in USER files no
+  // offender or
+  // message attribution reaches, so each package is probed by LEAVE-ONE-OUT
+  // (n is the opt-in count — a handful of extra analysis loads): the set
+  // minus that package is exactly the load that would follow dropping it. A
+  // package whose removal clears or changes the errors is a culprit and
+  // falls back with a note. A package whose absence leaves the errors
+  // untouched is not; and when NO package attributes, the flag's own typing
+  // produced the diagnostic, so the set keeps every package and the error is
+  // reported as the one diagnostic it is. Explicit opt-ins degrade the same
+  // way — the ratified stance for bundle-shaped dists is graceful
+  // per-package degradation, never a failed gate the user cannot act on
+  // (the note carries the why). A diagnostic the program reports without ANY
+  // opt-in is not a package's either: that baseline keeps the set and the
+  // error is reported once.
+  if (effective.size > 0 && preflight.some((d) => d.code === "SC0001")) {
+    const lastResortDropped: string[] = [];
+    const dropWithNote = (p: string): void => {
+      effective.delete(p);
+      typecheckRefused.add(p);
+      lastResortDropped.push(p);
+      recordRefusal(p, "typecheck", null);
+      statuses.push({
+        package: p,
+        status: "refused",
+        detail:
+          npmStatic === "auto"
+            ? "auto: the program does not typecheck against its inferred surface"
+            : npmStatic === "lib"
+              ? "the program does not typecheck against its inferred surface (type-only declarations and .d.ts type guards have no JS value inference can chase)"
+              : "the program does not typecheck against its inferred surface (type-only declarations and .d.ts type guards have no JS value inference can chase)",
+      });
+    };
+    // A diagnostic the program also reports with NO opt-in at all is the
+    // program's own type error: every package would "reproduce" it, so the
+    // per-package probe below cannot attribute it and would drop the whole
+    // set. Read that baseline once, and let the set keep its packages: the
+    // error is reported as the one diagnostic it is (the splice at the end
+    // of this function has the same stance for a program that only fails
+    // after the drop).
+    const diagKey = (d: ScrDiagnostic): string => `${d.code}|${d.loc.file}|${d.loc.start}`;
+    let baselineKeys: Set<string> | null = null;
+    // Each load installs its own package set as npm-static's live state
+    // (program.ts), and lowering and the program-source classification read
+    // that state after this function returns. A load opened here with a
+    // probe's set therefore has to be followed by one reload of the set the
+    // retained program keeps, unless a culprit reload already reset it.
+    let probeStateStale = false;
+    const programOwnsDiagnostic = (): boolean => {
+      if (baselineKeys === null) {
+        const bare = loadProgram(entryPath, { npmStatic: [], externalTypes });
+        probeStateStale = true;
+        try {
+          baselineKeys = new Set(
+            checkPreflight(bare)
+              .filter((d) => d.code === "SC0001")
+              .map(diagKey),
+          );
+        } finally {
+          bare.dispose();
+        }
+      }
+      const known = baselineKeys;
+      return known.size > 0 && preflight.every((d) => d.code !== "SC0001" || known.has(diagKey(d)));
+    };
+    // Attribute by LEAVE-ONE-OUT: the set minus one package is the load
+    // that would follow dropping it. A package whose removal clears — or
+    // changes — the errors is a culprit; a package whose absence leaves them
+    // exactly as they are is not. When no package attributes, the flag's own
+    // typing produced the diagnostic and the set keeps every package: one
+    // program diagnostic must never refuse the whole set (the pi shape: an
+    // error no subset removes, collapsed into a refusal per package, and
+    // the program still did not typecheck afterwards).
+    if (!programOwnsDiagnostic()) {
+      const sc0001Keys = (diags: readonly ScrDiagnostic[]): string =>
+        diags
+          .filter((d) => d.code === "SC0001")
+          .map(diagKey)
+          .sort()
+          .join("\n");
+      const loadKeys = sc0001Keys(preflight);
+      const culprits: string[] = [];
+      for (const p of [...effective]) {
+        const rest = [...effective].filter((q) => q !== p);
+        const probe = loadProgram(entryPath, { npmStatic: rest, externalTypes });
+        probeStateStale = true;
+        const probeDiags = checkPreflight(probe);
+        probe.dispose();
+        if (sc0001Keys(probeDiags) !== loadKeys) culprits.push(p);
+      }
+      if (culprits.length > 0) {
+        for (const p of culprits) dropWithNote(p);
+        if (scanIslands) scanDroppedPackages(load, lastResortDropped.splice(0), droppedScan);
+        load.dispose();
+        load = loadProgram(entryPath, { npmStatic: [...effective], externalTypes });
+        preflight = checkPreflight(load);
+        probeStateStale = false;
+      }
+    }
+    if (probeStateStale) {
+      load.dispose();
+      load = loadProgram(entryPath, { npmStatic: [...effective], externalTypes });
+      preflight = checkPreflight(load);
+    }
+  }
+  for (const p of requested) {
+    if (effective.has(p)) statuses.push({ package: p, status: "static" });
+  }
+  // The final program types the refused packages by their own
+  // declarations. If it still fails to typecheck, the type errors are the
+  // program's, not the packages': report them at their own locations
+  // instead of a package refusal that hides them.
+  if (typecheckRefused.size > 0 && preflight.some((d) => d.code === "SC0001")) {
+    for (let i = statuses.length - 1; i >= 0; i--) {
+      const s = statuses[i]!;
+      if (s.status === "refused" && typecheckRefused.has(s.package)) statuses.splice(i, 1);
+    }
+  }
+
+  // The lowering may reload once the overlay drops refused annotations.
+  let finalLoad = load;
+  const finalNpmStatic = [...effective];
+  // An unknown key or value in the project's scriptc configuration makes
+  // the Node island report unavailable (SC8004). The settings configure
+  // only that report: a build warns about them and goes on.
+  const projectConfig = readProjectConfig(entryPath);
+  const configDiagnostics = projectConfig.diagnostics;
+  const report = options.nodeIslands === true;
+  // Type patches that did not apply as written (SC8030–SC8033) warn; the
+  // build goes on with the packages' own declarations there.
+  const patchDiagnostics = typePatchDiagnostics()?.diagnostics ?? [];
+  const buildWarnings = [...(report ? [] : configDiagnostics), ...patchDiagnostics];
+  return {
+    preflight: withoutIslandModules(
+      report && configDiagnostics.length > 0 ? [...configDiagnostics, ...preflight] : preflight,
+    ),
+    ...(buildWarnings.length > 0 ? { warnings: buildWarnings } : {}),
+    entryText: () => finalLoad.entry.text,
+    entryExports: (names) => entryExportFacts(finalLoad.program, finalLoad.entry, names),
+    // The contract scans the PROGRAM's source files, not the runtime
+    // module order: a type-only module (nothing but exported types) has no
+    // runtime edge and never joins moduleOrder, yet its declarations are
+    // contract surface. Declaration files (default libs, @types) stay out,
+    // and so do statically-compiled npm packages' files: their .d.ts is
+    // dropped by construction (inference types the bodies), so no npm
+    // declaration can name a wire-contract type — the contract vocabulary
+    // is authored program surface only, and a workspace-linked package's
+    // shipped .ts must not smuggle same-name declarations into the type
+    // table.
+    entryContract: () =>
+      entryContractFacts(
+        finalLoad.entry,
+        finalLoad.program
+          .getImplementationSourceFiles()
+          .filter((sf) => !sf.isDeclarationFile && npmStaticPackageOfPath(sf.fileName) === null),
+      ),
+    // Runtime evaluation order first, then any type-only program modules
+    // (no runtime edge, so absent from moduleOrder — but they are contract
+    // surface now, and the library identity hashes cover the WHOLE module
+    // graph; the Map dedups by fileName). Statically-compiled npm modules
+    // are in moduleOrder like any program module, so their bytes join the
+    // library identity hashes (source_hash/build_id) — compiled code is
+    // identity, whatever directory it came from.
+    sourceTexts: () => {
+      const texts = new Map<string, string>(
+        [
+          finalLoad.entry,
+          ...finalLoad.moduleOrder,
+          ...finalLoad.program.getImplementationSourceFiles().filter((sf) => !sf.isDeclarationFile),
+        ].map((sf) => [sf.fileName, sf.text]),
+      );
+      // SC8004 and type patch diagnostics point into the project's
+      // package.json.
+      if (
+        (configDiagnostics.length > 0 || patchDiagnostics.length > 0) &&
+        projectConfig.manifest !== null &&
+        projectConfig.manifestText !== null
+      )
+        texts.set(projectConfig.manifest, projectConfig.manifestText);
+      return texts;
+    },
+    lower: (opts, valid) => {
+      // The module order without the island modules, computed once per load:
+      // a reload keeps the array the lowering appends its dynamic import
+      // modules to. The map lives as long as this lowering, which owns the
+      // loads it keys.
+      const islandFiltered = new Map<readonly SourceFile[], SourceFile[]>();
+      const lowerOrder = (l: typeof finalLoad): SourceFile[] => {
+        if (islandModules === null) return l.moduleOrder;
+        let kept = islandFiltered.get(l.moduleOrder);
+        if (kept === undefined) {
+          kept = l.moduleOrder.filter((sf) => !islandModules.has(normalizeFile(sf.fileName)));
+          islandFiltered.set(l.moduleOrder, kept);
+        }
+        return kept;
+      };
+      const lowerLoad = (l: typeof finalLoad): LowerResult => {
+        if (l.shapeOverlayState !== undefined) restoreShapeOverlayState(l.shapeOverlayState);
+        return lowerToIr(l.program, l.entry, lowerOrder(l), {
+          ...opts,
+          frontendServices: l.services,
+          startupCrash: l.startupCrash ?? null,
+          admittedOpinions: l.admittedOpinions,
+          inlineRequireCycleCalls: l.inlineRequireCycleCalls,
+          moduleEdges: l.moduleEdges,
+          dynamicImportRejections: l.dynamicImportRejections,
+          projectCheckJs: l.typeWorld?.projectCheckJs ?? false,
+          externalTypes: l.externalTypes,
+          externalTypeSpecifiersByFile: l.externalTypeSpecifiersByFile,
+        });
+      };
+      const lowerOnce = (): LowerResult => lowerLoad(finalLoad);
+      let lowered = lowerOnce();
+      // Shape inference never breaks compilation (shape-inference/
+      // fallback.ts): refusals drop the overlay annotations they depend on
+      // and the program reloads. Rounds that stop converging escalate to
+      // the overlay of every file involved, then to no overlay at all.
+      // Refusals deferred to run time (runtime fences) are compared with
+      // the build without the overlay below: a fence the overlay did not
+      // cause stays as it is without the overlay.
+      let level: "annotations" | "files" | "all" = "annotations";
+      // Deferred refusals the coverage pass found in code the lowering
+      // judged unreached count too: that code can still run.
+      const fencesOf = (l: LowerResult): ScrDiagnostic[] => [
+        ...l.runtimeFences,
+        ...(l.unreached?.runtimeFences ?? []),
+      ];
+      if (process.env["SCRIPTC_DEBUG_SHAPE_FALLBACK"] !== undefined)
+        process.stderr.write(
+          `[shape-fallback] lowered: overlay ${shapeOverlayActive()}, ${lowered.diagnostics.length} refusals, ${fencesOf(lowered).length} deferred\n`,
+        );
+      // Failing refusals first; deferred refusals are compared with the
+      // build without the overlay below.
+      for (let round = 0; shapeOverlayActive(); round++) {
+        const refusals = lowered.diagnostics;
+        if (refusals.length === 0) break;
+        if (round >= OVERLAY_ANNOTATION_ROUNDS && level === "annotations") level = "files";
+        else if (round > OVERLAY_ANNOTATION_ROUNDS) level = "all";
+        let changed = excludeRefusedOverlay(finalLoad.program, refusals, level);
+        while (!changed && level !== "all") {
+          level = level === "annotations" ? "files" : "all";
+          changed = excludeRefusedOverlay(finalLoad.program, refusals, level);
+        }
+        // The program reloads anyway: the same round also drops what the
+        // deferred refusals blame, which often saves the comparison below.
+        if (level !== "all" && fencesOf(lowered).length > 0)
+          changed =
+            excludeRefusedOverlay(finalLoad.program, fencesOf(lowered), "fences") || changed;
+        if (process.env["SCRIPTC_DEBUG_SHAPE_FALLBACK"] !== undefined)
+          process.stderr.write(
+            `[shape-fallback] round ${round} level ${level}: ${refusals.length} refusals (${refusals
+              .slice(0, process.env["SCRIPTC_DEBUG_SHAPE_FALLBACK"] === "all" ? undefined : 3)
+              .map(
+                (d) =>
+                  `${d.loc.file.split("/").pop()}:${d.loc.start} ${process.env["SCRIPTC_DEBUG_SHAPE_FALLBACK"] === "all" ? d.message : d.message.slice(0, 60)}`,
+              )
+              .join("; ")}), changed ${changed}\n`,
+          );
+        if (!changed) break;
+        const t0 = performance.now();
+        finalLoad.dispose();
+        finalLoad = loadProgram(entryPath, { npmStatic: finalNpmStatic, externalTypes });
+        const t1 = performance.now();
+        // The preflight fills the module order; the tsc world reads the
+        // files as written, so it answers as the first load did.
+        const reloadPreflight = withoutIslandModules(checkPreflight(finalLoad));
+        if (reloadPreflight.length > 0)
+          return { ...lowered, module: null, diagnostics: reloadPreflight };
+        const t2 = performance.now();
+        lowered = lowerOnce();
+        if (process.env["SCRIPTC_DEBUG_SHAPE_FALLBACK"] !== undefined)
+          process.stderr.write(
+            `[shape-fallback] reload ${(t1 - t0).toFixed(0)} ms, preflight ${(t2 - t1).toFixed(0)} ms, lower ${(performance.now() - t2).toFixed(0)} ms\n`,
+          );
+      }
+      // Deferred refusals the program without the overlay does not have
+      // mean the overlay changed what runs (the overlay must not add
+      // failures the default build lacks). The build lowers the program
+      // without the overlay once, drops what the added refusals blame and
+      // reloads; when they persist (or blame nothing), it compiles without
+      // the overlay, reusing that lowering. A memo of the same JavaScript
+      // that already knows every remaining refusal skips the comparison.
+      let plainFences: Set<string> | null = null;
+      if (shapeOverlayActive() && lowered.diagnostics.length === 0) {
+        const keyOf = (l: typeof finalLoad, d: ScrDiagnostic): string => {
+          const sf = l.program.getSourceFile(d.loc.file);
+          const line = sf === undefined ? -1 : sf.getLineAndCharacterOfPosition(d.loc.start).line;
+          return `${d.code}|${d.loc.file}|${line}`;
+        };
+        const remembered = shapeOverlayMemoPlainFences();
+        const fences = fencesOf(lowered);
+        const knownByMemo =
+          remembered !== null && fences.every((d) => remembered.has(keyOf(finalLoad, d)));
+        if (fences.length > 0 && !knownByMemo) {
+          const overlayState = finalLoad.shapeOverlayState;
+          setShapeOverlayDropped(true);
+          const plainLoad = loadProgram(entryPath, { npmStatic: finalNpmStatic, externalTypes });
+          const plainPreflight = checkPreflight(plainLoad);
+          const plain = plainPreflight.length === 0 ? lowerLoad(plainLoad) : null;
+          setShapeOverlayDropped(false);
+          if (overlayState !== undefined) restoreShapeOverlayState(overlayState);
+          if (plain === null || plain.diagnostics.length > 0) {
+            // Nothing to compare with: the default build itself fails.
+            plainLoad.dispose();
+          } else {
+            const known = new Set(fencesOf(plain).map((d) => keyOf(plainLoad, d)));
+            plainFences = known;
+            let usePlain = false;
+            for (let round = 0; ; round++) {
+              const added = fencesOf(lowered).filter((d) => !known.has(keyOf(finalLoad, d)));
+              if (added.length === 0) break;
+              const changed =
+                round < OVERLAY_ANNOTATION_ROUNDS &&
+                excludeRefusedOverlay(finalLoad.program, added, "fences");
+              if (process.env["SCRIPTC_DEBUG_SHAPE_FALLBACK"] !== undefined)
+                process.stderr.write(
+                  `[shape-fallback] ${added.length} deferred refusals the default build lacks (${added
+                    .slice(0, 3)
+                    .map((d) => `${d.loc.file.split("/").pop()}: ${d.message.slice(0, 60)}`)
+                    .join("; ")}), changed ${changed}\n`,
+                );
+              if (!changed) {
+                usePlain = true;
+                break;
+              }
+              finalLoad.dispose();
+              finalLoad = loadProgram(entryPath, { npmStatic: finalNpmStatic, externalTypes });
+              if (checkPreflight(finalLoad).length > 0) {
+                usePlain = true;
+                break;
+              }
+              lowered = lowerOnce();
+              if (lowered.diagnostics.length > 0) {
+                usePlain = true;
+                break;
+              }
+            }
+            if (usePlain) {
+              if (process.env["SCRIPTC_DEBUG_SHAPE_FALLBACK"] !== undefined)
+                process.stderr.write(`[shape-fallback] overlay off\n`);
+              setShapeOverlayDropped(true);
+              if (plainLoad.shapeOverlayState !== undefined)
+                restoreShapeOverlayState(plainLoad.shapeOverlayState);
+              finalLoad.dispose();
+              finalLoad = plainLoad;
+              lowered = plain;
+            } else {
+              plainLoad.dispose();
+            }
+          }
+        }
+      }
+      // A module the caller's IR validator rejects (a lowering bug the
+      // overlay's types reach) compiles without the overlay.
+      if (
+        shapeOverlayActive() &&
+        lowered.module !== null &&
+        valid !== undefined &&
+        !valid(lowered.module)
+      ) {
+        if (process.env["SCRIPTC_DEBUG_SHAPE_FALLBACK"] !== undefined)
+          process.stderr.write(
+            `[shape-fallback] the IR validator rejected the module; overlay off\n`,
+          );
+        setShapeOverlayDropped(true);
+        finalLoad.dispose();
+        finalLoad = loadProgram(entryPath, { npmStatic: finalNpmStatic, externalTypes });
+        const reloadPreflight = withoutIslandModules(checkPreflight(finalLoad));
+        if (reloadPreflight.length > 0)
+          return { ...lowered, module: null, diagnostics: reloadPreflight };
+        lowered = lowerOnce();
+      }
+      recordShapeOverlayMemo(plainFences);
+      // The declaration-typed boundary's notes (SC6102) join the
+      // performance warnings; they never fail a build.
+      const notes = [
+        ...(finalLoad.declBoundaryNotes ?? []),
+        ...shapeOverlayReport(finalLoad.entry.fileName),
+      ];
+      if (notes.length === 0) return lowered;
+      return { ...lowered, performance: [...notes, ...(lowered.performance ?? [])] };
+    },
+    npmStatic: statuses,
+    npmImportSites: npmSites,
+    nodeIslandScan: !scanIslands
+      ? undefined
+      : ({ userJs }) => {
+          const files = new Set<SourceFile>([finalLoad.entry, ...finalLoad.moduleOrder]);
+          addDynamicImportGraph(finalLoad, files);
+          // Package edges matter only when the program has npm packages: one
+          // that loads, one that was refused, or one judged and dropped.
+          const npm =
+            statuses.length > 0 ||
+            droppedScan.modules.length > 0 ||
+            [...files].some((sf) => sf.fileName.includes("/node_modules/"));
+          const scanned = scanFiles(finalLoad.program, [...files], {
+            userJs,
+            dropped: false,
+            edges: npm,
+          });
+          return {
+            modules: [...droppedScan.modules, ...scanned.modules],
+            edges: [...droppedScan.edges, ...scanned.edges],
+            refusals,
+          };
+        },
+    dispose: () => finalLoad.dispose(),
+  };
+}

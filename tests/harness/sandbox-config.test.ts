@@ -3,8 +3,11 @@ import { expect, test } from "vitest";
 import {
   defaultSandboxImage,
   sandboxBootstrapCommand,
+  sandboxEffectWorkerAllocation,
   sandboxImageConfig,
+  sandboxNativeReference,
   sandboxRunnerConfig,
+  sandboxTestSourceConfig,
   sandboxTestWorkerAllocation,
   sandboxVcrConfig,
   sandboxVercelConfig,
@@ -29,6 +32,7 @@ test("runner settings are read after loading the sandbox environment", () => {
     localTestWorkers: "3",
     localCaseShards: "4",
     sandboxTimeout: "90m",
+    sandboxTimeoutMs: 5_400_000,
   });
 });
 
@@ -39,7 +43,26 @@ test("runner settings retain their documented defaults", () => {
     localTestWorkers: "2",
     localCaseShards: "2",
     sandboxTimeout: "45m",
+    sandboxTimeoutMs: 2_700_000,
   });
+});
+
+test("the local command deadline follows the configured Sandbox duration", () => {
+  for (const [duration, milliseconds] of [
+    ["120m", 7_200_000],
+    ["2h", 7_200_000],
+    ["30 s", 30_000],
+    ["500ms", 500],
+  ] as const) {
+    expect(sandboxRunnerConfig({ SCRIPTC_SANDBOX_TIMEOUT: duration }).sandboxTimeoutMs).toBe(
+      milliseconds,
+    );
+  }
+  for (const duration of ["0m", "-1h", "forever", "1.5m", "999999999h"]) {
+    expect(() => sandboxRunnerConfig({ SCRIPTC_SANDBOX_TIMEOUT: duration })).toThrow(
+      "positive duration",
+    );
+  }
 });
 
 test("the managed Sandbox image is the default", () => {
@@ -63,14 +86,22 @@ test("the managed image bootstraps the ScriptC native toolchain and workspace", 
 });
 
 test("the managed-image bootstrap pins the custom image's Node, pnpm, and LLVM", () => {
-  const bootstrap = readFileSync(new URL("../../scripts/sandbox-bootstrap.sh", import.meta.url), "utf8");
+  const bootstrap = readFileSync(
+    new URL("../../scripts/sandbox-bootstrap.sh", import.meta.url),
+    "utf8",
+  );
   expect(bootstrap).toContain("< .node-version");
   expect(bootstrap).toContain("ARG PNPM_VERSION=");
-  expect(bootstrap).toContain("llvm-toolchain-noble-18");
+  expect(bootstrap).toContain("llvm-toolchain-${llvm_distro}-22");
   expect(bootstrap).toContain("install -D -m 0644");
-  expect(bootstrap).toContain("clang-18");
-  expect(bootstrap).toContain("libclang-rt-18-dev");
-  expect(bootstrap).toContain("llvm-18");
+  expect(bootstrap).toContain("clang-22");
+  expect(bootstrap).toContain("libclang-rt-22-dev");
+  expect(bootstrap).toContain("llvm-22-dev");
+  expect(bootstrap).toContain("ninja-build");
+  // CI links with ld.lld; without it Sandbox binaries link with GNU ld.
+  expect(bootstrap).toContain("lld-22");
+  const dockerfile = readFileSync(new URL("../../Dockerfile.sandbox", import.meta.url), "utf8");
+  expect(dockerfile).toContain("lld-22");
 });
 
 test("a custom image does not select the Sandbox team or project", () => {
@@ -91,6 +122,59 @@ test("custom images must be fully qualified VCR references", () => {
   expect(() => sandboxImageConfig({ SCRIPTC_SANDBOX_IMAGE: "scriptc-tests:node24" })).toThrow(
     "fully qualified VCR image",
   );
+});
+
+test("prepared snapshots select the snapshot CLI source without changing project scope", () => {
+  const config = sandboxTestSourceConfig({ SCRIPTC_SANDBOX_SNAPSHOT: " snap_ABC123 " });
+  expect(config).toEqual({
+    prepared: true,
+    reference: "snap_ABC123",
+    description: "prepared snapshot",
+    createArgs: ["--snapshot", "snap_ABC123"],
+  });
+  expect(sandboxBootstrapCommand(config.prepared)).toBeUndefined();
+});
+
+test("test sources retain managed and custom image preparation", () => {
+  expect(sandboxTestSourceConfig({})).toMatchObject({
+    prepared: false,
+    createArgs: ["--image", defaultSandboxImage],
+  });
+  const image = "vcr.vercel.com/team/project/tests:node24";
+  expect(sandboxTestSourceConfig({ SCRIPTC_SANDBOX_IMAGE: image })).toMatchObject({
+    prepared: true,
+    createArgs: ["--image", image],
+  });
+});
+
+test("ambiguous or malformed snapshot sources fail before creating workers", () => {
+  expect(() =>
+    sandboxTestSourceConfig({
+      SCRIPTC_SANDBOX_SNAPSHOT: "snap_ABC123",
+      SCRIPTC_SANDBOX_IMAGE: "image",
+    }),
+  ).toThrow("Set only one");
+  expect(() => sandboxTestSourceConfig({ SCRIPTC_SANDBOX_SNAPSHOT: "wrong-id" })).toThrow(
+    "snapshot ID",
+  );
+});
+
+test("a native reference checkout needs a prepared source and an absolute path", () => {
+  const snapshot = { SCRIPTC_SANDBOX_SNAPSHOT: "snap_ABC123" };
+  expect(sandboxNativeReference(snapshot)).toBeUndefined();
+  expect(
+    sandboxNativeReference({
+      ...snapshot,
+      SCRIPTC_SANDBOX_NATIVE_REFERENCE: " /vercel/sandbox/prev/ ",
+    }),
+  ).toBe("/vercel/sandbox/prev");
+  expect(() =>
+    sandboxNativeReference({ SCRIPTC_SANDBOX_NATIVE_REFERENCE: "/vercel/sandbox/prev" }),
+  ).toThrow("needs SCRIPTC_SANDBOX_SNAPSHOT");
+  for (const path of ["prev", "/a/../b", "/a b", "/a;rm"])
+    expect(() =>
+      sandboxNativeReference({ ...snapshot, SCRIPTC_SANDBOX_NATIVE_REFERENCE: path }),
+    ).toThrow("absolute path");
 });
 
 test("OIDC authentication wins and supplies its own Sandbox scope", () => {
@@ -265,4 +349,23 @@ test("test processes stay within the per-Sandbox worker budget", () => {
     caseWorkers: 1,
     sideConcurrency: 0,
   });
+});
+
+test("isolated Effect concurrency stays within the budget and only uses large Sandboxes", () => {
+  for (const vcpus of [2, 8, 16, 30, 32]) {
+    for (const workers of [1, 2, 4, 8]) {
+      for (const sideTasks of [0, 1, 2, 3]) {
+        const plan = sandboxEffectWorkerAllocation(workers, sideTasks, vcpus);
+        expect(plan.caseWorkers).toBeGreaterThanOrEqual(1);
+        const extraCompilers = Math.min(2, plan.caseWorkers) * (plan.effectConcurrency - 1);
+        expect(plan.caseWorkers + plan.sideConcurrency + extraCompilers).toBeLessThanOrEqual(
+          workers,
+        );
+        expect(plan.sideConcurrency).toBeLessThanOrEqual(sideTasks);
+        expect(plan.effectConcurrency === 2).toBe(vcpus === 32 && workers >= 4);
+      }
+    }
+  }
+  expect(() => sandboxEffectWorkerAllocation(0, 1, 32)).toThrow();
+  expect(() => sandboxEffectWorkerAllocation(4, -1, 32)).toThrow();
 });

@@ -1,0 +1,6 @@
+url-mutation-runtime-key.ts:3:1 - error SC1090: URL assignments to read-only members or runtime property keys are not supported yet
+
+  2 | const key = process.argv[2] === "href" ? "href" : "search";
+  3 | u[key] = "https://other.example/";
+    | ^~~~~~
+  4 | 

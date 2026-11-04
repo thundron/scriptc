@@ -1,0 +1,735 @@
+import { targetCpuField, targetCpuTargetRefusal } from "../backend/target-cpu.js";
+import { nativeCodegenDiag, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
+import type { CompilationTiming } from "../timing.js";
+import { readFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+import type {
+  CompileFailure,
+  CompileLibraryOptions,
+  CompileRequestOptions,
+} from "../compile-types.js";
+import {
+  emitLlvmModuleParts,
+  type ForkPrimitives,
+  lowRegionTarget,
+} from "../backend/llvm/emitter.js";
+import { inlineRcOption } from "../backend/llvm/shapes.js";
+import { executableLinkFeatures } from "../backend/executable-features.js";
+import type { NativeLinkFeatures } from "../backend/native-link-info-core.js";
+import { prepareExecutableModule } from "../executable/prepare.js";
+import type { FfiProfile } from "../ffi/ffi-manifest.js";
+import type { FrontendFactory } from "../frontend/pipeline.js";
+import {
+  FrontendInputTracker,
+  frontendInputsSemanticallyMatch,
+  frontendInputsStillMatch,
+  validFrontendInputSnapshot,
+  type FrontendInputSnapshot,
+  type FrontendInputExclusions,
+  trackedReadFile,
+} from "../frontend/input-tracker.js";
+import { compilerOwnedFileRoots } from "../frontend/dts-paths.js";
+import { provenanceSources } from "../frontend/provenance-registry.js";
+import { processFork } from "../frontend/process-fork.js";
+import { unitReuseEnabled, type UnitStore } from "../frontend/lowering/unit-reuse.js";
+import {
+  tokenEquivalentSource,
+  tokenPositionEquivalentSource,
+} from "../frontend/token-equivalence.js";
+import { llvmBytes, wtf8Bytes } from "../backend/literals.js";
+import { prepareLibrary } from "../library/prepare.js";
+import type { LibraryProfile } from "../library/library-profile.js";
+import type { IrModule } from "../ir/ir.js";
+import { deserializeModuleBytes, serializeModuleParts } from "../ir/serialize.js";
+import { contentDigest, NATIVE_STRING_BYTES, type NativeCache } from "./cache.js";
+import { batchTextParts, joinedParts } from "./text-file.js";
+import type { NativeToolchain } from "./toolchain.js";
+import { nativeFileIdentity } from "./file-identity.js";
+
+export interface NativeExecutableInput {
+  ok: true;
+  /** The module's LLVM text as parts that concatenate to it
+   * (emitLlvmModuleParts), never joined: a large program's is 150 MB. */
+  llvm: readonly string[];
+  /** Compact serialized IR as bounded parts (`batchTextParts`): compiler-scale
+   * modules exceed one native string. */
+  ir: string[] | null;
+  sidecarJson: string | null;
+  features: NativeLinkFeatures;
+  sources: [string, string][];
+  /** Divergence warnings (SC6xxx) the lowering found; cached with the
+   * input so a frontend-cache hit reports them too. */
+  warnings?: ScrDiagnostic[];
+  /** partsDigest of `llvm`, when the frontend cache has computed it: the key
+   * of the text's `frontend-llvm` entry. */
+  llvmDigest?: string;
+}
+
+/** The LLVM text is a separate `frontend-llvm` entry under its digest, which
+ * `llvm` names, so a build whose inputs changed reads only this entry's
+ * probes, and the text is hashed once per build. The serialized IR follows
+ * the input metadata as a separate member so the entry can be written as
+ * parts; the stored input carries empty placeholders (`[]`, `null`) for both. */
+interface FrontendCacheEntry {
+  schema: "scriptc.native-frontend.v4";
+  probes: FrontendInputSnapshot;
+  input: NativeExecutableInput;
+  llvm: string;
+  ir: string[] | null;
+}
+
+/** The entry's JSON text, generated as it is written. */
+function* frontendCacheParts(
+  probes: FrontendInputSnapshot,
+  input: NativeExecutableInput,
+  llvmDigest: string,
+): Generator<string> {
+  const metadata = JSON.stringify({
+    schema: "scriptc.native-frontend.v4",
+    probes,
+    input: { ...input, llvm: [], ir: null, llvmDigest: undefined },
+    llvm: llvmDigest,
+  });
+  yield metadata.slice(0, metadata.length - 1);
+  if (input.ir === null) yield ',"ir":null}';
+  else {
+    yield ',"ir":[';
+    for (let index = 0; index < input.ir.length; index++) {
+      if (index > 0) yield ",";
+      yield JSON.stringify(input.ir[index]!);
+    }
+    yield "]}";
+  }
+}
+
+/** The parts while their total length stays within `limit`; past it, a
+ * throw abandons the write. */
+function* boundedParts(parts: Generator<string>, limit: number): Generator<string> {
+  let length = 0;
+  for (const part of parts) {
+    length += part.length;
+    if (length > limit) throw new Error("frontend cache entry exceeds one native string");
+    yield part;
+  }
+}
+
+/** Publish an entry, and the LLVM text's entry unless `input` already names
+ * one, only when a native reader can decode each as one string; UTF-16
+ * length never exceeds the UTF-8 byte length. A longer entry abandons its
+ * write, which the cache discards. Sets `input.llvmDigest` when the text's
+ * entry is written. */
+function publishFrontendCache(
+  cache: NativeCache,
+  key: string,
+  probes: FrontendInputSnapshot,
+  input: NativeExecutableInput,
+): void {
+  const llvmDigest =
+    input.llvmDigest ??
+    cache.writeContentParts(
+      "frontend-llvm",
+      boundedParts(joinedParts(input.llvm), NATIVE_STRING_BYTES),
+    );
+  if (llvmDigest === null) return;
+  input.llvmDigest = llvmDigest;
+  cache.writeParts(
+    "frontend",
+    key,
+    boundedParts(frontendCacheParts(probes, input, llvmDigest), NATIVE_STRING_BYTES),
+  );
+}
+
+/** The LLVM text of an entry, from its `frontend-llvm` entry; null when
+ * that entry is missing or does not have the digest it is named by. */
+function readFrontendLlvm(cache: NativeCache, digest: string): string | null {
+  return cache.readContent("frontend-llvm", digest, NATIVE_STRING_BYTES)?.toString("utf8") ?? null;
+}
+
+/** The cached input when every frontend input still matches, else the
+ * entry the inputs no longer match, for reuse after equivalent edits. */
+function readFrontendCache(
+  cache: NativeCache,
+  key: string,
+  exclusions: FrontendInputExclusions,
+):
+  | { input: NativeExecutableInput; probes: FrontendInputSnapshot }
+  | { stale: FrontendCacheEntry }
+  | null {
+  // The entry is decoded as one string; larger entries are misses.
+  const bytes = cache.read("frontend", key, NATIVE_STRING_BYTES);
+  if (bytes === null) return null;
+  const cached: unknown = JSON.parse(bytes.toString("utf8"));
+  if (!validCachedInput(cached)) return null;
+  if (!frontendInputsStillMatch(cached.probes, exclusions)) return { stale: cached };
+  const llvm = readFrontendLlvm(cache, cached.llvm);
+  if (llvm === null) return null;
+  return {
+    input: { ...cached.input, llvm: [llvm], llvmDigest: cached.llvm, ir: cached.ir },
+    probes: cached.probes,
+  };
+}
+
+/** The stale entry's input when every changed source is token-equivalent to
+ * the text the entry was built from (edits to whitespace and to comments
+ * that cannot affect compilation; see token-equivalence.ts). Equivalent
+ * sources lower to the same IR apart from source locations, which only the
+ * debug information of dev builds and the serialized IR carry. A build
+ * with debug information accepts only edits that keep every token's line
+ * and column, the positions the debug information records. Diagnostics
+ * carry locations too, so an entry that reported warnings is rebuilt. A changed
+ * source whose raw text or line positions the frontend read (call-site text
+ * in messages, comptime callbacks, test locations) is rebuilt as well:
+ * frontendInputsSemanticallyMatch refuses its `text` probe. */
+function equivalentFrontendInput(
+  cache: NativeCache,
+  stale: FrontendCacheEntry,
+  options: CompileRequestOptions,
+  exclusions: FrontendInputExclusions,
+): { input: NativeExecutableInput; probes: FrontendInputSnapshot } | null {
+  if (
+    options.sanitize === true ||
+    options.emitIr === true ||
+    stale.ir !== null ||
+    (stale.input.warnings?.length ?? 0) > 0
+  )
+    return null;
+  const debugInfo = options.optimization === "dev" && !options.strip;
+  const match = frontendInputsSemanticallyMatch(
+    stale.probes,
+    new Map(stale.input.sources),
+    debugInfo ? tokenPositionEquivalentSource : tokenEquivalentSource,
+    exclusions,
+  );
+  if (match === null || match.changed.length === 0) return null;
+  const llvm = readFrontendLlvm(cache, stale.llvm);
+  if (llvm === null) return null;
+  // Runtime fences and unsupported-construct messages name their source as
+  // `[<code> at <file>:<line>]`, and an equivalent edit can move the line.
+  if (match.changed.some(({ path }) => llvm.includes(` at ${llvmBytes(wtf8Bytes(path), false)}:`)))
+    return null;
+  return {
+    input: {
+      ...stale.input,
+      llvm: [llvm],
+      llvmDigest: stale.llvm,
+      ir: null,
+      sources: stale.input.sources.map(([path, text]) => [
+        path,
+        match.currentSources.get(path) ?? text,
+      ]),
+    },
+    probes: match.snapshot,
+  };
+}
+
+/** The unit store of a build whose unit key is `key`: its program entry
+ * under that key, and file entries by content digest. */
+function nativeUnitStore(cache: NativeCache, key: string): UnitStore {
+  return {
+    readProgram: () => cache.read("units", key),
+    writeProgram: (bytes) => cache.write("units", key, bytes),
+    readFile: (name) => (/^[0-9a-f]{64}$/.test(name) ? cache.read("unit-files", name) : null),
+    writeFile: (bytes) => {
+      const digest = contentDigest(bytes);
+      if (!cache.has("unit-files", digest)) cache.write("unit-files", digest, bytes, digest);
+      return digest;
+    },
+  };
+}
+
+function implementationIdentity(toolchain: NativeToolchain): string {
+  // Release versions alone cannot distinguish two development builds.
+  return contentDigest(
+    JSON.stringify({
+      compiler: nativeFileIdentity(process.execPath),
+      checker: nativeFileIdentity(toolchain.ts7Executable),
+      evaluator:
+        toolchain.comptimeExecutable === undefined
+          ? null
+          : nativeFileIdentity(toolchain.comptimeExecutable),
+      version: toolchain.compilerVersion,
+    }),
+  );
+}
+
+/** SCRIPTC_* variables that report on a build, place its cache or control
+ * backend emission (its parallelism, a requested worker failure). The
+ * frontend's output does not depend on them, so they are left out of its
+ * cache key. */
+const FRONTEND_INDEPENDENT_VARIABLES = new Set([
+  "SCRIPTC_CACHE_DIR",
+  "SCRIPTC_CACHE_MAX_MB",
+  // The shared checker server answers as the build's own checker does.
+  "SCRIPTC_CHECKER_SERVER",
+  "SCRIPTC_EMIT_WORKERS",
+  "SCRIPTC_EMIT_WORKER_FAIL",
+  "SCRIPTC_EMIT_WORKER_FUNCTIONS",
+  // Reusing lowered units leaves the lowered module as it is.
+  "SCRIPTC_INCR_LOWERING",
+  "SCRIPTC_INCR_VERIFY",
+  "SCRIPTC_TIMING",
+]);
+
+/** The SCRIPTC_* variables a frontend cache entry depends on, sorted by name. */
+function frontendEnvironment(): [string, string | undefined][] {
+  return Object.entries(process.env)
+    .filter(([name]) => name.startsWith("SCRIPTC_") && !FRONTEND_INDEPENDENT_VARIABLES.has(name))
+    .sort(([a], [b]) => a.localeCompare(b));
+}
+
+function validFeatures(value: unknown): value is NativeLinkFeatures {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const features = value as Record<string, unknown>;
+  if (features["workers"] !== undefined && typeof features["workers"] !== "boolean") return false;
+  if (features["youngNursery"] !== undefined && typeof features["youngNursery"] !== "boolean")
+    return false;
+  return [
+    "regex",
+    "copying",
+    "textDecoderLegacy",
+    "bigintBytes",
+    "fileHandle",
+    "fetch",
+    "zlib",
+    "assert",
+    "inspect",
+    "dynInvoke",
+    "dc",
+    "dynAsync",
+    "events",
+    "emitter",
+    "symbol",
+    "bigint",
+    "searchParams",
+    "qs",
+    "utilPromisify",
+    "dynBuiltinClass",
+    "dynBuiltinStream",
+    "parseArgs",
+    "stream",
+    "net",
+    "http",
+    "http2",
+    "dgram",
+    "dnsPromises",
+    "dgramDyn",
+    "textCodecDyn",
+    "watch",
+    "watchFile",
+    "foreignFfi",
+    "nodeTest",
+    "tls",
+    "tlsCa",
+    "cipher",
+    "ecdh",
+    "dh",
+    "pki",
+    "ed25519",
+    "x509",
+    "webcrypto",
+    "perfLoop",
+  ].every((name) => typeof features[name] === "boolean");
+}
+
+function validCachedInput(value: unknown): value is FrontendCacheEntry {
+  if (value === null || typeof value !== "object") return false;
+  const entry = value as Partial<FrontendCacheEntry>;
+  const input = entry.input;
+  if (
+    entry.schema !== "scriptc.native-frontend.v4" ||
+    !validFrontendInputSnapshot(entry.probes) ||
+    input === undefined ||
+    input === null ||
+    typeof input !== "object"
+  )
+    return false;
+  return (
+    input.ok === true &&
+    typeof entry.llvm === "string" &&
+    /^[0-9a-f]{64}$/.test(entry.llvm) &&
+    (entry.ir === null ||
+      (Array.isArray(entry.ir) && entry.ir.every((part) => typeof part === "string"))) &&
+    (input.sidecarJson === null || typeof input.sidecarJson === "string") &&
+    validFeatures(input.features) &&
+    Array.isArray(input.sources) &&
+    input.sources.every(
+      (pair) =>
+        Array.isArray(pair) &&
+        pair.length === 2 &&
+        typeof pair[0] === "string" &&
+        typeof pair[1] === "string",
+    )
+  );
+}
+
+/** Bootstrap-only input for the split sanitized self-rebuild: emit an
+ * executable from a serialized IR artifact of the same entry instead of
+ * running the frontend. A separate run compares that artifact with the IR the
+ * native frontend lowers itself. Debug metadata needs source text, so only
+ * stripped executables are accepted. */
+const BOOTSTRAP_IR_INPUT = "SCRIPTC_BOOTSTRAP_IR_INPUT";
+
+/** The inputs a native frontend cache entry depends on: the entry, the
+ * request's options and FFI manifest, the toolchain that lowers and emits,
+ * and the SCRIPTC_* variables that reach the frontend. The sources and the
+ * configuration are not part of it; the entry's probes prove those. Null when
+ * an entry cannot describe the build: provenance rewriting replaces the
+ * sources with build products, and a bootstrap build supplies the IR. */
+function nativeFrontendInputs(
+  entry: string,
+  options: CompileRequestOptions,
+  ffi: FfiProfile | null,
+  toolchain: NativeToolchain,
+): Record<string, unknown> | null {
+  const irInput = process.env[BOOTSTRAP_IR_INPUT] ?? "";
+  if (irInput !== "" || provenanceSources() !== null) return null;
+  return {
+    schema: 1,
+    entry,
+    options,
+    ffi,
+    implementation: implementationIdentity(toolchain),
+    target: toolchain.target.name,
+    declarations: toolchain.declarationsRoot ?? null,
+    environment: frontendEnvironment(),
+  };
+}
+
+/** The frontend cache key of a build: digest of nativeFrontendInputs. Null
+ * when the build cannot have an entry (see nativeFrontendInputs) or the
+ * inputs cannot be encoded. */
+export function nativeFrontendCacheKey(
+  entry: string,
+  options: CompileRequestOptions,
+  ffi: FfiProfile | null,
+  toolchain: NativeToolchain,
+): string | null {
+  try {
+    const inputs = nativeFrontendInputs(entry, options, ffi, toolchain);
+    return inputs === null ? null : contentDigest(JSON.stringify(inputs));
+  } catch {
+    return null;
+  }
+}
+
+/** The paths a native executable build writes — the executable, its dSYM
+ * directory, the kept LLVM text and IR — and the directories above them,
+ * which its frontend input probes do not observe. */
+export function nativeFrontendExclusions(
+  entry: string,
+  options: CompileRequestOptions,
+): FrontendInputExclusions {
+  const stem = basename(entry).replace(/\.(ts|mts|cts|js|mjs|cjs)$/, "");
+  const outputPaths = [
+    resolve(options.outPath),
+    resolve(options.outPath) + ".dSYM",
+    resolve(options.outDir, stem + ".ll"),
+    resolve(options.outDir, stem + ".ir.json"),
+  ];
+  const directories = new Set<string>();
+  for (const output of outputPaths) {
+    for (let directory = dirname(output); ; directory = dirname(directory)) {
+      directories.add(directory);
+      if (dirname(directory) === directory) break;
+    }
+  }
+  return { outputPaths, outputDirectories: [...directories] };
+}
+
+function preparedFromIr(
+  path: string,
+  entry: string,
+  options: CompileRequestOptions,
+): { ok: true; mod: IrModule; sourceTexts: Map<string, string>; warnings: ScrDiagnostic[] } {
+  if ((options.outputKind ?? "exe") !== "exe" || options.strip !== true)
+    throw new Error(`${BOOTSTRAP_IR_INPUT} requires a stripped executable build`);
+  const mod = deserializeModuleBytes(readFileSync(path));
+  if (resolve(mod.sourceFile) !== resolve(entry))
+    throw new Error(`${BOOTSTRAP_IR_INPUT} was lowered from a different entry`);
+  return { ok: true, mod, sourceTexts: new Map(), warnings: [] };
+}
+
+/** Keep the checker and typed IR out of the native optimizer's live heap. */
+export function prepareNativeExecutable(
+  entry: string,
+  options: CompileRequestOptions,
+  ffi: FfiProfile | null,
+  toolchain: NativeToolchain,
+  frontend: FrontendFactory,
+  cache: NativeCache | null,
+  timing: CompilationTiming = () => {},
+  /** The input observations this build's output depends on, when they are
+   * stable and match the inputs (the condition under which the frontend
+   * cache entry is published): the unchanged-build record stores them. */
+  onInputs?: (probes: FrontendInputSnapshot) => void,
+): NativeExecutableInput | CompileFailure {
+  const outputKind = options.outputKind ?? "exe";
+  const targetCpuRefusal = targetCpuTargetRefusal(
+    options.targetCpu,
+    toolchain.target.platform,
+    toolchain.target.architecture,
+  );
+  if (targetCpuRefusal !== null)
+    return {
+      ok: false,
+      diagnostics: [nativeCodegenDiag("SC3002", targetCpuRefusal, entry)],
+      sourceTexts: new Map(),
+    };
+  const exclusions = nativeFrontendExclusions(entry, options);
+  const irInput = process.env[BOOTSTRAP_IR_INPUT] ?? "";
+  let key: string | null = null;
+  // The unit store's key (unit-reuse.ts): the frontend's inputs without the
+  // output paths, which lowering does not read.
+  let unitKey: string | null = null;
+  // The entry this build replaces: its probes give the digests of unchanged files.
+  let previous: FrontendInputSnapshot | undefined;
+  // A toolchain input that cannot be read leaves the build to its cache misses.
+  let inputs: Record<string, unknown> | null = null;
+  try {
+    inputs = nativeFrontendInputs(entry, options, ffi, toolchain);
+  } catch {
+    inputs = null;
+  }
+  if (cache !== null && inputs !== null) {
+    try {
+      key = contentDigest(JSON.stringify(inputs));
+      if (unitReuseEnabled()) {
+        const { outPath: _outPath, outDir: _outDir, ...lowering } = options;
+        unitKey = contentDigest(JSON.stringify({ ...inputs, options: lowering }));
+      }
+      const cached = readFrontendCache(cache, key, exclusions);
+      if (cached !== null && "input" in cached) {
+        onInputs?.(cached.probes);
+        timing("frontend-cache-hit");
+        return cached.input;
+      }
+      if (cached !== null) previous = cached.stale.probes;
+      const equivalent =
+        cached === null || outputKind === "ir"
+          ? null
+          : equivalentFrontendInput(cache, cached.stale, options, exclusions);
+      if (equivalent !== null) {
+        publishFrontendCache(cache, key, equivalent.probes, equivalent.input);
+        onInputs?.(equivalent.probes);
+        timing("frontend-cache-equivalent");
+        return equivalent.input;
+      }
+    } catch {
+      key = null;
+    }
+  }
+  timing("frontend-cache-miss");
+  const tracker = new FrontendInputTracker(previous);
+  const prepared =
+    irInput !== ""
+      ? preparedFromIr(irInput, entry, options)
+      : tracker.runSynchronous(() =>
+          prepareExecutableModule(
+            entry,
+            options,
+            ffi,
+            toolchain.target.platform,
+            frontend,
+            timing,
+            new Map(),
+            true,
+            cache !== null && unitKey !== null ? nativeUnitStore(cache, unitKey) : null,
+          ),
+        );
+  if (!prepared.ok) return prepared;
+  if (irInput !== "") timing("ir-input");
+  const ir =
+    outputKind === "ir" || options.emitIr
+      ? batchTextParts(serializeModuleParts(prepared.mod, compilerOwnedFileRoots()))
+      : null;
+  timing("ir-serialize");
+  const llvm =
+    outputKind === "ir"
+      ? []
+      : emitLlvmModuleParts(prepared.mod, {
+          targetTriple: toolchain.target.llvmTriple,
+          pointerBits: toolchain.target.pointerBits,
+          wasi: toolchain.target.platform === "wasi",
+          runtimeAbiMarker: outputKind === "obj" || outputKind === "exe",
+          // As for the Node-hosted build: executables and their textual
+          // LLVM and assembly, not objects.
+          unwindAbi:
+            (outputKind === "exe" || outputKind === "llvm" || outputKind === "asm") &&
+            toolchain.target.platform === "linux",
+          objectAudit: options.sanitize === true,
+          sanitizeAttributes: options.sanitize === true,
+          lowRegion: lowRegionTarget(toolchain.target.platform, options.sanitize === true),
+          functionWorkers: emitWorkers(),
+          forkPrimitives: emitForkPrimitives(),
+          timing,
+          ...inlineRcOption(options.optimization, options.sanitize === true),
+          ...(options.detachedExit === true && outputKind === "exe" ? { detachedExit: true } : {}),
+          ...(options.stdoutBuffering === true && outputKind === "exe"
+            ? { stdoutBuffering: true }
+            : {}),
+          ...(options.exceptions === "rare" ? { rareExceptions: true } : {}),
+          ...targetCpuField(options.targetCpu),
+          ...(options.cpuDispatch === true && outputKind === "exe" ? { cpuDispatch: true } : {}),
+          ...(options.optimization === "dev" && !options.strip
+            ? { debugSources: prepared.sourceTexts }
+            : {}),
+        });
+  timing("llvm-emit");
+  const input: NativeExecutableInput = {
+    ok: true,
+    llvm,
+    ir,
+    sidecarJson: null,
+    features: executableLinkFeatures(
+      prepared.mod,
+      options.largePages === true && outputKind === "exe",
+    ),
+    sources: [...prepared.sourceTexts],
+    ...(prepared.warnings.length > 0 ? { warnings: prepared.warnings } : {}),
+  };
+  timing("link-features");
+  const probes = tracker.snapshot();
+  if (
+    cache !== null &&
+    key !== null &&
+    probes.stable &&
+    frontendInputsStillMatch(probes, exclusions)
+  ) {
+    publishFrontendCache(cache, key, probes, input);
+    onInputs?.(probes);
+  }
+  timing("frontend-cache-publish");
+  return input;
+}
+
+/** Library preparation also ends before the native optimizer starts. The
+ * cached form contains emitted artifacts, source frames, and the sidecar. */
+export function prepareNativeLibrary(
+  profile: LibraryProfile,
+  options: CompileLibraryOptions,
+  archivePath: string,
+  toolchain: NativeToolchain,
+  frontend: FrontendFactory,
+  cache: NativeCache | null,
+  timing: CompilationTiming = () => {},
+): NativeExecutableInput | CompileFailure {
+  const stem = basename(profile.entry).replace(/\.(ts|mts|cts|js|mjs|cjs)$/, "");
+  const outputPaths = [
+    archivePath,
+    resolve(options.outDir, stem + ".lib.ll"),
+    resolve(options.outDir, stem + ".lib.ir.json"),
+  ];
+  if (profile.sidecar !== null)
+    outputPaths.push(
+      profile.sidecar.path === null
+        ? archivePath + ".contract.json"
+        : resolve(dirname(archivePath), profile.sidecar.path),
+    );
+  const directories = new Set<string>();
+  for (const output of outputPaths) {
+    for (let directory = dirname(output); ; directory = dirname(directory)) {
+      directories.add(directory);
+      if (dirname(directory) === directory) break;
+    }
+  }
+  const exclusions: FrontendInputExclusions = { outputPaths, outputDirectories: [...directories] };
+  let key: string | null = null;
+  if (cache !== null && provenanceSources() === null) {
+    try {
+      key = contentDigest(
+        JSON.stringify({
+          schema: 1,
+          kind: "library",
+          entry: profile.entry,
+          profile: profile.profileBytes,
+          options,
+          implementation: implementationIdentity(toolchain),
+          target: toolchain.target.name,
+          declarations: toolchain.declarationsRoot ?? null,
+          environment: frontendEnvironment(),
+        }),
+      );
+      const cached = readFrontendCache(cache, key, exclusions);
+      if (cached !== null && "input" in cached) {
+        timing("frontend-cache-hit");
+        return cached.input;
+      }
+    } catch {
+      key = null;
+    }
+  }
+  timing("frontend-cache-miss");
+  const tracker = new FrontendInputTracker();
+  const prepared = tracker.runSynchronous(() => {
+    for (let directory = dirname(profile.entry); ; directory = dirname(directory)) {
+      trackedReadFile(join(directory, "tsconfig.json"));
+      trackedReadFile(join(directory, "package.json"));
+      if (directory === dirname(resolve(options.profilePath)) || dirname(directory) === directory)
+        break;
+    }
+    return prepareLibrary(
+      profile,
+      options.profilePath,
+      toolchain.compilerVersion,
+      toolchain.target.platform,
+      frontend,
+      timing,
+    );
+  });
+  if (!prepared.ok) return prepared;
+  const llvm = emitLlvmModuleParts(prepared.mod, {
+    targetTriple: toolchain.target.llvmTriple,
+    pointerBits: toolchain.target.pointerBits,
+    wasi: toolchain.target.platform === "wasi",
+    objectAudit: options.sanitize === true,
+    sanitizeAttributes: options.sanitize === true,
+    timing,
+    ...inlineRcOption(profile.optimization, options.sanitize === true),
+  });
+  timing("llvm-emit");
+  const input: NativeExecutableInput = {
+    ok: true,
+    llvm,
+    ir: options.emitIr
+      ? batchTextParts(serializeModuleParts(prepared.mod, compilerOwnedFileRoots()))
+      : null,
+    sidecarJson: prepared.sidecarJson,
+    features: executableLinkFeatures(prepared.mod),
+    sources: [...prepared.sourceTexts],
+  };
+  timing("link-features");
+  const probes = tracker.snapshot();
+  if (
+    cache !== null &&
+    key !== null &&
+    probes.stable &&
+    frontendInputsStillMatch(probes, exclusions)
+  ) {
+    publishFrontendCache(cache, key, probes, input);
+  }
+  timing("frontend-cache-publish");
+  return input;
+}
+
+/** Worker processes that emit function bodies at a time: up to eight, one
+ * per available core (SCRIPTC_EMIT_WORKERS sets the count; 0 or 1 emits in
+ * this process). */
+function emitWorkers(): number {
+  const configured = process.env["SCRIPTC_EMIT_WORKERS"];
+  const value = configured === undefined ? Math.min(8, availableParallelism()) : Number(configured);
+  return Number.isFinite(value) && value > 1 ? Math.floor(value) : 1;
+}
+
+/** The process primitives emission workers fork with, unless the host
+ * cannot fork or this process is a worker itself. */
+function emitForkPrimitives(): ForkPrimitives | undefined {
+  const primitives = processFork.primitives;
+  if (primitives === null || processFork.worker) return undefined;
+  return {
+    fork: () => primitives.fork(),
+    exit: (code) => primitives.exit(code),
+    wait: (pid) => primitives.wait(pid),
+    exited: () => primitives.exited(),
+  };
+}

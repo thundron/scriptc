@@ -9,9 +9,9 @@ class Animal {
   }
 }
 
-// abstract classes compile; abstract PROPERTY declarations are erased at
-// runtime (no shared slot exists), so reads through abstract-typed
-// receivers keep a named fence
+// Abstract properties resolve through the concrete instance. Keep this
+// accepted method beside the rejected inheritance forms to ensure their
+// diagnostics do not reintroduce a refusal for abstract property reads.
 abstract class Base {
   abstract kind(): string;
   abstract limit: number;
@@ -57,7 +57,7 @@ class Bivariant extends Animal {
   }
 }
 
-// super() must be a top-level constructor statement
+// Conditional super() is supported; both branches initialize the receiver.
 class Conditional extends Animal {
   constructor(flag: boolean) {
     if (flag) {
@@ -68,12 +68,12 @@ class Conditional extends Animal {
   }
 }
 
-// instanceof needs a class instance on the left...
+// A record cannot be an instance of this native class and answers false.
 const rec = { name: "r" };
 console.log(rec instanceof Animal);
 
-// ...and folds statically for standalone classes, so a computed operand
-// whose effects would be dropped is rejected
+// ...and folds statically for standalone classes, which still evaluates
+// both operands (Node evaluates them) before answering
 class Point {
   x: number = 0;
 }

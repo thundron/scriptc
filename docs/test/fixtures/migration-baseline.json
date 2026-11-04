@@ -1,0 +1,593 @@
+[
+  {
+    "legacy": "/introduction",
+    "href": "/docs",
+    "title": "Introduction",
+    "headings": [
+      {
+        "text": "Compile a program",
+        "id": "compile-a-program"
+      },
+      {
+        "text": "Compilation modes",
+        "id": "compilation-modes"
+      },
+      {
+        "text": "Language and API support",
+        "id": "language-and-api-support"
+      },
+      {
+        "text": "Runtime type checks",
+        "id": "runtime-type-checks"
+      },
+      {
+        "text": "Build-time evaluation",
+        "id": "build-time-evaluation"
+      },
+      {
+        "text": "Next steps",
+        "id": "next-steps"
+      }
+    ]
+  },
+  {
+    "legacy": "/quickstart",
+    "href": "/docs/quickstart",
+    "title": "Quickstart",
+    "headings": [
+      {
+        "text": "Prerequisites",
+        "id": "prerequisites"
+      },
+      {
+        "text": "Install",
+        "id": "install"
+      },
+      {
+        "text": "Create a program",
+        "id": "create-a-program"
+      },
+      {
+        "text": "Compile and run",
+        "id": "compile-and-run"
+      },
+      {
+        "text": "Check compilation support",
+        "id": "check-compilation-support"
+      },
+      {
+        "text": "Use an npm dependency",
+        "id": "use-an-npm-dependency"
+      },
+      {
+        "text": "Next steps",
+        "id": "next-steps"
+      }
+    ]
+  },
+  {
+    "legacy": "/coverage",
+    "href": "/docs/coverage",
+    "title": "Coverage Reports",
+    "headings": [
+      {
+        "text": "Static programs",
+        "id": "static-programs"
+      },
+      {
+        "text": "Programs that require dynamic execution",
+        "id": "programs-that-require-dynamic-execution"
+      },
+      {
+        "text": "Report fields",
+        "id": "report-fields"
+      },
+      {
+        "text": "Analyze with --dynamic",
+        "id": "analyze-with-dynamic"
+      },
+      {
+        "text": "Embedded Node.js builtins",
+        "id": "embedded-nodejs-builtins"
+      },
+      {
+        "text": "Diagnostic codes",
+        "id": "diagnostic-codes"
+      },
+      {
+        "text": "Type errors",
+        "id": "type-errors"
+      },
+      {
+        "text": "External host type declarations",
+        "id": "external-host-type-declarations"
+      }
+    ]
+  },
+  {
+    "legacy": "/dependencies",
+    "href": "/docs/dependencies",
+    "title": "npm Dependencies",
+    "headings": [
+      {
+        "text": "Use a package",
+        "id": "use-a-package"
+      },
+      {
+        "text": "Package resolution and embedding",
+        "id": "package-resolution-and-embedding"
+      },
+      {
+        "text": "Runtime behavior",
+        "id": "runtime-behavior"
+      },
+      {
+        "text": "Engine and builtin modules",
+        "id": "engine-and-builtin-modules"
+      },
+      {
+        "text": "Value conversion",
+        "id": "value-conversion"
+      },
+      {
+        "text": "Static package compilation (experimental)",
+        "id": "static-package-compilation-experimental"
+      },
+      {
+        "text": "Provenance sources (experimental)",
+        "id": "provenance-sources-experimental"
+      },
+      {
+        "text": "Type declarations and boundary restrictions",
+        "id": "type-declarations-and-boundary-restrictions"
+      }
+    ]
+  },
+  {
+    "legacy": "/ffi",
+    "href": "/docs/ffi",
+    "title": "Native FFI",
+    "headings": [
+      {
+        "text": "Replacing a Node-API addon",
+        "id": "replacing-a-node-api-addon"
+      },
+      {
+        "text": "ABI classes",
+        "id": "abi-classes"
+      },
+      {
+        "text": "Static bindings for node:ffi",
+        "id": "static-bindings-for-nodeffi"
+      },
+      {
+        "text": "Callbacks and context pointers",
+        "id": "callbacks-and-context-pointers"
+      },
+      {
+        "text": "Manifest fields",
+        "id": "manifest-fields"
+      },
+      {
+        "text": "Boundary rules and current limits",
+        "id": "boundary-rules-and-current-limits"
+      }
+    ]
+  },
+  {
+    "legacy": "/native-objects",
+    "href": "/docs/native-objects",
+    "title": "Native Program Objects",
+    "headings": [
+      {
+        "text": "ABI and runtime contract",
+        "id": "abi-and-runtime-contract"
+      },
+      {
+        "text": "Machine-readable link information",
+        "id": "machine-readable-link-information"
+      },
+      {
+        "text": "C compiler as linker driver",
+        "id": "c-compiler-as-linker-driver"
+      },
+      {
+        "text": "Native Apple linker",
+        "id": "native-apple-linker"
+      }
+    ]
+  },
+  {
+    "href": "/docs/threads",
+    "title": "Sharing Data Between Workers",
+    "headings": [
+      {
+        "text": "Example",
+        "id": "example"
+      },
+      {
+        "text": "The publication contract",
+        "id": "the-publication-contract"
+      },
+      {
+        "text": "The write guard",
+        "id": "the-write-guard"
+      },
+      {
+        "text": "How it differs from structured clone",
+        "id": "how-it-differs-from-structured-clone"
+      },
+      {
+        "text": "Frozen plain data",
+        "id": "frozen-plain-data"
+      },
+      {
+        "text": "Cost",
+        "id": "cost"
+      }
+    ]
+  },
+  {
+    "href": "/docs/contracts",
+    "title": "Contract Types",
+    "headings": [
+      {
+        "text": "Example",
+        "id": "example"
+      },
+      {
+        "text": "Where contracts apply",
+        "id": "where-contracts-apply"
+      },
+      {
+        "text": "NoThrow",
+        "id": "nothrow"
+      },
+      {
+        "text": "Int32",
+        "id": "int32"
+      },
+      {
+        "text": "Immutable",
+        "id": "immutable"
+      },
+      {
+        "text": "Diagnostics",
+        "id": "diagnostics"
+      }
+    ]
+  },
+  {
+    "href": "/docs/experimental",
+    "title": "Experimental APIs",
+    "headings": [
+      {
+        "text": "LifetimeRegion",
+        "id": "lifetimeregion"
+      },
+      {
+        "text": "API",
+        "id": "api"
+      },
+      {
+        "text": "When a region is freed",
+        "id": "when-a-region-is-freed"
+      },
+      {
+        "text": "Async work",
+        "id": "async-work"
+      },
+      {
+        "text": "Threads",
+        "id": "threads"
+      },
+      {
+        "text": "Cost",
+        "id": "cost"
+      },
+      {
+        "text": "InternTable",
+        "id": "interntable"
+      },
+      {
+        "text": "Methods",
+        "id": "methods"
+      },
+      {
+        "text": "Thread behavior",
+        "id": "thread-behavior"
+      },
+      {
+        "text": "Memory",
+        "id": "memory"
+      },
+      {
+        "text": "ThreadSlots",
+        "id": "threadslots"
+      },
+      {
+        "text": "Slot methods",
+        "id": "slot-methods"
+      },
+      {
+        "text": "Keys and values",
+        "id": "keys-and-values"
+      },
+      {
+        "text": "Slot cost",
+        "id": "slot-cost"
+      },
+      {
+        "text": "InlineArray",
+        "id": "inlinearray"
+      },
+      {
+        "text": "Field rules",
+        "id": "field-rules"
+      },
+      {
+        "text": "Reads",
+        "id": "reads"
+      },
+      {
+        "text": "Inline array cost",
+        "id": "inline-array-cost"
+      }
+    ]
+  },
+  {
+    "legacy": "/wasm",
+    "href": "/docs/wasm",
+    "title": "WebAssembly Modules",
+    "headings": [
+      {
+        "text": "Define the interface",
+        "id": "define-the-interface"
+      },
+      {
+        "text": "Instantiate and initialize",
+        "id": "instantiate-and-initialize"
+      },
+      {
+        "text": "Values and memory ownership",
+        "id": "values-and-memory-ownership"
+      },
+      {
+        "text": "Errors and scheduling",
+        "id": "errors-and-scheduling"
+      }
+    ]
+  },
+  {
+    "legacy": "/platforms",
+    "href": "/docs/platforms",
+    "title": "Platform Support",
+    "headings": [
+      {
+        "text": "Owned LLVM targets",
+        "id": "owned-llvm-targets"
+      },
+      {
+        "text": "Cross-compilation via zig",
+        "id": "cross-compilation-via-zig"
+      },
+      {
+        "text": "Linux (arm64, x86_64)",
+        "id": "linux-arm64-x86_64"
+      },
+      {
+        "text": "Windows (x86_64)",
+        "id": "windows-x86_64"
+      },
+      {
+        "text": "iOS and Android (arm64, library mode)",
+        "id": "ios-and-android-arm64-library-mode"
+      },
+      {
+        "text": "WebAssembly (WASI Preview 1)",
+        "id": "webassembly-wasi-preview-1"
+      },
+      {
+        "text": "Cross-target limits",
+        "id": "cross-target-limits"
+      },
+      {
+        "text": "Summary",
+        "id": "summary"
+      }
+    ]
+  },
+  {
+    "legacy": "/cli",
+    "href": "/docs/cli",
+    "title": "CLI Reference",
+    "headings": [
+      {
+        "text": "scriptc build",
+        "id": "scriptc-build"
+      },
+      {
+        "text": "scriptc run",
+        "id": "scriptc-run"
+      },
+      {
+        "text": "scriptc coverage",
+        "id": "scriptc-coverage"
+      },
+      {
+        "text": "scriptc cache warm",
+        "id": "scriptc-cache-warm"
+      },
+      {
+        "text": "Options",
+        "id": "options"
+      },
+      {
+        "text": "Environment variables",
+        "id": "environment-variables"
+      },
+      {
+        "text": "LLVM backend",
+        "id": "llvm-backend"
+      },
+      {
+        "text": "Tool requirements",
+        "id": "tool-requirements"
+      }
+    ]
+  },
+  {
+    "legacy": "/how-it-works",
+    "href": "/docs/how-it-works",
+    "title": "How It Works",
+    "headings": [
+      {
+        "text": "Compiler pipeline",
+        "id": "compiler-pipeline"
+      },
+      {
+        "text": "Inspect compiler output",
+        "id": "inspect-compiler-output"
+      },
+      {
+        "text": "External linking",
+        "id": "external-linking"
+      },
+      {
+        "text": "Native runtime",
+        "id": "native-runtime"
+      },
+      {
+        "text": "Testing",
+        "id": "testing"
+      },
+      {
+        "text": "Embedded JavaScript engine",
+        "id": "embedded-javascript-engine"
+      },
+      {
+        "text": "Repository layout",
+        "id": "repository-layout"
+      }
+    ]
+  },
+  {
+    "legacy": "/limitations",
+    "href": "/docs/limitations",
+    "title": "Limitations",
+    "headings": [
+      {
+        "text": "Native debugging",
+        "id": "native-debugging"
+      },
+      {
+        "text": "Static compilation",
+        "id": "static-compilation"
+      },
+      {
+        "text": "Language features",
+        "id": "language-features"
+      },
+      {
+        "text": "Types and class definitions",
+        "id": "types-and-class-definitions"
+      },
+      {
+        "text": "Builtin APIs",
+        "id": "builtin-apis"
+      },
+      {
+        "text": "Builtin function values",
+        "id": "builtin-function-values"
+      },
+      {
+        "text": "Child-process workers",
+        "id": "child-process-workers"
+      },
+      {
+        "text": "Untyped values",
+        "id": "untyped-values"
+      },
+      {
+        "text": "Type checking",
+        "id": "type-checking"
+      },
+      {
+        "text": "three.js",
+        "id": "threejs"
+      },
+      {
+        "text": "Runtime differences from Node.js",
+        "id": "runtime-differences-from-nodejs"
+      },
+      {
+        "text": "Array bounds and runtime errors",
+        "id": "array-bounds-and-runtime-errors"
+      },
+      {
+        "text": "Runtime type checks",
+        "id": "runtime-type-checks"
+      },
+      {
+        "text": "Record identity and property order",
+        "id": "record-identity-and-property-order"
+      },
+      {
+        "text": "Buffer construction",
+        "id": "buffer-construction"
+      },
+      {
+        "text": "JSON callbacks",
+        "id": "json-callbacks"
+      },
+      {
+        "text": "Strings and sorting",
+        "id": "strings-and-sorting"
+      },
+      {
+        "text": "Dates and timezones",
+        "id": "dates-and-timezones"
+      },
+      {
+        "text": "Weak collections and memory",
+        "id": "weak-collections-and-memory"
+      },
+      {
+        "text": "Foreign-thread callbacks",
+        "id": "foreign-thread-callbacks"
+      },
+      {
+        "text": "Console and process streams",
+        "id": "console-and-process-streams"
+      },
+      {
+        "text": "Process arguments and errors",
+        "id": "process-arguments-and-errors"
+      },
+      {
+        "text": "Embedded JavaScript engine",
+        "id": "embedded-javascript-engine"
+      },
+      {
+        "text": "Process events",
+        "id": "process-events"
+      },
+      {
+        "text": "Native addons",
+        "id": "native-addons"
+      },
+      {
+        "text": "WASI target",
+        "id": "wasi-target"
+      },
+      {
+        "text": "Tooling and native FFI",
+        "id": "tooling-and-native-ffi"
+      },
+      {
+        "text": "Browser embedding",
+        "id": "browser-embedding"
+      }
+    ]
+  }
+]

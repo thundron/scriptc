@@ -1,7 +1,7 @@
 scriptc coverage tests/coverage-fixtures/js-gap/gap.js
 
   statements analyzed   5
-  compile statically    4  (80%)
-  compile dynamically   1  (20%) (island sites — the embedded engine runs them)
+  compile statically    5  (100%)
+  compile dynamically   0  (0%) (island sites — the embedded engine runs them)
 
-  builds with --dynamic — no remaining blockers (the island sites above run in the embedded engine).
+  fully static — this program has no dynamic remainder.

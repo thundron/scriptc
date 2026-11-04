@@ -1,5 +1,5 @@
 /* The oracle: every corpus program runs under Node AND as a scriptc-compiled
- * native binary; stdout AND stderr must match byte-for-byte and exit codes
+ * native binary; stdout AND stderr must be identical and exit codes
  * must agree (stderr only for exit-0 programs: the uncaught-throw report
  * format is a documented divergence, so `// @exit:` programs keep the
  * historical stdout-only contract).
@@ -7,6 +7,10 @@
  *
  * SCRIPTC_SAN=1 re-runs every program built with ASan + the runtime RC audit,
  * turning the whole corpus into leak/use-after-free tests (default in CI).
+ *
+ * SCRIPTC_TEST_OPTIMIZATION=speed builds every program with
+ * --optimization=speed; `// @optimization: speed` in a program's directive
+ * head selects it for that program alone.
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -17,7 +21,10 @@ import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
 import ts5 from "typescript";
 import { compile } from "@scriptc/compiler";
-import { shardSelect, shardSuffix } from "./shard.js";
+import { corpusSelect, shardSuffix } from "./shard.js";
+import { oracleEnvKey } from "./oracle-env.js";
+import { libnodePack, requiresLibnode } from "./libnode.js";
+import { tscJsxOracleEntry, wantsTscJsx } from "./jsx-oracle.js";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = join(import.meta.dirname, "../..");
@@ -30,16 +37,21 @@ const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests");
 // scriptc compiles them through checkJs inference.
 // SCRIPTC_TEST_SHARD="i/n" (CI's matrix) keeps only this shard's slice of
 // the corpus — the file is this suite's wall-time monster, so vitest's
-// file-granular --shard alone cannot split it. Unset = everything.
+// file-granular --shard alone cannot split it. Slices are balanced by each
+// program's measured cost (corpus-costs.json and corpus-costs/). Unset = everything.
 const ENTRY_EXTS = ["ts", "js", "mjs", "cjs"];
-const files = shardSelect(
+const files = corpusSelect(
   ENTRY_EXTS.flatMap((ext) => [
     ...globSync(join(corpusDir, `*.${ext}`)),
     ...globSync(join(corpusDir, `*/main.${ext}`)),
   ]).sort(),
   (f) => f.slice(corpusDir.length + 1),
+  process.env["SCRIPTC_SAN"] === "1",
 );
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
+const laneOptimization = process.env["SCRIPTC_TEST_OPTIMIZATION"];
+if (laneOptimization !== undefined && laneOptimization !== "speed")
+  throw new Error(`SCRIPTC_TEST_OPTIMIZATION must be speed, got ${laneOptimization}`);
 
 // Both children (node and the native binary) inherit this process's env, so
 // corpus programs can read a KNOWN variable value-exactly — not just the
@@ -71,12 +83,14 @@ function expectedExitCode(file: string): number {
   return 0;
 }
 
-/** `// @dynamic` in the entry file's directive head: compile with the
- * island engine embedded (--dynamic). The Node side needs no flag — the
- * island shim (island-shim.mjs) makes __island_eval a global indirect
- * eval, so Node stays the oracle for island VALUE results. */
-function wantsDynamic(file: string): boolean {
-  return directiveHead(file).some((l) => /^\/\/ @dynamic\s*$/.test(l));
+/** `// @optimization: speed` in the entry file's directive head (or the
+ * SCRIPTC_TEST_OPTIMIZATION=speed lane): compile with --optimization=speed,
+ * for programs that pin behavior of the size-for-speed code paths. */
+function wantsSpeed(file: string): boolean {
+  return (
+    laneOptimization === "speed" ||
+    directiveHead(file).some((l) => /^\/\/ @optimization:\s*speed\s*$/.test(l))
+  );
 }
 
 /** `// @transform-types` in the entry file's directive head: the Node
@@ -91,6 +105,25 @@ function wantsTransformTypes(file: string): boolean {
   // pure function of the program bytes, so the oracle cache key needs no
   // extension.
   return programInputs(file).some((f) => /\benum\s+[A-Za-z_$]/.test(readFileSync(f, "utf8")));
+}
+
+/** `// @env: NAME=VALUE[,NAME=VALUE]` in the entry file's directive head:
+ * the variables are set for BOTH sides — the Node oracle and the compiled
+ * binary — so a program can pin the ambient state that decides Intl output
+ * (TZ for the time zone, LC_ALL/LANG for the default locale). The directive
+ * lives in the program bytes the oracle cache key hashes, so a recorded
+ * verdict can never be replayed under different variables. */
+function programEnv(file: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const line of directiveHead(file)) {
+    const m = /^\/\/ @env:\s*(.+?)\s*$/.exec(line);
+    if (m === null) continue;
+    for (const pair of m[1]!.split(",")) {
+      const eq = pair.indexOf("=");
+      if (eq > 0) env[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+    }
+  }
+  return env;
 }
 
 /** `// @tsc-decorators` in the entry file's directive head: the Node side
@@ -110,13 +143,19 @@ function wantsTscDecorators(file: string): boolean {
  * test cache — a pure function of the program bytes and the typescript
  * version (both in the oracle cache key). */
 function nodeOracleFile(file: string): string {
+  if (wantsTscJsx(directiveHead(file))) return tscJsxOracleEntry(file, cacheDir);
   if (!wantsTscDecorators(file)) return file;
   const src = readFileSync(file, "utf8");
   const out = ts5.transpileModule(src, {
     compilerOptions: { target: ts5.ScriptTarget.ES2022, module: ts5.ModuleKind.ESNext },
     fileName: file,
   }).outputText;
-  const key = createHash("sha256").update(ts5.version).update("\0").update(src).digest("hex").slice(0, 16);
+  const key = createHash("sha256")
+    .update(ts5.version)
+    .update("\0")
+    .update(src)
+    .digest("hex")
+    .slice(0, 16);
   const path = join(cacheDir, `dec-oracle-${key}.mjs`);
   mkdirSync(cacheDir, { recursive: true });
   // Atomic publish: concurrent suites (the other flavor's full run, or
@@ -129,21 +168,62 @@ function nodeOracleFile(file: string): string {
 }
 
 /** `// @no-deprecation` in the directive head: the Node oracle runs with
- * --no-deprecation — for programs exercising deprecated-API ERROR paths
- * (new Buffer's ctor ladder) whose DEP warnings carry a pid and can never
- * byte-compare; the compiled runtime emits no process warnings at all. */
+ * --no-deprecation, for programs whose DEP warnings carry a pid and cannot
+ * compare. The compiled program does not read the directive; a program
+ * whose compiled form reports the warning sets process.noDeprecation. */
 function wantsNoDeprecation(file: string): boolean {
   return directiveHead(file).some((l) => /^\/\/ @no-deprecation\s*$/.test(l));
 }
 
+/** `// @requires-icu` in the directive head: the program's Intl forms are
+ * answered by ICU, which the runtime packs build only for the Linux x64
+ * target in this slice. Other lanes (the macOS-native contracts, the wasm
+ * and Windows packs) skip these programs instead of failing: the compiler
+ * refuses the forms there with SC3002. */
+function requiresIcu(file: string): boolean {
+  return directiveHead(file).some((l) => /^\/\/ @requires-icu\s*$/.test(l));
+}
+
+/** Whether this machine's runtime pack can link ICU (see requiresIcu). */
+function icuAvailable(): boolean {
+  return process.platform === "linux" && process.arch === "x64";
+}
+
+/** `// @normalize-pid` in the directive head: Node's process warnings
+ * ("(node:<pid>) [DEP0040] ...") are compared with the pid replaced on both
+ * sides — for island programs, where Node itself prints the warning in the
+ * compiled program's process. */
+function wantsPidNormalized(file: string): boolean {
+  return directiveHead(file).some((l) => /^\/\/ @normalize-pid\s*$/.test(l));
+}
+
+function withoutWarningPid(stderr: Buffer): Buffer {
+  return Buffer.from(stderr.toString("utf8").replace(/^\(node:\d+\) /gm, "(node:PID) "), "utf8");
+}
+
 /** The Node oracle's argv for a corpus entry (shims + the per-program
  * transform flag). */
+/** `// @disallow-code-generation` in the directive head: the Node oracle
+ * runs with --disallow-code-generation-from-strings — the mode compiled
+ * programs match for eval and the Function constructor, which throw its
+ * EvalError (code-generation.ts). Programs that never generate code
+ * behave identically either way. */
+function wantsDisallowCodeGeneration(file: string): boolean {
+  return directiveHead(file).some((l) => /^\/\/ @disallow-code-generation\s*$/.test(l));
+}
+
 function nodeOracleArgs(file: string): string[] {
   const transform = wantsTransformTypes(file)
     ? ["--experimental-transform-types", "--disable-warning=ExperimentalWarning"]
     : [];
   const nodep = wantsNoDeprecation(file) ? ["--no-deprecation"] : [];
-  return [...transform, ...nodep, "--import", comptimeShim, "--import", islandShim, nodeOracleFile(file)];
+  const codegen = wantsDisallowCodeGeneration(file)
+    ? ["--disallow-code-generation-from-strings"]
+    : [];
+  // --import makes Node load even a CJS entry through its ESM loader,
+  // changing an entry throw's uncaughtException origin to unhandledRejection.
+  const shims = directiveHead(file).includes("// @no-node-shims") ? [] : ["--import", comptimeShim];
+  return [...transform, ...nodep, ...codegen, ...shims, nodeOracleFile(file)];
 }
 
 /** Runs a binary, tolerating an expected nonzero exit (execFile rejects on
@@ -152,7 +232,11 @@ function nodeOracleArgs(file: string): string[] {
  * (readFileSync(0)), and the default open pipe would block both sides
  * forever — this way Node and the native binary see the same empty,
  * closed stream. */
-async function runBinary(cmd: string, args: string[]): Promise<RunResult> {
+async function runBinary(
+  cmd: string,
+  args: string[],
+  env: Record<string, string> = {},
+): Promise<RunResult> {
   // Linux fork/exec race (observed on the sandbox lane, llvm flavor): a
   // sibling worker's fork can inherit the freshly-linked binary's write
   // fd across its own spawn window, and exec answers ETXTBSY until that
@@ -160,7 +244,13 @@ async function runBinary(cmd: string, args: string[]): Promise<RunResult> {
   // briefly, the npm/cargo stance. (No-op on macOS: exec there never
   // answers ETXTBSY.)
   for (let attempt = 0; ; attempt++) {
-    const pending = execFileAsync(cmd, args, { encoding: "buffer" });
+    const pending = execFileAsync(cmd, args, {
+      encoding: "buffer",
+      // The program's `// @env:` pins layer over the inherited environment,
+      // so both sides see the same TZ/locale as the rest of the corpus sees
+      // SCRIPTC_TEST_ENV.
+      env: { ...process.env, ...env },
+    });
     pending.child.stdin?.end();
     try {
       const { stdout, stderr } = await pending;
@@ -200,10 +290,6 @@ function comparableStderr(stderr: Buffer): Buffer {
 // globally so Node stays the oracle for comptime programs (the compile-time
 // result must equal what Node computes at runtime); inert for the rest.
 const comptimeShim = pathToFileURL(join(import.meta.dirname, "comptime-shim.mjs")).href;
-// `__island_eval(code)` in plain JS semantics is a global indirect eval +
-// String() — the island shim defines it so Node stays the oracle for island
-// programs too; inert for the rest.
-const islandShim = pathToFileURL(join(import.meta.dirname, "island-shim.mjs")).href;
 
 /** Entry file plus siblings for directory tests — every byte a program run
  * depends on, shared by the oracle cache key and the compile cache key.
@@ -213,7 +299,7 @@ const islandShim = pathToFileURL(join(import.meta.dirname, "island-shim.mjs")).h
 function programInputs(file: string): string[] {
   if (!/\/main\.(ts|js|mjs|cjs)$/.test(file)) return [file];
   return [
-    ...ENTRY_EXTS.flatMap((ext) => globSync(join(file, `../**/*.${ext}`))),
+    ...[...ENTRY_EXTS, "tsx", "jsx"].flatMap((ext) => globSync(join(file, `../**/*.${ext}`))),
     ...globSync(join(file, "../**/tsconfig.json")),
     ...globSync(join(file, "../**/package.json")),
   ].sort();
@@ -222,9 +308,9 @@ function programInputs(file: string): string[] {
 // ---- oracle result cache ---------------------------------------------------
 // Node's verdict for a corpus program is a pure function of the program bytes,
 // the shims, and the Node build (corpus stdout is deterministic by
-// construction — it must match a non-Node native binary byte-for-byte). So
-// cache it, keyed by all of those plus the invocation shape (SCRIPTC_TEST_ENV
-// and the cwd). Only the SPAWN is skipped: the native side always runs live
+// construction — it must be identical to a non-Node native binary's output). So
+// cache it, keyed by all of those plus the invocation shape (the inherited
+// environment, see oracle-env.ts, and the cwd). Only the SPAWN is skipped: the native side always runs live
 // and the comparison itself never changes. SCRIPTC_NO_CACHE=1 (or an unset
 // SCRIPTC_CACHE_DIR) disables the cache in both directions — no reads, no writes.
 // Storage shares the compile cache's root and its LRU sweep (see native-toolchain.ts).
@@ -236,19 +322,24 @@ if (oracleDir !== null) mkdirSync(oracleDir, { recursive: true });
 
 let oracleKeyBaseMemo: Promise<string> | null = null;
 function oracleKeyBase(): Promise<string> {
-  // Oracle children use Vitest's exact executable; PATH may name another Node.
-  oracleKeyBaseMemo ??= execFileAsync(process.execPath, ["--version"]).then(({ stdout }) =>
+  // The spawned `node` comes from PATH, so ask IT for its version rather than
+  // trusting process.version (vitest's own node could differ).
+  oracleKeyBaseMemo ??= execFileAsync("node", ["--version"]).then(({ stdout }) =>
     createHash("sha256")
-      .update("oracle-v2\0")
-      .update(process.execPath).update("\0")
-      .update(stdout.trim()).update("\0")
+      .update("oracle-v1\0")
+      .update(stdout.trim())
+      .update("\0")
       // Decorator programs run tsc's downlevel on the Node side — its
       // emitter version is part of the verdict.
-      .update(ts5.version).update("\0")
-      .update(readFileSync(fileURLToPath(comptimeShim))).update("\0")
-      .update(readFileSync(fileURLToPath(islandShim))).update("\0")
-      .update(process.env["SCRIPTC_TEST_ENV"] ?? "").update("\0")
-      .update(process.cwd()).update("\0")
+      .update(ts5.version)
+      .update("\0")
+      .update(readFileSync(fileURLToPath(comptimeShim)))
+      .update("\0")
+      .update("\0")
+      .update(oracleEnvKey(process.env))
+      .update("\0")
+      .update(process.cwd())
+      .update("\0")
       .digest("hex"),
   );
   return oracleKeyBaseMemo;
@@ -313,7 +404,7 @@ async function runNode(file: string): Promise<RunResult> {
   // Node 24 strips types natively; the supported subset is erasable by
   // construction — except `// @transform-types` programs (namespaces),
   // which run under Node's transform mode.
-  const res = await runBinary(process.execPath, nodeOracleArgs(file));
+  const res = await runBinary("node", nodeOracleArgs(file), programEnv(file));
   if (cachePath !== null) {
     try {
       const tmp = `${cachePath}.${process.pid}.${Math.random().toString(36).slice(2)}`;
@@ -337,25 +428,25 @@ async function runNode(file: string): Promise<RunResult> {
 async function compileAndRun(file: string): Promise<RunResult> {
   // Directory tests hash every sibling file so edits to imports bust the cache.
   const inputs = programInputs(file);
-  const dynamic = wantsDynamic(file);
+  const speed = wantsSpeed(file);
   const hash = createHash("sha256");
   for (const f of inputs) hash.update(f).update(readFileSync(f));
   const key = hash
     .update(sanitize ? "san" : "plain")
-    .update(dynamic ? "dyn" : "")
+    .update(speed ? "speed" : "")
+    // Computed-access sites emit different code by default; an opt-out
+    // restores the key path, so the two builds key separately.
+    .update("index-arms:" + (process.env["SCRIPTC_DYN_INDEX_FASTPATH"] ?? "1"))
     .digest("hex")
     .slice(0, 16);
   const outDir = join(cacheDir, key);
   mkdirSync(outDir, { recursive: true });
   const result = await compile(file, {
-    outPath: join(outDir, "program"),
+    outPath: join(outDir, process.platform === "win32" ? "program.exe" : "program"),
     outDir,
     sanitize,
-    dynamic,
-    // Pinned: this suite IS the C-reference lane — its meaning is "the C
-    // backend matches Node", regardless of what the product default does.
-    // llvm-differential.test.ts owns the LLVM lane over the same corpus.
-    backend: "c",
+    backend: "llvm",
+    ...(speed ? { optimization: "speed" as const } : {}),
   });
   if (!result.ok) {
     throw new Error(
@@ -363,7 +454,7 @@ async function compileAndRun(file: string): Promise<RunResult> {
         result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
     );
   }
-  return runBinary(result.binaryPath, []);
+  return runBinary(result.binaryPath, [], programEnv(file));
 }
 
 describe(`differential corpus (${files.length} programs${sanitize ? ", sanitized" : ""}${shardSuffix()})`, () => {
@@ -375,7 +466,11 @@ describe(`differential corpus (${files.length} programs${sanitize ? ", sanitized
   test.for(files.map((f) => [f.slice(corpusDir.length + 1), f] as const))(
     "%s",
     { retry: 1 },
-    async ([, file]) => {
+    async ([, file], { skip }) => {
+      // `// @requires-libnode`: the binary loads Node from a libnode pack,
+      // required in the Linux CI lanes (libnode.ts), else skipped without one.
+      if (requiresLibnode(file) && libnodePack() === null) skip();
+      if (requiresIcu(file) && !icuAvailable()) skip();
       const [nodeRes, nativeRes] = await Promise.all([runNode(file), compileAndRun(file)]);
       // Compare as bytes; decode only for the failure diff.
       if (!nodeRes.stdout.equals(nativeRes.stdout)) {
@@ -390,9 +485,13 @@ describe(`differential corpus (${files.length} programs${sanitize ? ", sanitized
       // — their stderr carries the uncaught report, whose format is a
       // documented divergence.
       if (expectedExit === 0) {
-        const nativeErr = comparableStderr(nativeRes.stderr);
-        if (!nodeRes.stderr.equals(nativeErr)) {
-          expect(nativeErr.toString("utf8")).toBe(nodeRes.stderr.toString("utf8"));
+        const pidFree = wantsPidNormalized(file);
+        const nativeErr = pidFree
+          ? withoutWarningPid(comparableStderr(nativeRes.stderr))
+          : comparableStderr(nativeRes.stderr);
+        const nodeErr = pidFree ? withoutWarningPid(nodeRes.stderr) : nodeRes.stderr;
+        if (!nodeErr.equals(nativeErr)) {
+          expect(nativeErr.toString("utf8")).toBe(nodeErr.toString("utf8"));
           expect.unreachable("stderr differed at byte level but not after utf8 decode");
         }
       }

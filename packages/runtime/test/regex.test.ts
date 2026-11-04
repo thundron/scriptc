@@ -18,10 +18,14 @@ beforeAll(async () => {
   await mkdir(join(testDir, "build"), { recursive: true });
   await execFileAsync("clang", [
     // no -Wall/-Wextra: the vendored libunicode.c is not warning-clean
-    "-std=c11", "-O1",
-    "-fsanitize=address", "-DSCR_RC_AUDIT",
-    "-I", vendorDir,
-    "-o", bin,
+    "-std=c11",
+    "-O1",
+    "-fsanitize=address",
+    "-DSCR_RC_AUDIT",
+    "-I",
+    vendorDir,
+    "-o",
+    bin,
     join(testDir, "test_regex.c"),
     join(testDir, "../src/scr_regex.c"),
     // scr_regex.c hosts assert.match and calls the assert throw/inspect
@@ -32,7 +36,9 @@ beforeAll(async () => {
     join(testDir, "../src/scr_string.c"),
     join(testDir, "../src/scr_map.c"),
     join(testDir, "../src/scr_array.c"),
+    join(testDir, "../src/scr_arena.c"),
     join(testDir, "../src/scr_json.c"),
+    join(testDir, "../src/scr_bigint.c"),
     join(testDir, "../src/scr_exception.c"),
     join(testDir, "../src/scr_error.c"),
     join(testDir, "../src/scr_number.c"),
@@ -41,8 +47,14 @@ beforeAll(async () => {
     join(testDir, "../src/scr_object.c"),
     join(testDir, "../src/scr_union.c"),
     join(testDir, "../src/scr_cycle.c"),
+    join(testDir, "../src/scr_alloc.c"),
     join(testDir, "../src/scr_lib.c"),
+    join(testDir, "../src/scr_hash.c"),
+    join(testDir, "../src/scr_url.c"),
+    join(testDir, "../src/scr_url_params.c"),
+    join(testDir, "../src/scr_path.c"),
     join(testDir, "../src/scr_bytes.c"),
+    join(testDir, "../src/scr_shared.c"),
     ...(process.platform === "linux" ? ["-D_GNU_SOURCE", "-lm"] : []),
   ]);
 }, 60_000);
@@ -52,15 +64,28 @@ test("regex runtime: matching, substitutions, split, throws, RC accounting", asy
   expect(stderr.trim()).toMatch(/^(\d+)\/\1 cases passed$/);
 });
 
-test("test() on a g-flagged regex aborts with the statefulness fence", async () => {
-  const err = await execFileAsync(bin, ["--crash-global-test"]).then(
-    () => {
-      throw new Error("expected scr_regex_test to abort");
-    },
-    (e: Error & { signal?: string; stderr?: string }) => e,
-  );
-  expect(err.signal).toBe("SIGABRT");
-  expect(err.stderr).toContain(
-    "scriptc: test() on a regex with the 'g' or 'y' flag is not supported",
-  );
-});
+// The native one-byte matcher (scr_regex_native.h) against lre_exec itself:
+// random patterns over the translated subset and its bail-outs, random ASCII
+// subjects, every start index; results and all capture slots must agree.
+const fuzzBin = join(testDir, "build", "test_regex_native");
+
+test("regex native matcher: differential fuzz against libregexp", async () => {
+  await execFileAsync("clang", [
+    "-std=c11",
+    "-O1",
+    "-fsanitize=address,undefined",
+    "-fno-sanitize-recover=undefined",
+    "-I",
+    vendorDir,
+    "-o",
+    fuzzBin,
+    join(testDir, "test_regex_native.c"),
+    join(vendorDir, "libregexp.c"),
+    join(vendorDir, "libunicode.c"),
+    ...(process.platform === "linux" ? ["-D_GNU_SOURCE", "-lm"] : []),
+  ]);
+  for (const seed of ["1", "2", "3"]) {
+    const { stderr } = await execFileAsync(fuzzBin, ["4000", seed]);
+    expect(stderr.trim()).toMatch(/^\d+\/\d+ translated, \d+ checks$/);
+  }
+}, 120_000);

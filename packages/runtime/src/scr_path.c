@@ -1,7 +1,7 @@
 /* node:path — BOTH of Node's lib/path.js implementations, ported
  * function-by-function (normalizeString and friends), so every edge case
  * (trailing slashes, "..", empty segments, dot-files, drive letters, UNC
- * and device roots, reserved device names) matches Node byte-for-byte;
+ * and device roots, reserved device names) matches Node exactly;
  * the differential corpus and the committed oracle cases
  * (test/path-cases.txt) are the oracle. The scr_path_* family below is
  * posix; the scr_path_win32_* family (second half of the file) is Node
@@ -229,6 +229,25 @@ static void scr_path_cwd(PathBuf *out) {
   pb_append(out, buf, strlen(buf));
 }
 
+static void scr_path_posix_cwd(PathBuf *out) {
+  scr_path_cwd(out);
+#ifdef _WIN32
+  /* path.posix resolves relative inputs against a slash-normalized cwd
+   * without the Windows drive prefix. The win32 resolver keeps the raw
+   * cwd, so normalize only the POSIX caller's virtual argument. */
+  size_t first_slash = out->len;
+  for (size_t i = 0; i < out->len; i++) {
+    if (out->data[i] == '\\') out->data[i] = '/';
+    if (out->data[i] == '/' && first_slash == out->len) first_slash = i;
+  }
+  if (first_slash < out->len) {
+    memmove(out->data, out->data + first_slash, out->len - first_slash);
+    out->len -= first_slash;
+    out->data[out->len] = '\0';
+  }
+#endif
+}
+
 ScrStr *scr_path_resolve(ScrArr *parts) {
   /* Node walks the args LAST-first, prepending, until one is absolute;
    * the cwd is a final virtual argument. Build the concatenation by
@@ -245,7 +264,7 @@ ScrStr *scr_path_resolve(ScrArr *parts) {
       pb_append(&seg, arg->data, arg->len);
       scr_str_release(arg);
     } else {
-      scr_path_cwd(&seg);
+      scr_path_posix_cwd(&seg);
     }
     if (seg.len == 0) {
       free(seg.data);
@@ -458,7 +477,7 @@ ScrStr *scr_path_relative(ScrStr *from, ScrStr *to) {
   return pb_take(&out);
 }
 
-/* ── path.win32 — Node's win32 implementation, byte-for-byte ───────────
+/* ── path.win32 — Node's win32 implementation, ported exactly ──────────
  * Ported function-by-function from Node v24's lib/path.js win32 object
  * (the same fidelity standard as the posix section above): drive-letter
  * and UNC roots (\\server\share), device paths (\\.\ and \\?\), the
@@ -472,9 +491,10 @@ ScrStr *scr_path_relative(ScrStr *from, ScrStr *to) {
  *
  * Two knowingly-ASCII spots (documented divergences): the
  * case-insensitive comparisons Node does with String.prototype.
- * toLowerCase/toUpperCase (win32.relative, resolve's device compare, the
- * reserved-name check) fold ASCII only here — non-ASCII device/server
- * names whose Unicode case-folding differs compare case-SENSITIVELY. */
+ * toLowerCase/toUpperCase in resolve's device compare and the reserved-name
+ * check fold ASCII only here — non-ASCII device/server names whose Unicode
+ * case-folding differs compare case-SENSITIVELY. win32.relative lowercases
+ * with String.prototype.toLowerCase and counts UTF-16 units, as Node does. */
 
 static bool scr_path_w32_is_device_root(char c) {
   return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
@@ -826,7 +846,7 @@ ScrStr *scr_path_win32_resolve(ScrArr *parts) {
        * the resolved drive. resolvedDevice is always a 2-byte drive here
        * (UNC devices are absolute and broke out of the loop). */
       char name[4] = {'=', dev.data[0], dev.data[1], 0};
-      const char *dcwd = getenv(name);
+      const char *dcwd = scr_getenv(name);
       if (dcwd && *dcwd) pb_append(&pathb, dcwd, strlen(dcwd));
       else scr_path_cwd(&pathb);
       if (!(pathb.len >= 2 && scr_path_w32_ieq(pathb.data, dev.data, 2)) &&
@@ -954,114 +974,6 @@ bool scr_path_win32_is_absolute(ScrStr *path) {
   return scr_path_w32_is_sep(p[0]) ||
          (len > 2 && scr_path_w32_is_device_root(p[0]) && p[1] == ':' &&
           scr_path_w32_is_sep(p[2]));
-}
-
-ScrStr *scr_path_win32_relative(ScrStr *from, ScrStr *to) {
-  if (from->len == to->len && memcmp(from->data, to->data, from->len) == 0) {
-    return scr_str_new("", 0);
-  }
-  /* fromOrig = win32.resolve(from), toOrig = win32.resolve(to). */
-  ScrArr *pack = scr_arr_new(SCR_ELEM_STR, 1);
-  scr_arr_push_ref(pack, scr_str_retain(from));
-  ScrStr *rfrom = scr_path_win32_resolve(pack);
-  scr_arr_release(pack);
-  pack = scr_arr_new(SCR_ELEM_STR, 1);
-  scr_arr_push_ref(pack, scr_str_retain(to));
-  ScrStr *rto = scr_path_win32_resolve(pack);
-  scr_arr_release(pack);
-
-  if (rfrom->len == rto->len && memcmp(rfrom->data, rto->data, rfrom->len) == 0) {
-    scr_str_release(rfrom);
-    scr_str_release(rto);
-    return scr_str_new("", 0);
-  }
-  /* Node lowercases both sides (case-insensitive comparison, ASCII fold
-   * here — see the header comment). Byte-lowercasing never changes
-   * lengths, so Node's changed-length Unicode branch cannot trigger. */
-  char *flow = malloc(rfrom->len ? rfrom->len : 1);
-  char *tlow = malloc(rto->len ? rto->len : 1);
-  if (!flow || !tlow) {
-    scr_trap("scriptc: out of memory\n");
-  }
-  for (size_t k = 0; k < rfrom->len; k++) flow[k] = scr_path_w32_lower(rfrom->data[k]);
-  for (size_t k = 0; k < rto->len; k++) tlow[k] = scr_path_w32_lower(rto->data[k]);
-  if (rfrom->len == rto->len && memcmp(flow, tlow, rfrom->len) == 0) {
-    free(flow);
-    free(tlow);
-    scr_str_release(rfrom);
-    scr_str_release(rto);
-    return scr_str_new("", 0);
-  }
-
-  /* Trim leading backslashes, and trailing ones (UNC paths only). */
-  long from_start = 0;
-  while (from_start < (long)rfrom->len && flow[from_start] == '\\') from_start++;
-  long from_end = (long)rfrom->len;
-  while (from_end - 1 > from_start && flow[from_end - 1] == '\\') from_end--;
-  const long from_len = from_end - from_start;
-
-  long to_start = 0;
-  while (to_start < (long)rto->len && tlow[to_start] == '\\') to_start++;
-  long to_end = (long)rto->len;
-  while (to_end - 1 > to_start && tlow[to_end - 1] == '\\') to_end--;
-  const long to_len = to_end - to_start;
-
-  const long length = from_len < to_len ? from_len : to_len;
-  long last_common_sep = -1;
-  long i = 0;
-  for (; i < length; i++) {
-    char from_code = flow[from_start + i];
-    if (from_code != tlow[to_start + i]) break;
-    if (from_code == '\\') last_common_sep = i;
-  }
-  ScrStr *result = NULL;
-  if (i != length) {
-    /* Mismatch before any common separator: return toOrig. */
-    if (last_common_sep == -1) result = scr_str_new(rto->data, rto->len);
-  } else {
-    if (to_len > length) {
-      if (tlow[to_start + i] == '\\') {
-        /* `from` is the exact base path of `to`. */
-        result = scr_str_new(rto->data + to_start + i + 1, (size_t)(to_end - (to_start + i + 1)));
-      } else if (i == 2) {
-        /* `from` is the device root. */
-        result = scr_str_new(rto->data + to_start + i, (size_t)(to_end - (to_start + i)));
-      }
-    }
-    if (result == NULL && from_len > length) {
-      if (flow[from_start + i] == '\\') last_common_sep = i;
-      else if (i == 2) last_common_sep = 3;
-    }
-    if (result == NULL && last_common_sep == -1) last_common_sep = 0;
-  }
-  if (result != NULL) {
-    free(flow);
-    free(tlow);
-    scr_str_release(rfrom);
-    scr_str_release(rto);
-    return result;
-  }
-
-  PathBuf out;
-  pb_init(&out);
-  for (i = from_start + last_common_sep + 1; i <= from_end; ++i) {
-    if (i == from_end || flow[i] == '\\') {
-      if (out.len == 0) pb_append(&out, "..", 2);
-      else pb_append(&out, "\\..", 3);
-    }
-  }
-  to_start += last_common_sep;
-  if (out.len == 0) {
-    /* Node reads toOrig.charCodeAt(toStart) — NaN out of range. */
-    if (to_start < (long)rto->len && rto->data[to_start] == '\\') ++to_start;
-  }
-  /* toOrig.slice(toStart, toEnd) — "" when the range is empty/inverted. */
-  if (to_end > to_start) pb_append(&out, rto->data + to_start, (size_t)(to_end - to_start));
-  free(flow);
-  free(tlow);
-  scr_str_release(rfrom);
-  scr_str_release(rto);
-  return pb_take(&out);
 }
 
 ScrStr *scr_path_win32_to_namespaced_path(ScrStr *path) {
@@ -1259,4 +1171,207 @@ ScrStr *scr_path_win32_extname(ScrStr *path) {
     return scr_str_new("", 0);
   }
   return scr_str_new(p + start_dot, (size_t)(end - start_dot));
+}
+
+/* ── parse and format ─────────────────────────────────────────────────
+ * parse answers a fresh string[] [root, dir, base, ext, name] (the
+ * compiler builds the ParsedPath record from it); format takes the five
+ * fields with undefined spelled "" (Node reads each through `||`). */
+
+static ScrArr *scr_path_parts(const char *p, long root[2], long dir[2], long base[2], long ext[2],
+                              long name[2]) {
+  ScrArr *out = scr_arr_new(SCR_ELEM_STR, 5);
+  long *spans[5] = { root, dir, base, ext, name };
+  for (int k = 0; k < 5; k++)
+    scr_arr_push_ref(out, scr_str_new(p + spans[k][0], (size_t)(spans[k][1] - spans[k][0])));
+  return out;
+}
+
+ScrArr *scr_path_parse(ScrStr *path) {
+  const char *p = path->data;
+  long len = (long)path->len;
+  long root[2] = { 0, 0 }, dir[2] = { 0, 0 }, base[2] = { 0, 0 }, ext[2] = { 0, 0 },
+       name[2] = { 0, 0 };
+  if (len == 0) return scr_path_parts(p, root, dir, base, ext, name);
+  bool absolute = p[0] == '/';
+  long start = 0;
+  if (absolute) {
+    root[1] = 1;
+    start = 1;
+  }
+  long start_dot = -1, start_part = 0, end = -1;
+  bool matched_slash = true;
+  int pre_dot_state = 0;
+  for (long i = len - 1; i >= start; --i) {
+    char code = p[i];
+    if (code == '/') {
+      if (!matched_slash) {
+        start_part = i + 1;
+        break;
+      }
+      continue;
+    }
+    if (end == -1) {
+      matched_slash = false;
+      end = i + 1;
+    }
+    if (code == '.') {
+      if (start_dot == -1) start_dot = i;
+      else if (pre_dot_state != 1) pre_dot_state = 1;
+    } else if (start_dot != -1) {
+      pre_dot_state = -1;
+    }
+  }
+  if (end != -1) {
+    long from = start_part == 0 && absolute ? 1 : start_part;
+    if (start_dot == -1 || pre_dot_state == 0 ||
+        (pre_dot_state == 1 && start_dot == end - 1 && start_dot == start_part + 1)) {
+      base[0] = name[0] = from;
+      base[1] = name[1] = end;
+    } else {
+      name[0] = from;
+      name[1] = start_dot;
+      base[0] = from;
+      base[1] = end;
+      ext[0] = start_dot;
+      ext[1] = end;
+    }
+  }
+  if (start_part > 0) {
+    dir[1] = start_part - 1;
+  } else if (absolute) {
+    dir[1] = 1;
+  }
+  return scr_path_parts(p, root, dir, base, ext, name);
+}
+
+ScrArr *scr_path_win32_parse(ScrStr *path) {
+  const char *p = path->data;
+  long len = (long)path->len;
+  long root[2] = { 0, 0 }, dir[2] = { 0, 0 }, base[2] = { 0, 0 }, ext[2] = { 0, 0 },
+       name[2] = { 0, 0 };
+  if (len == 0) return scr_path_parts(p, root, dir, base, ext, name);
+  long root_end = 0;
+  char code = p[0];
+  if (len == 1) {
+    if (scr_path_w32_is_sep(code)) {
+      root[1] = dir[1] = 1;
+    } else {
+      base[1] = name[1] = 1;
+    }
+    return scr_path_parts(p, root, dir, base, ext, name);
+  }
+  if (scr_path_w32_is_sep(code)) {
+    /* A possible UNC root. */
+    root_end = 1;
+    if (scr_path_w32_is_sep(p[1])) {
+      long j = 2, last = j;
+      while (j < len && !scr_path_w32_is_sep(p[j])) j++;
+      if (j < len && j != last) {
+        last = j;
+        while (j < len && scr_path_w32_is_sep(p[j])) j++;
+        if (j < len && j != last) {
+          last = j;
+          while (j < len && !scr_path_w32_is_sep(p[j])) j++;
+          if (j == len) root_end = j;
+          else if (j != last) root_end = j + 1;
+        }
+      }
+    }
+  } else if (scr_path_w32_is_device_root(code) && p[1] == ':') {
+    /* A possible device root. */
+    if (len <= 2) {
+      root[1] = dir[1] = len;
+      return scr_path_parts(p, root, dir, base, ext, name);
+    }
+    root_end = 2;
+    if (scr_path_w32_is_sep(p[2])) {
+      if (len == 3) {
+        root[1] = dir[1] = len;
+        return scr_path_parts(p, root, dir, base, ext, name);
+      }
+      root_end = 3;
+    }
+  }
+  if (root_end > 0) root[1] = root_end;
+  long start_dot = -1, start_part = root_end, end = -1;
+  bool matched_slash = true;
+  int pre_dot_state = 0;
+  for (long i = len - 1; i >= root_end; --i) {
+    code = p[i];
+    if (scr_path_w32_is_sep(code)) {
+      if (!matched_slash) {
+        start_part = i + 1;
+        break;
+      }
+      continue;
+    }
+    if (end == -1) {
+      matched_slash = false;
+      end = i + 1;
+    }
+    if (code == '.') {
+      if (start_dot == -1) start_dot = i;
+      else if (pre_dot_state != 1) pre_dot_state = 1;
+    } else if (start_dot != -1) {
+      pre_dot_state = -1;
+    }
+  }
+  if (end != -1) {
+    if (start_dot == -1 || pre_dot_state == 0 ||
+        (pre_dot_state == 1 && start_dot == end - 1 && start_dot == start_part + 1)) {
+      base[0] = name[0] = start_part;
+      base[1] = name[1] = end;
+    } else {
+      name[0] = start_part;
+      name[1] = start_dot;
+      base[0] = start_part;
+      base[1] = end;
+      ext[0] = start_dot;
+      ext[1] = end;
+    }
+  }
+  /* A root directory keeps the whole root (`C:\abc` -> `C:\`); deeper
+   * directories drop the trailing separator. */
+  if (start_part > 0 && start_part != root_end) {
+    dir[1] = start_part - 1;
+  } else {
+    dir[0] = root[0];
+    dir[1] = root[1];
+  }
+  return scr_path_parts(p, root, dir, base, ext, name);
+}
+
+static ScrStr *scr_path_format_with(char sep, ScrStr *root, ScrStr *dir, ScrStr *base, ScrStr *name,
+                                    ScrStr *ext) {
+  /* dir = pathObject.dir || pathObject.root; base = pathObject.base ||
+   * `${name || ''}${formatExt(ext)}`. */
+  ScrStr *d = dir->len > 0 ? dir : root;
+  PathBuf b;
+  pb_init(&b);
+  if (d->len > 0) {
+    pb_append(&b, d->data, d->len);
+    /* `${dir}${sep}${base}` unless dir is the root itself. */
+    bool is_root = d->len == root->len && memcmp(d->data, root->data, d->len) == 0;
+    if (!is_root) pb_push(&b, sep);
+  }
+  if (base->len > 0) {
+    pb_append(&b, base->data, base->len);
+  } else {
+    pb_append(&b, name->data, name->len);
+    if (ext->len > 0) {
+      if (ext->data[0] != '.') pb_push(&b, '.');
+      pb_append(&b, ext->data, ext->len);
+    }
+  }
+  return pb_take(&b);
+}
+
+ScrStr *scr_path_format(ScrStr *root, ScrStr *dir, ScrStr *base, ScrStr *name, ScrStr *ext) {
+  return scr_path_format_with('/', root, dir, base, name, ext);
+}
+
+ScrStr *scr_path_win32_format(ScrStr *root, ScrStr *dir, ScrStr *base, ScrStr *name,
+                              ScrStr *ext) {
+  return scr_path_format_with('\\', root, dir, base, name, ext);
 }

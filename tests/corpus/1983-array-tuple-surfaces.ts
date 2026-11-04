@@ -1,6 +1,6 @@
 // Array.prototype.concat (elements and same-element arrays, one-level
 // spread exactly like IsArray), the elements forms of new Array, for-of
-// over heterogeneous tuples (positions snapshot into the union), for-of
+// over heterogeneous tuples (positions project into the union), for-of
 // over xs.values() on arrays, the read-only tuple methods slice/map
 // (positions snapshot, then the ordinary array machinery runs), and
 // String.raw over an explicit template record. Node is the oracle.

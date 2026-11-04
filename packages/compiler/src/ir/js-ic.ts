@@ -1,0 +1,451 @@
+/* Inline-cache sites of the dynamic tier (two-tier design stage S4).
+ *
+ * Lowering builds every dynamic property access on a constant key as a
+ * call to a generated helper (class-dynamic-dispatch.ts): a read
+ * `%dyn.class.property.N(receiver)`, a write
+ * `%dyn.class.property.N(receiver, value)` and a keyed read
+ * `%dyn.class.computed.N(receiver, key)`. A helper starts with one branch
+ * per compiled class whose capsules may reach it and ends with the generic
+ * checked-dynamic operation on the receiver itself. The capsule branches
+ * test capsule and class-object kinds only, so for an ordinary checked
+ * object or array receiver a helper is exactly its generic tail: [[Get]]
+ * (`dynKeyGet`) or [[Set]] (`dyn.keySet`) of the key.
+ *
+ * A call to such a helper from a dynamic-tier function is an inline-cache
+ * site: the backend (backend/llvm/js-ic.ts) answers plain data properties
+ * of shaped objects through the site's cache and calls the helper for
+ * everything else, so the helper stays the single definition of the
+ * operation's semantics. This module recognizes the helpers by structure,
+ * never by name alone: a helper whose body is not exactly capsule branches
+ * plus the generic tail is not a site. `dynInvoke` is a site too: its
+ * method read on an ordinary object is a [[Get]] (in module initializers,
+ * only inside loops; see jsIcMethodSites).
+ *
+ * Static functions never contain sites (invariant I1): the backend only
+ * consults this module for calls in dynamic-tier functions. */
+import type { IrExpr, IrFunction, IrModule, IrStmt } from "./ir.js";
+import { everyExprChild, everyStmtChild } from "./traverse.js";
+
+export type JsIcSite =
+  | { kind: "get"; key: string }
+  | { kind: "set"; key: string }
+  | { kind: "keyed" }
+  | { kind: "keyedSet" };
+
+/** Whether computed access sites index integral numbers without forming the
+ * property key: the backend gives a classified site arms for typed arrays and
+ * strings, and a keyed write with a Number key stores its element directly
+ * (backend/llvm/js-ic.ts). On by default; `SCRIPTC_DYN_INDEX_FASTPATH=0`
+ * selects the key path the sites used before the arms existed. The value
+ * changes emitted code, so the build cache keys on it
+ * (executable/executable-cache.ts). */
+export function dynIndexFastpath(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env["SCRIPTC_DYN_INDEX_FASTPATH"];
+  if (raw === undefined || raw === "" || raw === "1") return true;
+  if (raw === "0") return false;
+  throw new Error(`SCRIPTC_DYN_INDEX_FASTPATH must be 0 or 1, got ${raw}`);
+}
+
+export const DYN_INDEX_FASTPATH: boolean = dynIndexFastpath();
+
+const CAPSULE_TESTS = new Set(["dyn.typedRefIs", "dyn.typedRefKeyIs", "dyn.classIs"]);
+
+/** A class table's branches in the order a receiver that matches none of
+ * them reaches their guards: the body's statements, with a `dyn.classHash`
+ * switch replaced by its cases' branches. The switch selects one of those
+ * branches by the receiver's class key and each branch keeps its own key
+ * test, so a reader treats the switch's cases as the capsule branches they
+ * were lowered from (frontend/lowering/class-dynamic-dispatch.ts). */
+function classTableBranches(body: readonly IrStmt[]): readonly IrStmt[] {
+  if (!body.some(isClassDispatch)) return body;
+  const branches: IrStmt[] = [];
+  for (const stmt of body) {
+    if (isClassDispatch(stmt))
+      for (const { body: caseBody } of stmt.cases) branches.push(...caseBody);
+    else branches.push(stmt);
+  }
+  return branches;
+}
+
+/** The switch the lowering builds over a generated class table's branches. */
+function isClassDispatch(stmt: IrStmt): stmt is IrStmt & { kind: "switch" } {
+  return stmt.kind === "switch" && stmt.disc.kind === "libCall" && stmt.disc.fn === "dyn.classHash";
+}
+
+/** Classifies the helpers of a module once. */
+export class JsIcSites {
+  private readonly fns: ReadonlyMap<string, IrFunction>;
+  private readonly sites = new Map<string, JsIcSite | null>();
+  private readonly identities = new Map<string, boolean>();
+
+  constructor(mod: Pick<IrModule, "functions">) {
+    this.fns = new Map(mod.functions.map((fn) => [fn.name, fn]));
+  }
+
+  /** The cache site a direct call to `callee` is, or null. */
+  site(callee: string): JsIcSite | null {
+    let site = this.sites.get(callee);
+    if (site === undefined) {
+      const fn = this.fns.get(callee);
+      site = fn ? this.classify(fn) : null;
+      this.sites.set(callee, site);
+    }
+    return site;
+  }
+
+  private classify(fn: IrFunction): JsIcSite | null {
+    if (!fn.name.startsWith("%dyn.class.")) return null;
+    if (fn.async !== undefined || fn.generator !== undefined || fn.captures !== undefined)
+      return null;
+    if (fn.params.some((p) => p.type.kind !== "dyn")) return null;
+    const receiver = fn.params[0]?.localId;
+    if (receiver === undefined) return null;
+    const second = fn.params[1]?.localId;
+    const body = classTableBranches(fn.body);
+    const exits: JsIcSite[] = [];
+    let i = 0;
+    for (; i < body.length; i++) {
+      const s = body[i]!;
+      if (this.capsuleBranch(s, receiver) || this.rebinding(s, receiver)) continue;
+      const exit = this.plainExit(s, receiver, second);
+      if (exit === null) break;
+      exits.push(exit);
+    }
+    const tail = body.slice(i);
+    let site: JsIcSite | null;
+    if (fn.params.length === 1) site = this.getTail(tail, receiver);
+    else if (fn.params.length === 2 && second !== undefined)
+      site = this.setTail(tail, receiver, second) ?? this.keyedTail(tail, receiver, second);
+    else if (fn.params.length === 3 && second !== undefined && DYN_INDEX_FASTPATH)
+      site = this.keyedSetTail(tail, receiver, second, fn.params[2]!.localId);
+    else return null;
+    if (site === null || site.kind === "keyed" || site.kind === "keyedSet")
+      return exits.length === 0 ? site : null;
+    // An exit answers plain values with the operation the site caches.
+    return exits.every((exit) => exit.kind === site.kind && exit.key === site.key) ? site : null;
+  }
+
+  /** `if (!classCapsule(receiver)) { [if (!funcKind(receiver))] OP }`, no
+   * else: an exit that runs the helper's generic operation directly on a
+   * value no class table matches. OP is `return [js.fromDyn](dynKeyGet(R,
+   * K))` or `dyn.keySet(R, K, value); return`, with R the receiver (or a
+   * bag of it). */
+  private plainExit(s: IrStmt, receiver: string, value: string | undefined): JsIcSite | null {
+    const negated = (e: IrExpr, test: "classCapsule" | "funcKind"): boolean =>
+      e.kind === "dynTest" && e.test === test && e.negated === true && isVar(e.value, receiver);
+    if (s.kind !== "if" || s.else_ !== null || !negated(s.cond, "classCapsule")) return null;
+    let body = s.then;
+    const inner = body[0];
+    if (
+      body.length === 1 &&
+      inner?.kind === "if" &&
+      inner.else_ === null &&
+      negated(inner.cond, "funcKind")
+    )
+      body = inner.then;
+    const [first, ret] = body;
+    if (body.length === 1 && first?.kind === "return") {
+      const read = unwrapFromDyn(first.value);
+      if (
+        read?.kind !== "dynKeyGet" ||
+        read.key.kind !== "strLit" ||
+        !this.bagOf(read.value, receiver)
+      )
+        return null;
+      return { kind: "get", key: read.key.value };
+    }
+    if (
+      body.length !== 2 ||
+      first?.kind !== "exprStmt" ||
+      ret?.kind !== "return" ||
+      ret.value !== null
+    )
+      return null;
+    const call = first.expr;
+    if (call.kind !== "libCall" || call.fn !== "dyn.keySet" || call.args.length !== 3) return null;
+    const [bag, key, stored] = call.args;
+    if (!bag || !this.bagOf(bag, receiver) || key?.kind !== "strLit") return null;
+    if (value === undefined || !isVar(stored, value)) return null;
+    return { kind: "set", key: key.value };
+  }
+
+  /** `varDecl bag = BAG(receiver); return [js.fromDyn](bag === receiver ?
+   * dynKeyGet(bag, K) : dyn.bagGet(bag, K, receiver))`. */
+  private getTail(tail: IrStmt[], receiver: string): JsIcSite | null {
+    const [decl, ret] = tail;
+    if (tail.length !== 2 || decl?.kind !== "varDecl" || ret?.kind !== "return") return null;
+    if (decl.init === null || !this.bagOf(decl.init, receiver)) return null;
+    const bag = decl.localId;
+    const value = unwrapFromDyn(ret.value);
+    if (value?.kind !== "ternary") return null;
+    const { cond, then } = value;
+    if (
+      cond.kind !== "dynScalarEq" ||
+      cond.negated === true ||
+      !isVar(cond.left, bag) ||
+      !isVar(cond.right, receiver) ||
+      then.kind !== "dynKeyGet" ||
+      !isVar(then.value, bag) ||
+      then.key.kind !== "strLit"
+    )
+      return null;
+    return { kind: "get", key: then.key.value };
+  }
+
+  /** `dyn.keySet(BAG(receiver), K, value); return`. */
+  private setTail(tail: IrStmt[], receiver: string, value: string): JsIcSite | null {
+    const [stmt, ret] = tail;
+    if (tail.length !== 2 || stmt?.kind !== "exprStmt" || ret?.kind !== "return") return null;
+    if (ret.value !== null) return null;
+    const call = stmt.expr;
+    if (call.kind !== "libCall" || call.fn !== "dyn.keySet" || call.args.length !== 3) return null;
+    const [bag, key, stored] = call.args;
+    if (!bag || !this.bagOf(bag, receiver) || key?.kind !== "strLit" || !isVar(stored, value))
+      return null;
+    return { kind: "set", key: key.value };
+  }
+
+  /** `if (typeof key === "symbol") return dynKeyGet(BAG(receiver), key);
+   * if (receiver == null) return dynKeyGet(receiver, key);
+   * const s = String(key); return dynKeyGet(BAG(receiver), s)`, each read
+   * possibly under js.fromDyn. Capsule branches may precede the final read:
+   * a program that declares classes looks the string key up in each class's
+   * key table there. */
+  private keyedTail(tail: IrStmt[], receiver: string, key: string): JsIcSite | null {
+    const [symbol, nullish, decl] = tail;
+    const ret = tail[tail.length - 1];
+    if (tail.length < 4) return null;
+    if (!tail.slice(3, -1).every((s) => this.capsuleBranch(s, receiver))) return null;
+    if (!this.guard(symbol, "symbol", key, (read) => this.bagOf(read, receiver), key)) return null;
+    if (!this.guard(nullish, "nullish", receiver, (read) => isVar(read, receiver), key))
+      return null;
+    if (decl?.kind !== "varDecl" || decl.init?.kind !== "libCall") return null;
+    if (decl.init.fn !== "dyn.toStringCoerce" || !isVar(decl.init.args[0], key)) return null;
+    if (ret?.kind !== "return") return null;
+    const read = unwrapFromDyn(ret.value);
+    if (read?.kind !== "dynKeyGet" || !isVar(read.key, decl.localId)) return null;
+    if (!this.bagOf(read.value, receiver)) return null;
+    return { kind: "keyed" };
+  }
+
+  /** A computed write's helper: the two guards below, then `const s =
+   * String(key); dyn.keySet(BAG(receiver), s, value); return`. A program
+   * that declares classes may look the key up in each class's table first
+   * (dBAG, TODO(fix): remove). Keyed writes are sites only for the integral
+   * element arm (DYN_INDEX_FASTPATH). */
+  private keyedSetTail(
+    tail: IrStmt[],
+    receiver: string,
+    key: string,
+    value: string,
+  ): JsIcSite | null {
+    if (tail.length < 5) return null;
+    const [symbol, nullish, decl] = tail;
+    const write = tail[tail.length - 2];
+    const ret = tail[tail.length - 1];
+    if (!tail.slice(3, -2).every((s) => this.capsuleBranch(s, receiver))) return null;
+    if (!this.setGuard(symbol, "symbol", key, receiver, key, value)) return null;
+    if (!this.setGuard(nullish, "nullish", receiver, receiver, key, value)) return null;
+    if (decl?.kind !== "varDecl") return null;
+    const init = decl.init;
+    if (init?.kind !== "libCall" || init.fn !== "dyn.toStringCoerce") return null;
+    if (!isVar(init.args[0], key)) return null;
+    if (write?.kind !== "exprStmt" || ret?.kind !== "return" || ret.value !== null) return null;
+    const call = write.expr;
+    if (call.kind !== "libCall" || call.fn !== "dyn.keySet" || call.args.length !== 3) return null;
+    const [bag, storedKey, stored] = call.args;
+    if (!bag || !this.bagOf(bag, receiver) || !isVar(storedKey, decl.localId)) return null;
+    if (!isVar(stored, value)) return null;
+    return { kind: "keyedSet" };
+  }
+
+  /** `if (<test>(tested)) { dyn.keySetComputed(BAG(receiver), key, value);
+   * return }`, with no else: a computed write's first two guards. */
+  private setGuard(
+    s: IrStmt | undefined,
+    test: "symbol" | "nullish",
+    tested: string,
+    receiver: string,
+    key: string,
+    value: string,
+  ): boolean {
+    if (s?.kind !== "if" || s.else_ !== null || s.then.length !== 2) return false;
+    const { cond } = s;
+    if (cond.kind !== "dynTest" || cond.test !== test || cond.negated === true) return false;
+    if (!isVar(cond.value, tested)) return false;
+    const [write, ret] = s.then;
+    if (write?.kind !== "exprStmt" || ret?.kind !== "return" || ret.value !== null) return false;
+    const call = write.expr;
+    if (call.kind !== "libCall" || call.fn !== "dyn.keySetComputed") return false;
+    if (call.args.length !== 3) return false;
+    const [bag, writtenKey, stored] = call.args;
+    if (!bag || !this.bagOf(bag, receiver)) return false;
+    return isVar(writtenKey, key) && isVar(stored, value);
+  }
+
+  private guard(
+    s: IrStmt | undefined,
+    test: "symbol" | "nullish",
+    tested: string,
+    object: (e: IrExpr) => boolean,
+    key: string,
+  ): boolean {
+    if (s?.kind !== "if" || s.else_ !== null || s.then.length !== 1) return false;
+    const { cond } = s;
+    if (cond.kind !== "dynTest" || cond.test !== test || cond.negated === true) return false;
+    if (!isVar(cond.value, tested)) return false;
+    const ret = s.then[0]!;
+    if (ret.kind !== "return") return false;
+    const read = unwrapFromDyn(ret.value);
+    return read?.kind === "dynKeyGet" && isVar(read.key, key) && object(read.value);
+  }
+
+  /** A branch that can only be taken for a capsule or class-object
+   * receiver: `if (<capsule test>) { ... }` with no else. */
+  private capsuleBranch(s: IrStmt, receiver: string): boolean {
+    return s.kind === "if" && s.else_ === null && this.capsuleTest(s.cond, receiver);
+  }
+
+  private capsuleTest(e: IrExpr, receiver: string): boolean {
+    if (e.kind === "libCall")
+      return CAPSULE_TESTS.has(e.fn) && e.args[0] !== undefined && this.bagOf(e.args[0], receiver);
+    if (e.kind === "ternary")
+      return (
+        this.capsuleTest(e.cond, receiver) && e.else_.kind === "boolLit" && e.else_.value === false
+      );
+    return false;
+  }
+
+  /** Whether `e` is the receiver itself for every ordinary object or array:
+   * the receiver, or a chain of property-bag helpers applied to it. A
+   * conversion between the dyn and jsval forms keeps the object it holds. */
+  private bagOf(e: IrExpr, receiver: string): boolean {
+    if (isVar(e, receiver)) return true;
+    if (e.kind === "libCall" && (e.fn === "js.toDyn" || e.fn === "js.fromDyn"))
+      return e.args.length === 1 && this.bagOf(e.args[0]!, receiver);
+    return (
+      e.kind === "call" &&
+      e.args.length === 1 &&
+      this.bagOf(e.args[0]!, receiver) &&
+      this.identityHelper(e.callee)
+    );
+  }
+
+  /** An early exit for values a class table never matches: `if (!<kind
+   * test>(value)) return <value>`, with no else. A plain object takes it
+   * and gets itself back. */
+  private kindExit(s: IrStmt, param: string): boolean {
+    if (s.kind !== "if" || s.else_ !== null || s.then.length !== 1) return false;
+    const { cond } = s;
+    if (cond.kind !== "dynTest" || cond.negated !== true || !isVar(cond.value, param)) return false;
+    if (cond.test !== "classCapsule" && cond.test !== "funcKind") return false;
+    const ret = s.then[0]!;
+    return ret.kind === "return" && ret.value !== null && this.bagOf(ret.value, param);
+  }
+
+  /** `param = <bag of param>`, such as the subclass normalization
+   * `value = %dyn.class.normalize(value)`, which leaves an ordinary object
+   * or array in `param`. */
+  private rebinding(s: IrStmt, param: string): boolean {
+    return s.kind === "assign" && s.localId === param && this.bagOf(s.value, param);
+  }
+
+  /** A property-bag helper that returns its argument unless a capsule
+   * branch is taken. */
+  private identityHelper(name: string): boolean {
+    const known = this.identities.get(name);
+    if (known !== undefined) return known;
+    this.identities.set(name, false); // a recursive chain is not an identity
+    const fn = this.fns.get(name);
+    let identity = false;
+    if (
+      fn &&
+      name.startsWith("%dyn.class.") &&
+      fn.params.length === 1 &&
+      fn.params[0]!.type.kind === "dyn" &&
+      fn.async === undefined &&
+      fn.generator === undefined &&
+      fn.captures === undefined
+    ) {
+      const param = fn.params[0]!.localId;
+      const body = classTableBranches(fn.body);
+      const last = body[body.length - 1];
+      identity =
+        body
+          .slice(0, -1)
+          .every(
+            (s) =>
+              this.capsuleBranch(s, param) || this.kindExit(s, param) || this.rebinding(s, param),
+          ) &&
+        last?.kind === "return" &&
+        last.value !== null &&
+        this.bagOf(last.value, param);
+    }
+    this.identities.set(name, identity);
+    return identity;
+  }
+}
+
+function isVar(e: IrExpr | undefined | null, localId: string): boolean {
+  return e?.kind === "varRef" && e.localId === localId;
+}
+
+function unwrapFromDyn(e: IrExpr | null | undefined): IrExpr | null {
+  if (!e) return null;
+  if (e.kind === "libCall" && e.fn === "js.fromDyn" && e.args.length === 1) return e.args[0]!;
+  return e;
+}
+
+/** Whether a function holds a cache site: a call to a classified helper,
+ * a method dispatch, or an object literal member with a constant key. */
+export function hasJsIcSite(fn: IrFunction, sites: JsIcSites): boolean {
+  const site = (e: IrExpr, inLoop: boolean): boolean =>
+    (jsIcMethodSites(fn.name, inLoop) &&
+      (e.kind === "dynInvoke" ||
+        (e.kind === "dynObjLit" &&
+          (e.fields ?? []).some((f) => jsIcLiteralKey(f.key) !== null)))) ||
+    (e.kind === "call" && sites.site(e.callee) !== null);
+  const expr = (e: IrExpr, inLoop: boolean): boolean =>
+    !site(e, inLoop) &&
+    everyExprChild(
+      e,
+      (child) => expr(child, inLoop),
+      (child) => stmt(child, inLoop),
+    );
+  const stmt = (s: IrStmt, inLoop: boolean): boolean => {
+    const inner =
+      inLoop ||
+      s.kind === "while" ||
+      s.kind === "doWhile" ||
+      s.kind === "for" ||
+      s.kind === "forOf";
+    return everyStmtChild(
+      s,
+      (child) => expr(child, inner),
+      (child) => stmt(child, inner),
+    );
+  };
+  return !fn.body.every((s) => stmt(s, false));
+}
+
+/** The key of an object literal member that its site adds through the
+ * store cache: a constant string other than `__proto__`, or null. The
+ * literal starts as an empty object with the default prototype, so each
+ * such member appends one data property, and the site caches the shape
+ * transition and shares the key bytes the shape holds. Module
+ * initializers have literal sites only in loops (jsIcMethodSites). */
+export function jsIcLiteralKey(key: IrExpr): string | null {
+  return key.kind === "strLit" && key.value !== "__proto__" ? key.value : null;
+}
+
+/** Whether method dispatch at a site of a function goes through caches.
+ * Module initializers (`%init.N`) run once, and the methods they call at
+ * top level are overwhelmingly registrations on native handles
+ * (`worker.on(...)`, `server.listen(...)`), which a cache never answers:
+ * they keep the plain dispatch, so a typed program whose only dynamic code
+ * is such top-level wiring links no dynamic-tier runtime. A site inside a
+ * loop of an initializer runs once per iteration, so it caches. Property
+ * sites cache everywhere. */
+export function jsIcMethodSites(fnName: string, inLoop: boolean): boolean {
+  return inLoop || !fnName.startsWith("%init.");
+}

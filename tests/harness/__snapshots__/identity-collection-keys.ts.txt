@@ -1,0 +1,134 @@
+identity-collection-keys.ts:6:12 - error SC2020: 'collection key conversion from '{ extra: string; id: number }' to '{ id: number }' requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
+
+  5 | // Copying an existing wider record would lose JavaScript key identity.
+  6 | narrow.set(wide, 1);
+    |            ^~~~
+  7 | narrow.get(wide);
+
+  hint: use the same reference type for the key and collection; copying a key would change its identity
+
+identity-collection-keys.ts:7:12 - error SC2020: 'collection key conversion from '{ extra: string; id: number }' to '{ id: number }' requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
+
+  6 | narrow.set(wide, 1);
+  7 | narrow.get(wide);
+    |            ^~~~
+  8 | narrow.has(wide);
+
+  hint: use the same reference type for the key and collection; copying a key would change its identity
+
+identity-collection-keys.ts:8:12 - error SC2020: 'collection key conversion from '{ extra: string; id: number }' to '{ id: number }' requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
+
+  7 | narrow.get(wide);
+  8 | narrow.has(wide);
+    |            ^~~~
+  9 | narrow.delete(wide);
+
+  hint: use the same reference type for the key and collection; copying a key would change its identity
+
+identity-collection-keys.ts:9:15 - error SC2020: 'collection key conversion from '{ extra: string; id: number }' to '{ id: number }' requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
+
+   8 | narrow.has(wide);
+   9 | narrow.delete(wide);
+     |               ^~~~
+  10 | const seeded = new Map<Key, number>([[wide, 1]]);
+
+  hint: use the same reference type for the key and collection; copying a key would change its identity
+
+identity-collection-keys.ts:10:39 - error SC2020: 'collection key conversion from '{ extra: string; id: number }' to '{ id: number }' requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
+
+   9 | narrow.delete(wide);
+  10 | const seeded = new Map<Key, number>([[wide, 1]]);
+     |                                       ^~~~
+  11 | console.log(seeded);
+
+  hint: use the same reference type for the key and collection; copying a key would change its identity
+
+identity-collection-keys.ts:13:13 - error SC2020: 'collection key conversion from '{ extra: string; id: number }' to '{ id: number }' requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
+
+  12 | const members = new Set<Key>();
+  13 | members.add(wide);
+     |             ^~~~
+  14 | members.has(wide);
+
+  hint: use the same reference type for the key and collection; copying a key would change its identity
+
+identity-collection-keys.ts:14:13 - error SC2020: 'collection key conversion from '{ extra: string; id: number }' to '{ id: number }' requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
+
+  13 | members.add(wide);
+  14 | members.has(wide);
+     |             ^~~~
+  15 | const seededMembers = new Set<Key>([wide]);
+
+  hint: use the same reference type for the key and collection; copying a key would change its identity
+
+identity-collection-keys.ts:15:37 - error SC2020: 'collection key conversion from '{ extra: string; id: number }' to '{ id: number }' requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
+
+  14 | members.has(wide);
+  15 | const seededMembers = new Set<Key>([wide]);
+     |                                     ^~~~
+  16 | console.log(seededMembers);
+
+  hint: use the same reference type for the key and collection; copying a key would change its identity
+
+identity-collection-keys.ts:25:12 - error SC2020: 'collection key assertion requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
+
+  24 | const unknownKey: unknown = wide;
+  25 | narrow.get(unknownKey as Key);
+     |            ^~~~~~~~~~~~~~~~~
+  26 | 
+
+  hint: use the original reference with the same type as the collection key
+
+identity-collection-keys.ts:30:18 - error SC2020: 'collection key conversion from '{ extra: string; id: number }[]' to '{ id: number }[]' requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
+
+  29 | const wideArray: Wide[] = [wide];
+  30 | narrowArrays.set(wideArray, 1);
+     |                  ^~~~~~~~~
+  31 | 
+
+  hint: use the same reference type for the key and collection; copying a key would change its identity
+
+identity-collection-keys.ts:33:12 - error SC2020: 'collection key assertion requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
+
+  32 | // An explicit record assertion must not hide the same structural copy.
+  33 | narrow.get(wide as Key);
+     |            ^~~~~~~~~~~
+  34 | members.delete((wide as Key)!);
+
+  hint: use the original reference with the same type as the collection key
+
+identity-collection-keys.ts:34:17 - error SC2020: 'collection key assertion requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
+
+  33 | narrow.get(wide as Key);
+  34 | members.delete((wide as Key)!);
+     |                 ^~~~~~~~~~~
+  35 | new Set<Key>([wide as Key]);
+
+  hint: use the original reference with the same type as the collection key
+
+identity-collection-keys.ts:35:15 - error SC2020: 'collection key assertion requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
+
+  34 | members.delete((wide as Key)!);
+  35 | new Set<Key>([wide as Key]);
+     |               ^~~~~~~~~~~
+  36 | 
+
+  hint: use the original reference with the same type as the collection key
+
+identity-collection-keys.ts:39:14 - error SC2020: 'collection key assertion requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
+
+  38 | const unknownKeys: unknown = [{ id: 1 }];
+  39 | new Set<Key>(unknownKeys as Key[]);
+     |              ^~~~~~~~~~~~~~~~~~~~
+  40 | new Set<Key>(unknownKeys as [Key]);
+
+  hint: use the original reference with the same type as the collection key
+
+identity-collection-keys.ts:40:14 - error SC2020: 'collection key assertion requiring a structural copy or dynamic conversion' is part of the standard library types but has no scriptc lowering yet
+
+  39 | new Set<Key>(unknownKeys as Key[]);
+  40 | new Set<Key>(unknownKeys as [Key]);
+     |              ^~~~~~~~~~~~~~~~~~~~
+  41 | 
+
+  hint: use the original reference with the same type as the collection key

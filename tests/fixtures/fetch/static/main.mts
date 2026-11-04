@@ -896,3 +896,12 @@ try {
   const caught = error as Error;
   console.log("fixed content-length mismatch:", caught.name, caught.message);
 }
+
+const bufferResponse = await fetch(`${process.argv[2]}/json`);
+const rawBody = await bufferResponse.arrayBuffer();
+console.log("arrayBuffer body:", rawBody instanceof ArrayBuffer, bufferResponse.bodyUsed, new TextDecoder().decode(new Uint8Array(rawBody)));
+try { await bufferResponse.arrayBuffer(); } catch (error) { console.log("arrayBuffer consumed:", (error as Error).name); }
+const nullBufferResponse = new Response(null);
+const emptyBuffer1 = await nullBufferResponse.arrayBuffer();
+const emptyBuffer2 = await nullBufferResponse.arrayBuffer();
+console.log("arrayBuffer null body:", emptyBuffer1.byteLength, emptyBuffer2.byteLength, emptyBuffer1 === emptyBuffer2, nullBufferResponse.bodyUsed);

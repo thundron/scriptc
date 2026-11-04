@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { emitCModule, InternalCompilerError } from "../src/index.js";
+import { emitLlvmModule, InternalCompilerError } from "../src/index.js";
 import { resolveCc } from "../src/backend/native-toolchain.js";
 import { deserializeModule } from "../src/ir/serialize.js";
 import { fibModule } from "./fixtures/fib-ir.js";
@@ -36,14 +36,14 @@ test("emitter invariant failures preserve their message and public type", () => 
     kind: "closure",
     fnName: "missing",
     captures: [],
-    type: { kind: "func", params: [], returnType: { kind: "void" } },
+    type: { kind: "func", params: [], ret: { kind: "void" } },
     loc: statement.loc,
   };
 
-  expect(() => emitCModule(malformed)).toThrow(
+  expect(() => emitLlvmModule(malformed)).toThrow(
     expect.objectContaining({
       constructor: InternalCompilerError,
-      message: "emitter bug: closure over unknown function missing",
+      message: "llvm emitter bug: closure over unknown function missing",
       name: "InternalCompilerError",
     }),
   );

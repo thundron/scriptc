@@ -1,5 +1,5 @@
 // s.matchAll(/re/g): every match as its honest string[] slice (match's
-// rule — [whole, ...captures], nonparticipating captures read ""), in
+// rule — [whole, ...captures], nonparticipating captures read undefined), in
 // the two lowered consumer shapes: the immediate [...spread] + map (the
 // portless plist scraper) and the direct for-of walk. Empty matches
 // advance one position (the spec's AdvanceStringIndex). A non-global
@@ -18,9 +18,7 @@ console.log([...("abc".matchAll(/x/g))].length);
 const empties = [...("ab".matchAll(/z?/g))];
 console.log(empties.length);
 
-// A nonparticipating capture reads "" where Node's slot is undefined —
-// match's documented honest-slice divergence, shared here; the corpus
-// prints it through ?? so both worlds agree on the observable.
+// Nonparticipating captures retain undefined; formatting may use a fallback.
 for (const m of "a1 b".matchAll(/([ab])(\d)?/g)) {
   console.log(`[${m[0]}|${m[1]}|${(m[2] as string | undefined) ?? ""}]`);
 }

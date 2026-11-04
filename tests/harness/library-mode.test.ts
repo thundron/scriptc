@@ -50,8 +50,8 @@
  *                           no-teachings default is pinned by K5/K7 over
  *                           the teachings-free traps profile
  *   K13 npm-posture         bare npm specifiers are static-or-refuse: an
- *                           eligible package (own .d.ts, unminified JS,
- *                           no transform markers) compiles statically
+ *                           eligible package (own .d.ts, no transform
+ *                           markers) compiles statically
  *                           into the library graph, its own npm deps
  *                           judged by the same bar; every ineligible one
  *                           refuses SC4020 naming the failed bar — never
@@ -66,6 +66,14 @@
  *                           refusal by code or manifest id, and fencing
  *                           an already-refusing surface only adds the
  *                           note (its own code survives)
+ *   K15 export-facades      the entry's exports may be supplied by other
+ *                           modules: an export list over a local import,
+ *                           a renamed named re-export, and a star
+ *                           re-export all resolve to the declaring
+ *                           function's compiled unit, evaluated at the
+ *                           entry's module order and sharing that
+ *                           module's state (SC4002 names a re-exported
+ *                           non-function value as what it is)
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -73,9 +81,13 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { compileLibrary } from "@scriptc/compiler";
 
+import { nmDefined } from "./nm-defined.js";
 const repoRoot = join(import.meta.dirname, "../..");
 const fixtureRoot = join(repoRoot, "tests/library-mode");
 const platformTest = process.env["SCRIPTC_PORTABLE_ONLY"] === "1" ? test.skip : test;
+/* The sanitized lane's positive leak control needs a leak checker that runs
+ * by default; Linux's ASan has one. */
+const linuxTest = process.platform === "linux" ? test : test.skip;
 /* The plain and SCRIPTC_SAN=1 suites may run concurrently by design (the
  * suite lock is per flavor) and this suite runs the same ordinary builds in
  * both, so the cache path carries the SUITE flavor — otherwise the two runs
@@ -85,8 +97,8 @@ const platformTest = process.env["SCRIPTC_PORTABLE_ONLY"] === "1" ? test.skip : 
 const flavor = process.env["SCRIPTC_SAN"] === "1" ? "san" : "plain";
 const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests/library-mode", flavor);
 
-type Emission = "llvm" | "c";
-const EMISSIONS: Emission[] = ["llvm", "c"];
+type Emission = "llvm";
+const EMISSIONS: Emission[] = ["llvm"];
 
 interface BuildOpts {
   sanitize?: boolean;
@@ -144,14 +156,19 @@ function buildProbe(
     join(fixtureRoot, fixture, "probe.c"),
     archive,
     "-lm",
-    "-o", bin,
+    "-o",
+    bin,
   ]);
   return bin;
 }
 
-function runProbe(bin: string, args: string[] = []): { stdout: string; status: number | null; signal: string | null } {
-  const r = spawnSync(bin, args, { encoding: "utf8", timeout: 60_000 });
-  return { stdout: r.stdout ?? "", status: r.status, signal: r.signal };
+function runProbe(
+  bin: string,
+  args: string[] = [],
+  env: NodeJS.ProcessEnv = process.env,
+): { stdout: string; stderr: string; status: number | null; signal: string | null } {
+  const r = spawnSync(bin, args, { encoding: "utf8", timeout: 60_000, env });
+  return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", status: r.status, signal: r.signal };
 }
 
 /** nm over the archive: [definedExternal, undefined] symbol sets, macOS/
@@ -166,7 +183,7 @@ function nmSymbols(archive: string): { defined: Set<string>; undef: Set<string> 
     }
     return set;
   };
-  const defined = parse(execFileSync("nm", ["-gU", archive], { encoding: "utf8" }));
+  const defined = parse(nmDefined(archive));
   const undef = parse(execFileSync("nm", ["-u", archive], { encoding: "utf8" }));
   return { defined, undef };
 }
@@ -186,8 +203,15 @@ plumb: 40000254995
 `;
 
 const SCALARS_SYMBOLS = [
-  "kt_add", "kt_passthrough", "kt_neg_zero", "kt_is_nan", "kt_invert", "kt_plumb",
-  "kt_init", "kt_set_panic_sink", "kt_collect",
+  "kt_add",
+  "kt_passthrough",
+  "kt_neg_zero",
+  "kt_is_nan",
+  "kt_invert",
+  "kt_plumb",
+  "kt_init",
+  "kt_set_panic_sink",
+  "kt_collect",
 ];
 
 describe.each(EMISSIONS)("library mode, %s emission", (emission) => {
@@ -219,7 +243,8 @@ describe.each(EMISSIONS)("library mode, %s emission", (emission) => {
     // scr_child.c never joined the link) and none is REFERENCED by a
     // linked unit (a missed inter-unit reference would surface here, the
     // backstop the design asks for instead of a hand-maintained map).
-    const loopish = /^scr_(loop|fiber|on_fiber|timer|set_timeout|set_interval|set_immediate|next_tick|child|spawn)/;
+    const loopish =
+      /^scr_(loop|fiber|on_fiber|timer|set_timeout|set_interval|set_immediate|next_tick|child|spawn)/;
     expect([...defined].filter((s) => loopish.test(s))).toEqual([]);
     expect([...undef].filter((s) => loopish.test(s))).toEqual([]);
   });
@@ -246,7 +271,11 @@ tail: c.txt (len 5)
     // definitions are exactly the declared set, no prefix undefineds.
     const { defined, undef } = nmSymbols(archive);
     expect([...defined].filter((s) => s.startsWith("kn_")).sort()).toEqual([
-      "kn_collect", "kn_init", "kn_scaled", "kn_set_panic_sink", "kn_tail",
+      "kn_collect",
+      "kn_init",
+      "kn_scaled",
+      "kn_set_panic_sink",
+      "kn_tail",
     ]);
     expect([...undef].filter((s) => s.startsWith("kn_"))).toEqual([]);
   });
@@ -272,12 +301,109 @@ wrap empty: len 2 bytes 60 62
   });
 
   test("K3: buffer lifetime, declared-reset posture (results accumulate)", async () => {
-    const { archive, outDir } = await buildLibrary("buffers", emission, { declaredReset: "kb_reset" });
+    const { archive, outDir } = await buildLibrary("buffers", emission, {
+      declaredReset: "kb_reset",
+    });
     const probe = buildProbe("buffers", archive, outDir, { defines: ["DECLARED_RESET"] });
     const run = runProbe(probe);
     expect(run.signal).toBeNull();
     expect(run.status).toBe(0);
     expect(run.stdout).toBe(BUFFERS_EXPECTED);
+  });
+
+  /* ── K15: export facades — a re-exported function is an export ───────── */
+
+  test("K15: re-export facades supply the entry's exports (Node order and state)", async () => {
+    const { archive, outDir } = await buildLibrary("reexport", emission);
+    const probe = buildProbe("reexport", archive, outDir);
+    const run = runProbe(probe);
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    // "HI?" is the entry's own top-level setSuffix("?") seen through a
+    // re-exported function, and the second call sees the state the probe's
+    // setSuffix(".") left behind: the facade names the SDK's one module
+    // instance, never a copy per export.
+    expect(run.stdout).toBe(
+      `handle: HI?
+handle after setSuffix: OK.
+doubled: 43
+version: sdk-1.0
+`,
+    );
+    // K1 discipline holds through the facade: prefix-carrying definitions
+    // are exactly the declared symbols (no per-export wrapper copies), and
+    // nothing prefix-carrying is left undefined.
+    const { defined, undef } = nmSymbols(archive);
+    expect([...defined].filter((s) => s.startsWith("kr_")).sort()).toEqual([
+      "kr_collect",
+      "kr_doubled",
+      "kr_handle",
+      "kr_init",
+      "kr_set_panic_sink",
+      "kr_set_suffix",
+      "kr_version",
+    ]);
+    expect([...undef].filter((s) => s.startsWith("kr_"))).toEqual([]);
+  });
+
+  /* ── X509Certificate fields: scr_x509.c rides the archive ────────────── */
+
+  test("X509Certificate fields in a library", async () => {
+    const { archive, outDir } = await buildLibrary("x509", emission);
+    const probe = buildProbe("x509", archive, outDir);
+    const run = runProbe(probe);
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe(
+      "C=US\nST=California\nL=San Francisco\nO=Example Org\nOU=Dev Team\nCN=Example Root CA\nemailAddress=ca@example.com" +
+        "|0123456789ABCDEF|Sep 27 16:33:52 2126 GMT|true|" +
+        "7C:5F:CA:18:57:BF:BD:FC:67:AC:BD:21:1C:67:E8:C3:73:48:35:4E:4D:95:A8:2B:83:FF:E0:5A:E7:0A:97:A9\n",
+    );
+  });
+
+  /* ── cstring: NUL-terminated text in, out, and through callbacks ─────── */
+
+  test("cstring parameters, results, and callback arguments", async () => {
+    const { archive, outDir } = await buildLibrary("cstrings", emission);
+    const probe = buildProbe("cstrings", archive, outDir);
+    const run = runProbe(probe, ["ok"]);
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe(`register: 0
+greet: hello, w\u00f6rld! (strlen 14)
+length ascii: 3
+length utf8: 4
+length malformed: 3
+length empty: 0
+log: QUIET (strlen 5, n 5)
+echo: 1
+done
+`);
+  });
+
+  test.each([
+    ["nullarg", "scriptc: library inbound cstring parameter is NULL\n", "SC4012", "kc_length"],
+    [
+      "nulresult",
+      "scriptc: TypeError: a cstring value contains U+0000, which a C string cannot hold\n",
+      "SC4015",
+      "kc_with_nul",
+    ],
+    [
+      "nularg",
+      "scriptc: TypeError: a cstring value contains U+0000, which a C string cannot hold\n",
+      "SC4015",
+      "kc_echo_nul",
+    ],
+  ])("cstring %s traps through the sink", async (mode, text, code, symbol) => {
+    const { archive, outDir } = await buildLibrary("cstrings", emission);
+    const probe = buildProbe("cstrings", archive, outDir);
+    const run = runProbe(probe, [mode]);
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe(
+      `register: 0\ntext=[${text}]\ncode=[${code}]\nsymbol=[${symbol}]\ntrapped\n`,
+    );
   });
 
   /* ── K4: init re-run determinism ─────────────────────────────────────── */
@@ -287,6 +413,7 @@ bump: 1 2
 note: 1 2
 indexed: 72100
 recall: a,b
+globals: undefined fenced
 `;
 
   test("K4: three init sessions are byte-identical", async () => {
@@ -296,6 +423,17 @@ recall: a,b
     expect(run.signal).toBeNull();
     expect(run.status).toBe(0);
     expect(run.stdout).toBe(SESSION + SESSION + SESSION);
+  });
+
+  test("K4: untyped property caches start empty in every session", async () => {
+    // The shapes a session's cache entries name are freed when it ends;
+    // the next session's sites must not find those entries.
+    const { archive, outDir } = await buildLibrary("js-ic-sessions", emission);
+    const probe = buildProbe("js-ic-sessions", archive, outDir);
+    const run = runProbe(probe);
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe("run: 40000\n".repeat(3));
   });
 
   /* ── K5/K6/K7: the trap channel ──────────────────────────────────────── */
@@ -421,7 +559,7 @@ survived, sink_calls=1
     expect(run.signal).toBeNull();
     expect(run.status).toBe(0);
     // The facade-authored structured teaching (embedder-prefixed NS code)
-    // arrives byte-for-byte: no "Uncaught " prefix ahead of the marker,
+    // arrives unchanged: no "Uncaught " prefix ahead of the marker,
     // no added trailing newline inside the remediation.
     expect(run.stdout).toBe(
       `teach ready
@@ -517,15 +655,48 @@ survived, sink_calls=1
     expect(run.stdout).toBe(SESSION + SESSION + SESSION);
   });
 
+  platformTest("K10: property caches across sessions under ASan", async () => {
+    const { archive, outDir } = await buildLibrary("js-ic-sessions", emission, { sanitize: true });
+    const probe = buildProbe("js-ic-sessions", archive, outDir, { sanitize: true });
+    const run = runProbe(probe);
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    expect(run.stdout).toBe("run: 40000\n".repeat(3));
+  });
+
   platformTest("K10: K5/K7 under ASan", async () => {
     const { archive, outDir } = await buildLibrary("traps", emission, { sanitize: true });
     const probe = buildProbe("traps", archive, outDir, { sanitize: true });
+    // The sink longjmps out of the entry, so the blocks the trapped call
+    // had live are abandoned rather than unwound — either mode should still
+    // leave LeakSanitizer with nothing to report, and an exit status of 0
+    // is the same fact (it fails the process when it finds a leak).
     const trap = runProbe(probe, ["trap"]);
     expect(trap.status).toBe(0);
+    expect(trap.stderr).not.toContain("LeakSanitizer");
     expect(trap.stdout).toContain("survived, sink_calls=1");
     const thrown = runProbe(probe, ["throw"]);
     expect(thrown.status).toBe(0);
+    expect(thrown.stderr).not.toContain("LeakSanitizer");
     expect(thrown.stdout).toContain("text=[Uncaught Error: kaput");
+  });
+
+  // The abandoned-heap hand-off must leave real leaks reported rather than
+  // turning the checker off to keep the trap modes quiet. The sanitized
+  // lanes otherwise run with detect_leaks=0 (the RC audit owns leak
+  // detection there, and the plain lane builds sanitized probes too), and a
+  // probe inherits it; this control is the positive one, so it asks
+  // LeakSanitizer on explicitly instead of inheriting the lane's setting.
+  linuxTest("K10: LSan stays on in the sanitized lane (a host leak still fails)", async () => {
+    const { archive, outDir } = await buildLibrary("traps", emission, { sanitize: true });
+    const probe = buildProbe("traps", archive, outDir, { sanitize: true });
+    const run = runProbe(probe, ["hostleak"], {
+      ...process.env,
+      ASAN_OPTIONS: "detect_leaks=1",
+    });
+    expect(run.stdout).toContain("host leak left for LeakSanitizer");
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("LeakSanitizer");
   });
 });
 
@@ -535,7 +706,7 @@ let refusalCounter = 0;
 async function refusal(
   source: string,
   profilePatch: Record<string, unknown>,
-  emission: Emission = "c",
+  emission: Emission = "llvm",
 ): Promise<{ code: string; message: string; hint?: string; note?: string; file: string }[]> {
   const outDir = join(cacheDir, `refusal-${refusalCounter++}`);
   mkdirSync(outDir, { recursive: true });
@@ -573,7 +744,7 @@ async function refusal(
 async function acceptance(
   source: string,
   profilePatch: Record<string, unknown>,
-  emission: Emission = "c",
+  emission: Emission = "llvm",
 ): Promise<void> {
   const outDir = join(cacheDir, `acceptance-${refusalCounter++}`);
   mkdirSync(outDir, { recursive: true });
@@ -599,7 +770,10 @@ async function acceptance(
     }),
   );
   const result = await compileLibrary({ profilePath, outDir });
-  expect(result.ok, result.ok ? undefined : result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n")).toBe(true);
+  expect(
+    result.ok,
+    result.ok ? undefined : result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
+  ).toBe(true);
 }
 
 describe("K9: library-mode refusals", () => {
@@ -609,7 +783,27 @@ describe("K9: library-mode refusals", () => {
     });
     expect(diags[0]!.code).toBe("SC4002");
     expect(diags[0]!.message).toContain("'nope'");
-    expect(diags[0]!.hint).toContain("facade");
+    expect(diags[0]!.hint).toContain("re-export it from another module");
+  });
+
+  test("SC4002: a re-exported value that is not a function", async () => {
+    const dir = join(fixtureRoot, "reexport");
+    const outDir = join(cacheDir, `refusal-reexport-${refusalCounter++}`);
+    mkdirSync(outDir, { recursive: true });
+    const profile = JSON.parse(readFileSync(join(dir, "profile.json"), "utf8"));
+    profile.entry = join(dir, profile.entry);
+    profile.exports = [{ export: "vendor", symbol: "kr_vendor", params: [], returns: "string" }];
+    const profilePath = join(outDir, "profile.json");
+    writeFileSync(profilePath, JSON.stringify(profile));
+    const result = await compileLibrary({ profilePath, outDir });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    // The star re-export reaches ./sdk/version's `vendor` const: the
+    // refusal names what it is and anchors at the declaration that
+    // supplies it, not at the facade.
+    expect(result.diagnostics[0]!.code).toBe("SC4002");
+    expect(result.diagnostics[0]!.message).toContain("exports it as a variable");
+    expect(result.diagnostics[0]!.loc.file).toBe(join(dir, "sdk/version.ts"));
   });
 
   test("SC4003: a parameter outside the marshalling classes", async () => {
@@ -623,9 +817,12 @@ describe("K9: library-mode refusals", () => {
   });
 
   test("SC4003: arity mismatch between profile and signature", async () => {
-    const diags = await refusal(`export function two(a: number, b: number): number { return a + b; }\n`, {
-      exports: [{ export: "two", symbol: "kx_two", params: ["f64"], returns: "f64" }],
-    });
+    const diags = await refusal(
+      `export function two(a: number, b: number): number { return a + b; }\n`,
+      {
+        exports: [{ export: "two", symbol: "kx_two", params: ["f64"], returns: "f64" }],
+      },
+    );
     expect(diags[0]!.code).toBe("SC4003");
     expect(diags[0]!.message).toContain("2 parameter(s)");
   });
@@ -639,17 +836,24 @@ describe("K9: library-mode refusals", () => {
     expect(diags[0]!.hint).toContain("synchronous facade");
     // The teaching arrives as its own visibly-attributed note — the
     // tool's hint stays the tool's.
-    expect(diags[0]!.note).toBe("from the 'refusal-fixture' profile: use the host scheduler entry instead");
+    expect(diags[0]!.note).toBe(
+      "from the 'refusal-fixture' profile: use the host scheduler entry instead",
+    );
   });
 
   test("SC4005: a timer anywhere in the graph, teaching as the attributed note", async () => {
-    const diags = await refusal(`setTimeout(() => {}, 1);\nexport function f(): number { return 1; }\n`, {
-      exports: [{ export: "f", symbol: "kx_f", params: [], returns: "f64" }],
-      determinism: { teachings: { SC4005: "schedule through the embedder frame loop" } },
-    });
+    const diags = await refusal(
+      `setTimeout(() => {}, 1);\nexport function f(): number { return 1; }\n`,
+      {
+        exports: [{ export: "f", symbol: "kx_f", params: [], returns: "f64" }],
+        determinism: { teachings: { SC4005: "schedule through the embedder frame loop" } },
+      },
+    );
     expect(diags[0]!.code).toBe("SC4005");
     expect(diags[0]!.message).toContain("timers");
-    expect(diags[0]!.note).toBe("from the 'refusal-fixture' profile: schedule through the embedder frame loop");
+    expect(diags[0]!.note).toBe(
+      "from the 'refusal-fixture' profile: schedule through the embedder frame loop",
+    );
   });
 
   test("SC4007: a generic export", async () => {
@@ -668,18 +872,18 @@ describe("K9: library-mode refusals", () => {
  * synthesized per test like K9's. Emission never engages — SC4020 is a
  * frontend verdict — so one lane suffices. */
 let npmRefusalCounter = 0;
-async function npmRefusal(
+async function compileNpmFixture(
   entryFile: string,
   exports: unknown[],
   profilePatch: Record<string, unknown> = {},
-): Promise<{ code: string; message: string; hint?: string; note?: string; file: string }[]> {
+): Promise<Awaited<ReturnType<typeof compileLibrary>>> {
   const outDir = join(cacheDir, `npm-refusal-${npmRefusalCounter++}`);
   mkdirSync(outDir, { recursive: true });
   const profile = {
     profile_format: 1,
     name: "npm-refusal-fixture",
     entry: join(fixtureRoot, "npm-refuse", entryFile),
-    emission: "c",
+    emission: "llvm",
     abi: {
       prefix: "kx_",
       init_symbol: "kx_init",
@@ -692,7 +896,15 @@ async function npmRefusal(
   };
   const profilePath = join(outDir, "profile.json");
   writeFileSync(profilePath, JSON.stringify(profile));
-  const result = await compileLibrary({ profilePath, outDir });
+  return compileLibrary({ profilePath, outDir });
+}
+
+async function npmRefusal(
+  entryFile: string,
+  exports: unknown[],
+  profilePatch: Record<string, unknown> = {},
+): Promise<{ code: string; message: string; hint?: string; note?: string; file: string }[]> {
+  const result = await compileNpmFixture(entryFile, exports, profilePatch);
   expect(result.ok).toBe(false);
   if (result.ok) throw new Error("unreachable");
   return result.diagnostics.map((d) => ({
@@ -706,7 +918,9 @@ async function npmRefusal(
 
 describe("K13: library-mode npm refusals (SC4020, static-or-refuse)", () => {
   test("build-transform markers refuse with the failed bar named", async () => {
-    const diags = await npmRefusal("lib-markers.ts", [{ export: "f", symbol: "kx_f", params: [], returns: "string" }]);
+    const diags = await npmRefusal("lib-markers.ts", [
+      { export: "f", symbol: "kx_f", params: [], returns: "string" },
+    ]);
     expect(diags.map((d) => d.code)).toEqual(["SC4020"]);
     expect(diags[0]!.message).toContain("'webbundle'");
     expect(diags[0]!.message).toContain("build-transform markers");
@@ -715,13 +929,11 @@ describe("K13: library-mode npm refusals (SC4020, static-or-refuse)", () => {
     expect(diags[0]!.file.endsWith("lib-markers.ts")).toBe(true);
   });
 
-  test("minified shipped JS refuses", async () => {
-    const diags = await npmRefusal("lib-minified.ts", [
+  test("minified shipped JS compiles", async () => {
+    const result = await compileNpmFixture("lib-minified.ts", [
       { export: "f", symbol: "kx_f", params: ["f64", "f64"], returns: "f64" },
     ]);
-    expect(diags.map((d) => d.code)).toEqual(["SC4020"]);
-    expect(diags[0]!.message).toContain("'slimmed'");
-    expect(diags[0]!.message).toContain("looks minified");
+    expect(result.ok ? [] : result.diagnostics.map((d) => d.message)).toEqual([]);
   });
 
   test("no own .d.ts refuses by name — never the generic import fence", async () => {
@@ -730,7 +942,7 @@ describe("K13: library-mode npm refusals (SC4020, static-or-refuse)", () => {
     ]);
     // The package resolves at runtime (Node would load it) but ships no
     // types: the library answer is the bar's, not SC1010's "nothing
-    // installed resolves it" nor SC2013's --dynamic teaching.
+
     expect(diags.map((d) => d.code)).toEqual(["SC4020"]);
     expect(diags[0]!.message).toContain("'untyped'");
     expect(diags[0]!.message).toContain("no own .d.ts");
@@ -743,7 +955,9 @@ describe("K13: library-mode npm refusals (SC4020, static-or-refuse)", () => {
       { determinism: { teachings: { SC4020: "request the vendored copy from the embedder SDK" } } },
     );
     expect(diags[0]!.code).toBe("SC4020");
-    expect(diags[0]!.note).toBe("from the 'npm-refusal-fixture' profile: request the vendored copy from the embedder SDK");
+    expect(diags[0]!.note).toBe(
+      "from the 'npm-refusal-fixture' profile: request the vendored copy from the embedder SDK",
+    );
   });
 
   test("a builtin pulling the event loop keeps the SC4005 story, not a new fence", async () => {
@@ -767,16 +981,28 @@ describe("K13: library-mode npm refusals (SC4020, static-or-refuse)", () => {
  * the answer is emission-invariant. */
 
 const WORKED_FENCES = [
-  { id: "stdlib.math.random", teaching: "randomness is an effect: request it from the host and receive it as a Msg." },
-  { prefix: "node-builtin.fs.", teaching: "files are effects: declare reads and writes as commands the host executes." },
-  { prefix: "node-builtin.net.", teaching: "network is an effect: declare requests as commands; responses arrive as Msgs." },
+  {
+    id: "stdlib.math.random",
+    teaching: "randomness is an effect: request it from the host and receive it as a Msg.",
+  },
+  {
+    prefix: "node-builtin.fs.",
+    teaching: "files are effects: declare reads and writes as commands the host executes.",
+  },
+  {
+    prefix: "node-builtin.net.",
+    teaching: "network is an effect: declare requests as commands; responses arrive as Msgs.",
+  },
   { prefix: "node-builtin.os.", teaching: "machine identity is an effect: ask the host." },
   { prefix: "node-builtin.crypto.", teaching: "randomness and digests come from the host." },
   // The remaining ambient families the determinism attestation demotes on
   // — with these, the fence set covers every attestation-known surface
   // (the ask-5 §4 invariant's full-fence profile).
   { prefix: "stdlib.date.", teaching: "time is an effect: the host passes the clock in as a Msg." },
-  { prefix: "node-builtin.process.", teaching: "process ambient state and authority belong to the host." },
+  {
+    prefix: "node-builtin.process.",
+    teaching: "process ambient state and authority belong to the host.",
+  },
   { prefix: "node-builtin.perf_hooks.", teaching: "the monotonic clock is the host's." },
 ];
 
@@ -818,6 +1044,49 @@ describe.each(EMISSIONS)("K14: determinism fences, %s emission", (emission) => {
     expect(diags[0]!.message).toContain("Date.now");
     expect(diags[0]!.note).toContain("time is an effect");
     expect(diags[0]!.file.endsWith("lib.ts")).toBe(true);
+  });
+
+  test("os.userInfo refuses in its text, Buffer and named-encoding forms", async () => {
+    // The record is assembled from one snapshot libCall and one scalar
+    // libCall per passwd field, and the Buffer and named-encoding forms read
+    // those fields as bytes. Every form reaches the same manifest member, so
+    // every form answers the same refusal.
+    for (const expr of [
+      "String(os.userInfo().username).length",
+      'os.userInfo({ encoding: "buffer" }).username.length',
+      'String(os.userInfo({ encoding: "hex" }).username).length',
+    ]) {
+      const diags = await refusal(
+        `import * as os from "node:os";\nexport function whoami(): number { return ${expr}; }\n`,
+        {
+          exports: [{ export: "whoami", symbol: "kx_whoami", params: [], returns: "f64" }],
+          determinism: { fences: WORKED_FENCES },
+        },
+        emission,
+      );
+      expect(diags.map((d) => d.code)).toEqual(["SC4008"]);
+      expect(diags[0]!.message).toContain("'node-builtin.os.userInfo'");
+      expect(diags[0]!.note).toContain("machine identity is an effect");
+    }
+  });
+
+  test("Date.parse fence denies the call but permits date construction and getTime", async () => {
+    const profile = {
+      exports: [{ export: "stamp", symbol: "kx_stamp", params: [], returns: "f64" }],
+      determinism: { fences: [{ id: "stdlib.date.parse" }] },
+    };
+    await acceptance(
+      `export function stamp(): number { return new Date("2026-07-17").getTime(); }\n`,
+      profile,
+      emission,
+    );
+    const diags = await refusal(
+      `export function stamp(): number { return Date.parse("2026-07-17"); }\n`,
+      profile,
+      emission,
+    );
+    expect(diags.map((d) => d.code)).toEqual(["SC4008"]);
+    expect(diags[0]!.message).toContain("'stdlib.date.parse'");
   });
 
   test("an exact Date.valueOf fence does not also fence getTime", async () => {
@@ -884,7 +1153,7 @@ describe.each(EMISSIONS)("K14: determinism fences, %s emission", (emission) => {
   });
 
   test("unreached fences compile at zero cost: the emitted code is byte-identical", async () => {
-    // ONE entry file feeds both builds (emitted C/LLVM embeds the entry's
+    // ONE entry file feeds both builds (emitted LLVM embeds the entry's
     // path in provenance comments; the fence's cost is what's measured,
     // not the build directory's spelling).
     const entryDir = join(cacheDir, `fence-zerocost-${emission}`);
@@ -915,55 +1184,69 @@ describe.each(EMISSIONS)("K14: determinism fences, %s emission", (emission) => {
         }),
       );
       const result = await compileLibrary({ profilePath, outDir });
-      if (!result.ok) throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
-      emitted.push(readFileSync(result.cPath, "utf8"));
+      if (!result.ok)
+        throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
+      emitted.push(readFileSync(result.llvmPath, "utf8"));
     }
     expect(emitted[1]).toBe(emitted[0]);
   });
 
   test("a code-keyed teachings entry rides a non-fence refusal as the attributed note", async () => {
     const diags = await refusal(
-      `export function f(): number { return "abc".normalize().length; }\n`,
+      `export function f(): number { return (1234.5).toLocaleString("de-DE").length; }\n`,
       {
         exports: [{ export: "f", symbol: "kx_f", params: [], returns: "f64" }],
-        determinism: { teachings: { SC2020: "host strings arrive normalized; never renormalize in a core" } },
+        determinism: {
+          teachings: { SC2020: "locale comes from the host; never infer it in a core" },
+        },
       },
       emission,
     );
     expect(diags[0]!.code).toBe("SC2020");
     expect(diags[0]!.note).toBe(
-      "from the 'refusal-fixture' profile: host strings arrive normalized; never renormalize in a core",
+      "from the 'refusal-fixture' profile: locale comes from the host; never infer it in a core",
     );
   });
 
   test("a manifest-id-keyed teachings entry attaches to that surface's own refusal", async () => {
     const diags = await refusal(
-      `export function f(): string { return (1.5).toPrecision(3); }\n`,
+      `import { createRequire } from "node:module";\nexport function f(): number { return createRequire("/x") === undefined ? 0 : 1; }\n`,
       {
-        exports: [{ export: "f", symbol: "kx_f", params: [], returns: "string" }],
-        determinism: { teachings: { "stdlib.number.toPrecision": "fixed-point formatting runs in the host; request it as an effect" } },
+        exports: [{ export: "f", symbol: "kx_f", params: [], returns: "f64" }],
+        determinism: {
+          teachings: {
+            "node-builtin.module.createRequire":
+              "module state is the host's; request it as an effect",
+          },
+        },
       },
       emission,
     );
     // The surface's own code, not a fence code: the id key attaches text
     // to the refusal that already fires.
-    expect(diags[0]!.code).toBe("SC2012");
-    expect(diags[0]!.message).toContain("toPrecision");
-    expect(diags[0]!.note).toBe("from the 'refusal-fixture' profile: fixed-point formatting runs in the host; request it as an effect");
+    expect(diags[0]!.code).toBe("SC2020");
+    expect(diags[0]!.message).toContain("module.createRequire");
+    expect(diags[0]!.note).toBe(
+      "from the 'refusal-fixture' profile: module state is the host's; request it as an effect",
+    );
   });
 
   test("fencing a surface the static tier refuses anyway changes only the message", async () => {
     const diags = await refusal(
-      `export function f(): string { return (1.5).toPrecision(3); }\n`,
+      `import { createRequire } from "node:module";\nexport function f(): number { return createRequire("/x") === undefined ? 0 : 1; }\n`,
       {
-        exports: [{ export: "f", symbol: "kx_f", params: [], returns: "string" }],
-        determinism: { fences: [{ id: "stdlib.number.toPrecision", teaching: "formatting is host math" }] },
+        exports: [{ export: "f", symbol: "kx_f", params: [], returns: "f64" }],
+        determinism: {
+          fences: [
+            { id: "node-builtin.module.createRequire", teaching: "module state is host work" },
+          ],
+        },
       },
       emission,
     );
     // The existing refusal's code survives — the fence never re-codes a
     // surface that already refuses; its teaching rides as the note.
-    expect(diags[0]!.code).toBe("SC2012");
-    expect(diags[0]!.note).toBe("from the 'refusal-fixture' profile: formatting is host math");
+    expect(diags[0]!.code).toBe("SC2020");
+    expect(diags[0]!.note).toBe("from the 'refusal-fixture' profile: module state is host work");
   });
 });

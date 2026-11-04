@@ -1,0 +1,12 @@
+const object = JSON.parse('{"first":1,"second":2}');
+Object.defineProperty(object, 'hidden', { value: 3 });
+const descriptors = Object.getOwnPropertyDescriptors(object);
+console.log(Object.keys(descriptors).join(','));
+console.log(descriptors.first.value, descriptors.first.writable, descriptors.first.enumerable, descriptors.first.configurable);
+console.log(descriptors.hidden.value, descriptors.hidden.writable, descriptors.hidden.enumerable, descriptors.hidden.configurable);
+console.log(Object.getOwnPropertyDescriptors(3));
+console.log(Object.keys(Object.getOwnPropertyDescriptors('cat')).join(','));
+const parent = JSON.parse('{"inherited":4}');
+const child = Object.create(parent);
+child.own = 5;
+console.log(Object.keys(Object.getOwnPropertyDescriptors(child)).join(','));

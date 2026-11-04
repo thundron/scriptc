@@ -1,87 +1,52 @@
-class-values.ts:22:7 - error SC2020: 'ErrorConstructor' is part of the standard library types but has no scriptc lowering yet
+class-values.ts:24:7 - error SC2009: values of type 'AggregateErrorConstructor[]' cannot be compiled: the array shape is supported, but its element type 'AggregateErrorConstructor' does not compile
 
-  21 | // Builtin classes as values: their construction is libCall-shaped.
-  22 | const E = Error;
-     |       ^
-  23 | 
+  23 | const E = AggregateError;
+  24 | const errorClasses = [E];
+     |       ^~~~~~~~~~~~
+  25 | 
 
-  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
 
-class-values.ts:22:11 - error SC2020: 'Error' is part of the standard library types but has no scriptc lowering yet
+class-values.ts:24:22 - error SC2009: values of type 'AggregateErrorConstructor[]' cannot be compiled: the array shape is supported, but its element type 'AggregateErrorConstructor' does not compile
 
-  21 | // Builtin classes as values: their construction is libCall-shaped.
-  22 | const E = Error;
-     |           ^~~~~
-  23 | 
+  23 | const E = AggregateError;
+  24 | const errorClasses = [E];
+     |                      ^~~
+  25 | 
 
-  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
 
-class-values.ts:27:11 - error SC1090: classes extending builtin bases as values ('MyErr' inherits a runtime-provided constructor) are not supported yet
+class-values.ts:46:1 - error SC1090: assigning the static 'tag' through a class value (JS creates an OWN property on the runtime class — assign through the declaring class's name, which subclasses here) is not supported yet
 
-  26 | class MyErr extends Error {}
-  27 | const M = MyErr;
-     |           ^~~~~
-  28 | 
-
-class-values.ts:31:33 - error SC1090: structurally-typed class-value flows ('typeof Unrelated' into a 'typeof Base' slot: only a class and its subclasses share a slot — extend the base class) are not supported yet
-
-  30 | // is the IR's only class subtyping.
-  31 | const structural: typeof Base = Unrelated;
-     |                                 ^~~~~~~~~
-  32 | 
-
-class-values.ts:35:30 - error SC1090: class values whose constructor signatures differ ('typeof Derived' into a 'typeof Base' slot: construction through the slot completes against the base signature, which 'Derived' does not share — declare matching constructor parameters) is not supported yet
-
-  34 | // would dispatch a mismatched signature.
-  35 | const widened: typeof Base = Derived;
-     |                              ^~~~~~~
-  36 | 
-
-class-values.ts:40:1 - error SC1090: assigning the inherited static 'tag' through a subclass name (JS creates an OWN property on the subclass — assign through 'Base' instead) is not supported yet
-
-  39 | class PlainSub extends Base {}
-  40 | PlainSub.tag = "write";
-     | ^~~~~~~~~~~~
-  41 | 
-
-class-values.ts:44:1 - error SC1090: assigning the static 'tag' through a class value (JS creates an OWN property on the runtime class — assign through the declaring class's name, which subclasses here) is not supported yet
-
-  43 | let someClass: typeof Base = Base;
-  44 | someClass.tag = "write";
+  45 | let someClass: typeof Base = Base;
+  46 | someClass.tag = "write";
      | ^~~~~~~~~~~~~
-  45 | 
+  47 | 
 
-class-values.ts:48:13 - error SC1090: reading the static member 'tag' through a class value (a subclass of 'Base' redeclares it, so the runtime class decides which declaration answers) is not supported yet
+class-values.ts:50:13 - error SC1090: reading the static member 'tag' through a class value (a subclass of 'Base' redeclares it, so the runtime class decides which declaration answers) is not supported yet
 
-  47 | // runtime class decides which declaration answers.
-  48 | console.log(someClass.tag);
+  49 | // runtime class decides which declaration answers.
+  50 | console.log(someClass.tag);
      |             ^~~~~~~~~~~~~
-  49 | 
+  51 | 
 
-class-values.ts:52:10 - error SC1090: class expressions inside functions (each evaluation creates a DISTINCT class in JS — fresh identity, fresh statics; declare the class at top level) are not supported yet
+class-values.ts:54:10 - error SC1090: function-local classes with statics, decorators, or generic members are not supported yet
 
-  51 | function make(): unknown {
-  52 |   return class {};
-     |          ^~~~~~~~
-  53 | }
+  53 | function make(): unknown {
+  54 |   return class { static value = 1; };
+     |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+  55 | }
 
-class-values.ts:59:18 - error SC1090: class expressions with static initializers or static blocks outside a whole-initializer position (their declaration-time code must run exactly where the expression evaluates — bind the class in its own top-level `const C = class …` statement) is not supported yet
+class-values.ts:61:18 - error SC1090: class expressions with static initializers or static blocks outside a whole-initializer position (their declaration-time code must run exactly where the expression evaluates — bind the class in its own top-level `const C = class …` statement) is not supported yet
 
-  58 | // evaluates.
-  59 | const pair = [1, class WithStatic { static x = 1; }] as const;
+  60 | // evaluates.
+  61 | const pair = [1, class WithStatic { static x = 1; }] as const;
      |                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  60 | 
+  62 | 
 
-class-values.ts:69:16 - error SC1090: constructing through a union of class values (annotate the slot with the common constructor type — e.g. `new () => Base` — or narrow first) are not supported yet
+class-values.ts:81:56 - error SC1090: receiver-dependent static methods through a polymorphic class value is not supported yet
 
-  68 | let pick: typeof Left | typeof Right = Left;
-  69 | const picked = new pick();
-     |                ^~~~~~~~~~
-  70 | void picked;
-
-class-values.ts:75:12 - error SC1090: 'this' in static methods (it names the RECEIVER class — a dynamic value; reference the class by name instead) are not supported yet
-
-  74 |   static self(): string {
-  75 |     return this.name;
-     |            ^~~~
-  76 |   }
+  80 | class OtherThis extends UsesThis {}
+  81 | function self(value: typeof UsesThis): string { return value.self(); }
+     |                                                        ^~~~~~~~~~
+  82 | console.log(self(OtherThis));

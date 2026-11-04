@@ -1,0 +1,5 @@
+import-meta-rest.ts:1:14 - error SC1031: rest bindings from import.meta (the metadata object has no static value representation) is not supported yet
+
+  1 | const { url, ...remaining } = import.meta;
+    |              ^~~~~~~~~~~~
+  2 | console.log("unreachable");

@@ -6,24 +6,100 @@
 
 import { expect, test } from "vitest";
 import { ad } from "./harness.js";
+import { createProgram } from "../../src/frontend/ts7/program-adapter.js";
 
 const VALUE_FUNCTIONS = [
   // pure-AST helpers and program surface
-  "forEachChild", "getModifiers", "canHaveModifiers", "getCombinedNodeFlags",
-  "getCombinedModifierFlags", "getLineAndCharacterOfPosition", "flattenDiagnosticMessageText",
-  "tokenToString", "isExternalModule", "createProgram", "getPreEmitDiagnostics",
+  "forEachChild",
+  "getModifiers",
+  "canHaveModifiers",
+  "getCombinedNodeFlags",
+  "getCombinedModifierFlags",
+  "getLineAndCharacterOfPosition",
+  "flattenDiagnosticMessageText",
+  "tokenToString",
+  "isExternalModule",
+  "getPreEmitDiagnostics",
   "findConfigFile",
   // the renamed guards under their census names
-  "isParameter", "isPropertySignature", "isStringLiteralLike", "isFunctionLike",
-  "isGetAccessor", "isSetAccessor", "isAccessor",
+  "isParameter",
+  "isPropertySignature",
+  "isStringLiteralLike",
+  "isFunctionLike",
+  "isGetAccessor",
+  "isSetAccessor",
+  "isAccessor",
 ] as const;
 
 const ENUMS: [name: string, keys: string[]][] = [
-  ["SyntaxKind", ["Identifier", "CallExpression", "TrueKeyword", "FalseKeyword", "NullKeyword", "DefaultKeyword", "EqualsToken", "SourceFile"]],
-  ["TypeFlags", ["String", "Number", "Boolean", "Undefined", "Null", "Object", "Union", "StringLiteral", "NumberLiteral", "BooleanLiteral", "EnumLiteral", "Never", "Unknown", "Any", "BigInt", "ESSymbol", "TypeParameter", "Intersection", "IndexedAccess"]],
+  [
+    "SyntaxKind",
+    [
+      "Identifier",
+      "CallExpression",
+      "TrueKeyword",
+      "FalseKeyword",
+      "NullKeyword",
+      "DefaultKeyword",
+      "EqualsToken",
+      "SourceFile",
+    ],
+  ],
+  [
+    "TypeFlags",
+    [
+      "String",
+      "Number",
+      "Boolean",
+      "Undefined",
+      "Null",
+      "Object",
+      "Union",
+      "StringLiteral",
+      "NumberLiteral",
+      "BooleanLiteral",
+      "EnumLiteral",
+      "Never",
+      "Unknown",
+      "Any",
+      "BigInt",
+      "ESSymbol",
+      "TypeParameter",
+      "Intersection",
+      "IndexedAccess",
+    ],
+  ],
   ["NodeFlags", ["Const", "Let", "None"]],
-  ["SymbolFlags", ["Alias", "Function", "Class", "Interface", "TypeAlias", "Variable", "Property", "Method", "EnumMember", "BlockScopedVariable"]],
-  ["ModifierFlags", ["Export", "Default", "Async", "Static", "Readonly", "Abstract", "Ambient", "Private", "Protected", "Public"]],
+  [
+    "SymbolFlags",
+    [
+      "Alias",
+      "Function",
+      "Class",
+      "Interface",
+      "TypeAlias",
+      "Variable",
+      "Property",
+      "Method",
+      "EnumMember",
+      "BlockScopedVariable",
+    ],
+  ],
+  [
+    "ModifierFlags",
+    [
+      "Export",
+      "Default",
+      "Async",
+      "Static",
+      "Readonly",
+      "Abstract",
+      "Ambient",
+      "Private",
+      "Protected",
+      "Public",
+    ],
+  ],
   ["ObjectFlags", ["Reference", "Tuple", "Anonymous", "Class", "Interface"]],
   ["ElementFlags", ["Required", "Optional", "Rest", "Variadic"]],
   ["ModuleKind", ["ESNext", "CommonJS", "NodeNext", "Preserve"]],
@@ -33,13 +109,18 @@ const ENUMS: [name: string, keys: string[]][] = [
   ["DiagnosticCategory", ["Error", "Warning", "Suggestion", "Message"]],
 ];
 
-/* The survey's MISSING list that stays 5.9.3-hosted (islands) — the adapter
- * must NOT grow look-alikes silently; phase 2 keeps these imports on the
- * old package. */
+/* The survey's MISSING list that stays outside the adapter — the adapter
+ * must NOT grow look-alikes without updating this list. Source parsing/transpilation remains
+ * in the allowlisted TypeScript 5 islands; resolution and config parsing use
+ * scriptc's resolver and the TypeScript 7 host instead. */
 const DEFERRED = [
-  "createSourceFile", "preProcessFile", "transpileModule",
-  "resolveModuleName", "resolveTypeReferenceDirective",
-  "readConfigFile", "parseJsonConfigFileContent",
+  "createSourceFile",
+  "preProcessFile",
+  "transpileModule",
+  "resolveModuleName",
+  "resolveTypeReferenceDirective",
+  "readConfigFile",
+  "parseJsonConfigFileContent",
 ] as const;
 
 test("every census value function is exported and callable", () => {
@@ -50,6 +131,12 @@ test("every census value function is exported and callable", () => {
   expect(typeof ad.sys.fileExists).toBe("function");
   expect(typeof ad.sys.readFile).toBe("function");
   expect(typeof ad.sys.directoryExists).toBe("function");
+});
+
+test("Node program construction stays in its explicit host entry", () => {
+  expect(createProgram).toBeTypeOf("function");
+  expect("createProgram" in ad).toBe(false);
+  expect(ad.Ts7Host.prototype.createProgram).toBeTypeOf("function");
 });
 
 test("every census enum re-exports with its symbolic keys", () => {

@@ -19,10 +19,12 @@ describe("emitWasmGlue (unit)", () => {
   const glue = emitWasmGlue(DEMO);
 
   it("expands string import params into (ptr,len) and decodes them", () => {
-    expect(glue).toContain(`"dom_set_text": (p0, l0) => { host["dom_set_text"](readStr(p0, l0)); }`);
+    expect(glue).toContain(
+      `"dom_set_text": (p0, l0) => { host["dom_set_text"](readStr(p0, l0)); }`,
+    );
   });
 
-  it("stages string export args through scr_wasm_alloc and passes (ptr,len)", () => {
+  it("stages string export args through scriptc_alloc and passes (ptr,len)", () => {
     expect(glue).toContain(`"onClick": (a0) => {`);
     expect(glue).toContain(`const [p0, l0] = passStr(a0);`);
     expect(glue).toContain(`exports["onClick"](p0, l0);`);
@@ -41,7 +43,11 @@ describe("emitWasmGlue (unit)", () => {
 
   it("refuses string/bytes results (unsupported in the wasm host-import ABI)", () => {
     expect(() =>
-      emitWasmGlue({ stem: "x", imports: [], exports: [{ name: "f", params: [], result: "string" }] }),
+      emitWasmGlue({
+        stem: "x",
+        imports: [],
+        exports: [{ name: "f", params: [], result: "string" }],
+      }),
     ).toThrow(/string\/bytes results are not supported/);
   });
 });
@@ -59,8 +65,8 @@ const REACTOR_C = `#include <stdint.h>
 __attribute__((import_module("nt"), import_name("dom_set_text")))
 extern void host_dom_set_text(const uint8_t *ptr, uint32_t len);
 static uint8_t heap[4096]; static uint32_t hp;
-__attribute__((export_name("scr_wasm_alloc")))
-uint8_t *scr_wasm_alloc(uint32_t n){ uint8_t *p=heap+hp; hp+=n; return p; }
+__attribute__((export_name("scriptc_alloc")))
+uint8_t *scriptc_alloc(uint32_t n){ uint8_t *p=heap+hp; hp+=n; return p; }
 static int g_inited;
 __attribute__((constructor)) static void nt_init(void){ g_inited = 42; }
 __attribute__((export_name("onClick")))
@@ -76,8 +82,17 @@ describe.runIf(hasZig())("emitWasmGlue (end-to-end against a real reactor)", () 
       writeFileSync(join(dir, "reactor.c"), REACTOR_C);
       execFileSync(
         "zig",
-        ["cc", "-target", "wasm32-wasi", "-O2", "-mexec-model=reactor", "-Wl,--no-entry",
-         "reactor.c", "-o", "app.wasm"],
+        [
+          "cc",
+          "-target",
+          "wasm32-wasi",
+          "-O2",
+          "-mexec-model=reactor",
+          "-Wl,--no-entry",
+          "reactor.c",
+          "-o",
+          "app.wasm",
+        ],
         { cwd: dir },
       );
       writeFileSync(join(dir, "app.glue.mjs"), emitWasmGlue(DEMO));
@@ -85,7 +100,9 @@ describe.runIf(hasZig())("emitWasmGlue (end-to-end against a real reactor)", () 
 
       let received: string | null = null;
       const api = await mod.instantiateFromBytes(readFileSync(join(dir, "app.wasm")), {
-        dom_set_text: (s: string) => { received = s; },
+        dom_set_text: (s: string) => {
+          received = s;
+        },
       });
 
       expect(api.inited()).toBe(42); // constructor ran via _initialize

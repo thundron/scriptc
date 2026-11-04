@@ -1,0 +1,6 @@
+url-mutation-operator.ts:2:1 - error SC1090: URL setter assignment operators beyond = and += is not supported yet
+
+  1 | const u = new URL("https://h/a");
+  2 | u.search ||= "fallback=yes";
+    | ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+  3 | 

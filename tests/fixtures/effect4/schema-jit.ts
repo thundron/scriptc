@@ -1,0 +1,1 @@
+import * as Schema from "effect/Schema";import * as SchemaJITCompiler from "effect/schema/SchemaJITCompiler";const S=Schema.Struct({n:Schema.Int});SchemaJITCompiler.enable(S.ast);console.log(JSON.stringify(Schema.decodeSync(S)({n:42})))

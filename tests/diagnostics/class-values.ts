@@ -18,8 +18,10 @@ class Unrelated {
   static tag = "unrelated";
 }
 
-// Builtin classes as values: their construction is libCall-shaped.
-const E = Error;
+// Builtin classes with their own construction as values (Error and its
+// standard subclasses are values; AggregateError is not).
+const E = AggregateError;
+const errorClasses = [E];
 
 // Classes extending builtin bases as values (the error-message completion
 // rule has no thunk ABI).
@@ -47,9 +49,9 @@ someClass.tag = "write";
 // runtime class decides which declaration answers.
 console.log(someClass.tag);
 
-// Class expressions inside functions mint a DISTINCT class per evaluation.
+// Local classes with statics still need per-evaluation static storage.
 function make(): unknown {
-  return class {};
+  return class { static value = 1; };
 }
 make();
 
@@ -69,10 +71,12 @@ let pick: typeof Left | typeof Right = Left;
 const picked = new pick();
 void picked;
 
-// `this` in a static method names the RECEIVER class — a dynamic value.
+// A polymorphic class value cannot specialize a receiver-dependent method.
 class UsesThis {
   static self(): string {
     return this.name;
   }
 }
-console.log(UsesThis.self());
+class OtherThis extends UsesThis {}
+function self(value: typeof UsesThis): string { return value.self(); }
+console.log(self(OtherThis));

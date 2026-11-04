@@ -1,0 +1,45 @@
+const each = Array.prototype.map;
+console.log(each === Array.prototype.map, each.call([1, 2], (n) => n * 2).join(","));
+const getTime = Date.prototype.getTime;
+console.log(getTime === Date.prototype.getTime, getTime.call(new Date(42)));
+const get = Map.prototype.get;
+const set = Map.prototype.set;
+const map = new Map();
+console.log(set.call(map, "key", 42) === map, get.call(map, "key"));
+const add = Set.prototype.add;
+const has = Set.prototype.has;
+const values = new Set();
+console.log(add.call(values, "value") === values, has.call(values, "value"));
+const weakGet = WeakMap.prototype.get;
+const weakSet = WeakMap.prototype.set;
+const weak = new WeakMap();
+const key = {};
+console.log(weakSet.call(weak, key, 21) === weak, weakGet.call(weak, key));
+const tag = Object.prototype.toString;
+const own = Object.prototype.hasOwnProperty;
+console.log(tag.call([]), tag.call(null), own.call({ value: 1 }, "value"));
+const slice = String.prototype.slice;
+console.log(slice.call("hello", 1, 4));
+try { getTime.call({}); } catch (error) { console.log(error.name); }
+const now = Date.now;
+console.log(typeof now(), now() > 0);
+const min = Math.min;
+const max = Math.max;
+console.log(min(), max(), min(3, 1, 2), max(3, 1, 2));
+const same = Object.is;
+const names = Object.getOwnPropertyNames;
+console.log(names({ a: 1 }).join(","));
+const parse = Number.parseInt;
+console.log(parse("42"), parse("ff", 16), parse(12.5));
+const point = String.fromCodePoint;
+const char = String.fromCharCode;
+console.log(point.length, point(65, 0x1f600), point(), point("66"), char(65, 66), point === String.fromCodePoint);
+try { point(-1); } catch (error) { console.log(error.name); }
+let coerced = 0;
+try { point(-1, { valueOf() { coerced++; return 65; } }); } catch (error) { console.log(error.name, coerced); }
+console.log(char(0xd83d, 0xde00));
+const create = Object.create;
+const prototype = { value: 42 };
+console.log(create(prototype).value, Object.getPrototypeOf(create(null)) === null);
+const reference = {};
+console.log(same === Object.is, same(NaN, NaN), same(0, -0), same(reference, reference), same({}, {}), same(), same(undefined));

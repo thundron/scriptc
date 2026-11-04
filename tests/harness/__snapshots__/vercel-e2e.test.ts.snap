@@ -32,9 +32,9 @@ Fetching aliases under mock-team
 `;
 
 exports[`vercel e2e (real CLI vs Node against the mock api) > alias ls > alias ls stdout 1`] = `
-"  source                                      url                     age    
-  mock-app-abc123defg-mock-team.vercel.app    mock-app.vercel.app    <T>    
-  mock-app-abc123defg-mock-team.vercel.app    mock-example.com       <T>    
+"  source  url  age
+  mock-app-abc123defg-mock-team.vercel.app  mock-app.vercel.app  <T>
+  mock-app-abc123defg-mock-team.vercel.app  mock-example.com  <T>
 
 "
 `;
@@ -95,9 +95,9 @@ exports[`vercel e2e (real CLI vs Node against the mock api) > certs ls > certs l
 `;
 
 exports[`vercel e2e (real CLI vs Node against the mock api) > certs ls > certs ls stdout 1`] = `
-"  id                              cns                   expiration  renew   age  
-  cert_mock000000000000000000001  - mock-example.com      <T> ago   yes   <T>  
-                                  - *.mock-example.com                           
+"  id  cns  expiration  renew  age
+  cert_mock000000000000000000001  - mock-example.com  <T> ago  yes  <T>
+                                  - *.mock-example.com
 "
 `;
 
@@ -134,11 +134,11 @@ exports[`vercel e2e (real CLI vs Node against the mock api) > dns ls > dns ls st
 "Vercel CLI 56.2.0 (Node.js <V>)
 Fetching domains under mock-team
 > Records found under mock-team [<T>]
-> 
+>
 mock-example.com
-                                   id    name    type     value                       created     
-                                                 A        76.76.21.21                 default     
-       rec_mock0000000000000000000002    www     CNAME    cname.vercel-dns.com        <T> ago    
+  id  name  type  value  created
+  A  76.76.21.21  default
+  rec_mock0000000000000000000002  www  CNAME  cname.vercel-dns.com  <T> ago
 
 "
 `;
@@ -195,15 +195,15 @@ Fetching Domain mock-example.com under mock-team
 
   Nameservers
 
-    Intended Nameservers    Current Nameservers         
-    ns1.vercel-dns.com      ns1.example-dns.com    ✘    
-    ns2.vercel-dns.com      ns2.example-dns.com    ✘    
+  Intended Nameservers  Current Nameservers
+  ns1.vercel-dns.com  ns1.example-dns.com  ✘
+  ns2.vercel-dns.com  ns2.example-dns.com  ✘
 
   Projects
-   
-    Project     Domains             
-    mock-app    mock-example.com    
-   
+
+  Project  Domains
+  mock-app  mock-example.com
+
 "
 `;
 
@@ -223,10 +223,10 @@ exports[`vercel e2e (real CLI vs Node against the mock api) > domains ls > domai
 "Vercel CLI 56.2.0 (Node.js <V>)
 Fetching Domains under mock-team
 > 1 Domain found under mock-team [<T>]
- 
-  Domain              Registrar           Nameservers         Expiration Date    Creator     Age     
-  mock-example.com    Third Party         Third Party         -                  mockuser    <T>    
- 
+
+  Domain  Registrar  Nameservers  Expiration Date  Creator  Age
+  mock-example.com  Third Party  Third Party  -  mockuser  <T>
+
 
 "
 `;
@@ -252,9 +252,9 @@ Retrieving project…
 Saving…
 
 ✓ Added           MOCK_API_TOKEN
-  Project         mock-team/mock-app
-  Environments    Production
-  Type            Sensitive
+  Project  mock-team/mock-app
+  Environments  Production
+  Type  Sensitive
 "
 `;
 
@@ -281,10 +281,10 @@ Retrieving project…
 
 exports[`vercel e2e (real CLI vs Node against the mock api) > env ls > env ls stdout 1`] = `
 "
- name                       value                       environments (git branch)           created     
- DATABASE_URL               Encrypted                   Production, Preview, Development    <T> ago    
- NEXT_PUBLIC_BASE_URL       https://mock-examp…         Production                          <T> ago    
- PREVIEW_FLAG               Encrypted                   Preview (staging)                   <T> ago    
+  name  value  environments (git branch)  created
+  DATABASE_URL  Encrypted  Production, Preview, Development  <T> ago
+  NEXT_PUBLIC_BASE_URL  https://mock-examp…  Production  <T> ago
+  PREVIEW_FLAG  Encrypted  Preview (staging)  <T> ago
 
 "
 `;
@@ -370,9 +370,9 @@ Retrieving project…
 
 exports[`vercel e2e (real CLI vs Node against the mock api) > env ls production > env ls production stdout 1`] = `
 "
- name                       value                       environments                        created     
- DATABASE_URL               Encrypted                   Production, Preview, Development    <T> ago    
- NEXT_PUBLIC_BASE_URL       https://mock-examp…         Production                          <T> ago    
+  name  value  environments  created
+  DATABASE_URL  Encrypted  Production, Preview, Development  <T> ago
+  NEXT_PUBLIC_BASE_URL  https://mock-examp…  Production  <T> ago
 
 "
 `;
@@ -431,88 +431,88 @@ exports[`vercel e2e (real CLI vs Node against the mock api) > help > help stderr
 
     Basic
 
-      deploy               [path]      Performs a deployment (default)
-      build                            Build the project locally into './vercel/output'
-      cache                [cmd]       Manages cache for your current Project
-      dev                              Start a local development server
-      env                              Manages the Environment Variables for your current Project
-      git                              Manage Git provider repository for your current Project
-      help                 [cmd]       Displays complete help for [cmd]
-      init                 [example]   Initialize an example project
-      inspect              [id]        Displays information related to a deployment
-      i | install          [name]      Install an integration from the Marketplace
-      integration          [cmd]       Manages your Marketplace integrations
-      ir | integration-resource [cmd]  Manages your Marketplace integration resources
-      link                 [path]      Link local directory to a Vercel Project
-      ls | list            [app]       Lists deployments
-      login                [email]     Logs into your account or creates a new one
-      logout                           Logs out of your account
-      open                             Opens the current project in the Vercel Dashboard
-      promote              [url|id]    Promote an existing deployment to current
-      pull                 [path]      Pull your Project Settings from the cloud
-      redeploy             [url|id]    Rebuild and deploy a previous deployment.
-      rollback             [url|id]    Quickly revert back to a previous deployment
-      switch               [scope]     Switches between different scopes
+  deploy  [path]  Performs a deployment (default)
+  build  Build the project locally into './vercel/output'
+  cache  [cmd]  Manages cache for your current Project
+  dev  Start a local development server
+  env  Manages the Environment Variables for your current Project
+  git  Manage Git provider repository for your current Project
+  help  [cmd]  Displays complete help for [cmd]
+  init  [example]  Initialize an example project
+  inspect  [id]  Displays information related to a deployment
+  i | install  [name]  Install an integration from the Marketplace
+  integration  [cmd]  Manages your Marketplace integrations
+  ir | integration-resource [cmd]  Manages your Marketplace integration resources
+  link  [path]  Link local directory to a Vercel Project
+  ls | list  [app]  Lists deployments
+  login  [email]  Logs into your account or creates a new one
+  logout  Logs out of your account
+  open  Opens the current project in the Vercel Dashboard
+  promote  [url|id]  Promote an existing deployment to current
+  pull  [path]  Pull your Project Settings from the cloud
+  redeploy  [url|id]  Rebuild and deploy a previous deployment.
+  rollback  [url|id]  Quickly revert back to a previous deployment
+  switch  [scope]  Switches between different scopes
 
     Advanced
 
-      activity                         List user activity events
-      agent                [init]      Generate AGENTS.md with Vercel best practices
-      ai-gateway           [cmd]       Manage AI Gateway resources
-      agent-runs           [cmd]       Inspect Agent Runs observability data
-      alerts                           List alerts for a project or team
-      alias                [cmd]       Manages your domain aliases
-      api                  [endpoint]  Make authenticated HTTP requests to the Vercel API [beta]
-      bisect                           Use binary search to find the deployment that introduced a bug
-      blob                 [cmd]       Manages your Blob stores and files
-      buy                  [cmd]       Purchase Vercel products for your team
-      certs                [cmd]       Manages your SSL certificates
-      connect              [cmd]       Manage connectors [beta]
-      contract                         Show contract information for billing periods
-      cron | crons         [cmd]       Manage cron jobs for a project [beta]
-      curl                 [path]      cURL requests to your linked project's deployment [beta]
-      deploy-hooks         [cmd]       Manage deploy hooks for Git-triggered builds
-      dns                  [name]      Manages your DNS records
-      domains              [name]      Manages your domain names
-      edge-config          [cmd]       Manage Edge Config stores
-      firewall             [cmd]       Manages Vercel Firewall configuration and custom rules
-      flags                [cmd]       Manage feature flags for a Vercel project
-      httpstat             path        Visualize HTTP timing statistics for deployments
-      logs                 [url]       Displays the logs for a deployment
-      metrics              <metric>    Queries observability metrics for your project or team
-      mcp                              Set up MCP agents and configuration
-      microfrontends                   Manages your microfrontends
-      oauth-apps           [cmd]       Register Vercel Apps (OAuth) and manage team installations
-      projects                         Manages your Projects
-      redirects            [cmd]       Manages redirects for your current Project
-      rm | remove          [id]        Removes a deployment
-      routes               [cmd]       Manages routing rules for your current Project
-      rr | rolling-release [cmd]       Manage rolling releases for gradual traffic shifting
-      sandbox                          Interact with Vercel Sandbox
-      skills               [query]     Discover agent skills relevant to your project
-      target               [cmd]       Manage custom environments for your Project
-      teams                            Manages your teams
-      telemetry            [cmd]       Enable or disable telemetry collection
-      tokens               [cmd]       Manage your personal Vercel authentication tokens
-      traces               [cmd]       Fetch and capture traces for your project's deployment
-      upgrade                          Upgrade the Vercel CLI to the latest version
-      usage                            Show billing usage for the current billing period
-      vcr                  [cmd]       Manages your Container Registry repositories and images
-      webhooks             [cmd]       Manages webhooks [beta]
-      whoami                           Shows the username of the currently logged in user
+  activity  List user activity events
+  agent  [init]  Generate AGENTS.md with Vercel best practices
+  ai-gateway  [cmd]  Manage AI Gateway resources
+  agent-runs  [cmd]  Inspect Agent Runs observability data
+  alerts  List alerts for a project or team
+  alias  [cmd]  Manages your domain aliases
+  api  [endpoint]  Make authenticated HTTP requests to the Vercel API [beta]
+  bisect  Use binary search to find the deployment that introduced a bug
+  blob  [cmd]  Manages your Blob stores and files
+  buy  [cmd]  Purchase Vercel products for your team
+  certs  [cmd]  Manages your SSL certificates
+  connect  [cmd]  Manage connectors [beta]
+  contract  Show contract information for billing periods
+  cron | crons  [cmd]  Manage cron jobs for a project [beta]
+  curl  [path]  cURL requests to your linked project's deployment [beta]
+  deploy-hooks  [cmd]  Manage deploy hooks for Git-triggered builds
+  dns  [name]  Manages your DNS records
+  domains  [name]  Manages your domain names
+  edge-config  [cmd]  Manage Edge Config stores
+  firewall  [cmd]  Manages Vercel Firewall configuration and custom rules
+  flags  [cmd]  Manage feature flags for a Vercel project
+  httpstat  path  Visualize HTTP timing statistics for deployments
+  logs  [url]  Displays the logs for a deployment
+  metrics  <metric>  Queries observability metrics for your project or team
+  mcp  Set up MCP agents and configuration
+  microfrontends  Manages your microfrontends
+  oauth-apps  [cmd]  Register Vercel Apps (OAuth) and manage team installations
+  projects  Manages your Projects
+  redirects  [cmd]  Manages redirects for your current Project
+  rm | remove  [id]  Removes a deployment
+  routes  [cmd]  Manages routing rules for your current Project
+  rr | rolling-release [cmd]  Manage rolling releases for gradual traffic shifting
+  sandbox  Interact with Vercel Sandbox
+  skills  [query]  Discover agent skills relevant to your project
+  target  [cmd]  Manage custom environments for your Project
+  teams  Manages your teams
+  telemetry  [cmd]  Enable or disable telemetry collection
+  tokens  [cmd]  Manage your personal Vercel authentication tokens
+  traces  [cmd]  Fetch and capture traces for your project's deployment
+  upgrade  Upgrade the Vercel CLI to the latest version
+  usage  Show billing usage for the current billing period
+  vcr  [cmd]  Manages your Container Registry repositories and images
+  webhooks  [cmd]  Manages webhooks [beta]
+  whoami  Shows the username of the currently logged in user
 
   Global Options:
 
-    -h, --help                     Output usage information
-    -v, --version                  Output the version number
-    --cwd                          Current working directory
-    -A FILE, --local-config=FILE   Path to the local \`vercel.json\` file
-    -Q DIR, --global-config=DIR    Path to the global \`.vercel\` directory
-    -d, --debug                    Debug mode [off]
-    --no-color                     No color mode [off]
-    --non-interactive              Run without interactive prompts (default when agent detected)
-    -S, --scope                    Set a custom scope
-    -t TOKEN, --token=TOKEN        Login token
+  -h, --help  Output usage information
+  -v, --version  Output the version number
+  --cwd  Current working directory
+  -A FILE, --local-config=FILE  Path to the local \`vercel.json\` file
+  -Q DIR, --global-config=DIR  Path to the global \`.vercel\` directory
+  -d, --debug  Debug mode [off]
+  --no-color  No color mode [off]
+  --non-interactive  Run without interactive prompts (default when agent detected)
+  -S, --scope  Set a custom scope
+  -t TOKEN, --token=TOKEN  Login token
 
   Examples:
 
@@ -549,29 +549,29 @@ exports[`vercel e2e (real CLI vs Node against the mock api) > help alias > help 
 
   ▲ vercel alias [command]
 
-  Interact with deployment aliases                                              
+  Interact with deployment aliases
 
   Commands:
 
-  list                     Show all aliases                                
-  remove  alias            Remove an alias using its hostname              
-  set     id-or-url alias  Create a new alias (default)                    
+  list  Show all aliases
+  remove  alias  Remove an alias using its hostname
+  set  id-or-url alias  Create a new alias (default)
 
 
   Global Options:
 
-       --cwd <DIR>            Sets the current working directory for a single   
-                              run of a command                                  
-  -d,  --debug                Debug mode (default off)                          
-  -Q,  --global-config <DIR>  Path to the global \`.vercel\` directory            
-  -h,  --help                 Output usage information                          
-  -A,  --local-config <FILE>  Path to the local \`vercel.json\` file              
-       --no-color             No color mode (default off)                       
-       --non-interactive      Run without interactive prompts; when an agent is 
-                              detected this is the default                      
-  -S,  --scope                Set a custom scope                                
-  -t,  --token <TOKEN>        Login token                                       
-  -v,  --version              Output the version number                         
+  --cwd <DIR>  Sets the current working directory for a single
+                              run of a command
+  -d,  --debug  Debug mode (default off)
+  -Q,  --global-config <DIR>  Path to the global \`.vercel\` directory
+  -h,  --help  Output usage information
+  -A,  --local-config <FILE>  Path to the local \`vercel.json\` file
+  --no-color  No color mode (default off)
+  --non-interactive  Run without interactive prompts; when an agent is
+                              detected this is the default
+  -S,  --scope  Set a custom scope
+  -t,  --token <TOKEN>  Login token
+  -v,  --version  Output the version number
 
 
   Examples:
@@ -623,14 +623,14 @@ Fetching deployment "mock-app-abc123defg-mock-team.vercel.app" in mock-team
 
     ╶ https://mock-app.vercel.app
     ╶ https://mock-example.com
-    
+
 
   Builds
 
-    ┌ package.json        [<T>]
+  ┌ package.json  [<T>]
     ├── λ api/index (1MB) [iad1]
     └── index.html (2KB)
-    
+
 
 "
 `;
@@ -654,10 +654,10 @@ exports[`vercel e2e (real CLI vs Node against the mock api) > logs for a deploym
 Resolving deployment "mock-app-abc123defg-mock-team.vercel.app"
 Fetching project "prj_mock000000000000000000000001"
 Fetching logs...
-TIME         HOST                 LEVEL                           STATUS  MESSAGE                                       
-00:01:40.00  mock-app.vercel.app  info     ◇ GET /                200     (no message)                                  
+TIME         HOST                 LEVEL                           STATUS  MESSAGE
+00:01:40.00  mock-app.vercel.app  info     ◇ GET /                200     (no message)
 00:01:50.00  mock-app.vercel.app  error    λ GET /api/data        500     TypeError: Cannot read properties of undefine…
-00:02:00.00  mock-app.vercel.app  warning  λ POST /api/submit     202     payload missing optional field "tags"         
+00:02:00.00  mock-app.vercel.app  warning  λ POST /api/submit     202     payload missing optional field "tags"
 Fetched 3 logs for mock-team/mock-app
 "
 `;
@@ -679,9 +679,9 @@ exports[`vercel e2e (real CLI vs Node against the mock api) > ls (deployments) >
 Fetching deployments in mock-team
 > Deployments under mock-team [<T>]
 
-  Age      Project                Deployment                                           Status      Environment     Duration     Username     
-  <T>     mock-team/mock-app     https://mock-app-abc123defg-mock-team.vercel.app     ● Ready     Production      <T>          mockuser     
-  <T>     mock-team/mock-app     https://mock-app-hij456klmn-mock-team.vercel.app     ● Error     Preview         ?            mockuser     
+  Age  Project  Deployment  Status  Environment  Duration  Username
+  <T>  mock-team/mock-app  https://mock-app-abc123defg-mock-team.vercel.app  ● Ready  Production  <T>  mockuser
+  <T>  mock-team/mock-app  https://mock-app-hij456klmn-mock-team.vercel.app  ● Error  Preview  ?  mockuser
 
 "
 `;
@@ -725,9 +725,9 @@ exports[`vercel e2e (real CLI vs Node against the mock api) > project ls > proje
 Fetching projects in mock-team
 > Projects found under mock-team  [<T>]
 
-  Project Name   Latest Production URL   Updated   Node Version   
-  mock-app       --                      <T>      22.x           
-  static-site    --                      <T>      22.x           
+  Project Name  Latest Production URL  Updated  Node Version
+  mock-app  --  <T>  22.x
+  static-site  --  <T>  22.x
 
 "
 `;
@@ -747,9 +747,9 @@ exports[`vercel e2e (real CLI vs Node against the mock api) > teams ls > teams l
 "Vercel CLI 56.2.0 (Node.js <V>)
 Fetching teams
 Fetching user information
-id              Team name       
-second-team     Second Team     
-mock-team       Mock Team       
+id              Team name
+second-team     Second Team
+mock-team       Mock Team
 "
 `;
 

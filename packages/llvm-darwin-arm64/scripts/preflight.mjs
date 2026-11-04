@@ -15,8 +15,8 @@ try {
 
 process.stderr.write(
   "\n@scriptc/llvm-darwin-arm64: bin/scriptc-llvm-codegen is MISSING (LLVM lane will fail with SC3003).\n" +
-  "  Build it:   pnpm --filter @scriptc/llvm-darwin-arm64 run build:native\n" +
-  "  Requires:   LLVM 22.1.8 exactly  ->  brew install llvm@22\n" +
-  "  Not needed for the C backend; ignore if you only use `--backend c`.\n\n",
+    "  Build it:   pnpm --filter @scriptc/llvm-darwin-arm64 run build:native\n" +
+    "  Requires:   LLVM 22.1.8 exactly  ->  brew install llvm@22\n" +
+    "  Not needed for the C backend; ignore if you only use `--backend c`.\n\n",
 );
 process.exit(0);

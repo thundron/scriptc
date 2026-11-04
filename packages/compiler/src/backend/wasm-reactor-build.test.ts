@@ -12,7 +12,12 @@ const CLI = join(REPO, "packages/cli/dist/main.js");
 const FIXTURE = join(REPO, "tests/library-mode/scalars");
 
 function hasZig(): boolean {
-  try { execFileSync("zig", ["version"], { stdio: "ignore" }); return true; } catch { return false; }
+  try {
+    execFileSync("zig", ["version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 describe.runIf(hasZig())("scriptc build --lib -> wasm reactor + glue (integrated)", () => {
@@ -29,7 +34,10 @@ describe.runIf(hasZig())("scriptc build --lib -> wasm reactor + glue (integrated
 
       const glue = await import(pathToFileURL(join(dir, ".scriptc", "lib.mjs")).href);
       const { readFileSync } = await import("node:fs");
-      const api = await glue.instantiateFromBytes(readFileSync(join(dir, ".scriptc", "lib.wasm")), {});
+      const api = await glue.instantiateFromBytes(
+        readFileSync(join(dir, ".scriptc", "lib.wasm")),
+        {},
+      );
 
       expect(api.kt_add(2, 3)).toBe(5);
       expect(api.kt_passthrough(7)).toBe(7);

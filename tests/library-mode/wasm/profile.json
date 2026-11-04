@@ -1,0 +1,24 @@
+{
+  "profile_format": 1,
+  "name": "wasm-embedding",
+  "entry": "lib.ts",
+  "emission": "llvm",
+  "abi": {
+    "prefix": "app_",
+    "init_symbol": "app_init",
+    "sink_register_symbol": "app_sink",
+    "callback_register_symbol": "app_callback",
+    "collect_symbol": "app_collect",
+    "result_reset_symbol": "app_reset_results"
+  },
+  "callbacks": [
+    { "name": "adjust", "params": ["f64"], "returns": "f64" },
+    { "name": "report", "params": ["string", "bytes", "bool"], "returns": "void" }
+  ],
+  "exports": [
+    { "export": "step", "symbol": "app_step", "params": ["f64"], "returns": "f64" },
+    { "export": "echo", "symbol": "app_echo", "params": ["string"], "returns": "string" },
+    { "export": "bytes", "symbol": "app_bytes", "params": ["bytes"], "returns": "bytes" },
+    { "export": "fail", "symbol": "app_fail", "params": [], "returns": "void" }
+  ]
+}

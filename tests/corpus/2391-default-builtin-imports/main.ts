@@ -4,8 +4,8 @@
 // so the binding exposes exactly the namespace-import surface — the same
 // tables `import * as fs` keys (a real CLI spells `import fs from
 // 'node:fs'` and `import path from 'path'` throughout). Without the
-// interop knob the SC1012 fence stands; with it, the checker accepted the
-// spelling and so does the lowering.
+// explicit or implied interop permission the SC1012 fence stands; with it,
+// the checker accepted the spelling and so does the lowering.
 import fs from "node:fs";
 import path from "path";
 import url from "node:url";

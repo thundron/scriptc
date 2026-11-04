@@ -2,7 +2,7 @@
   "profile_format": 1,
   "name": "int-trap",
   "entry": "lib.ts",
-  "emission": "c",
+  "emission": "llvm",
   "abi": {
     "prefix": "kt_",
     "init_symbol": "kt_init",

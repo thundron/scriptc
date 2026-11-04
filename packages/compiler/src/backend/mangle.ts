@@ -1,3 +1,5 @@
+import { unsignedHex } from "./literals.js";
+
 /* Name mangling. Distinct prefixes partition the C namespace:
  *   sc_f_  user functions        sc_l_  locals
  *   sc_t   emitter temporaries   sc_lit_ interned string literals
@@ -11,14 +13,31 @@
  * frontend, which separates name and counter with '.' exclusively.
  */
 
-function sanitize(name: string): string {
-  return name.replace(/[^A-Za-z0-9_]/g, (ch) =>
-    ch === "." ? "_" : `_x${ch.codePointAt(0)!.toString(16)}_`,
-  );
+function sanitize(name: string, property = false): string {
+  let result = "";
+  for (let i = 0; i < name.length; i++) {
+    const code = name.charCodeAt(i);
+    const ch = name.charAt(i);
+    result +=
+      code === 46 && !property
+        ? "_"
+        : (code >= 65 && code <= 90) ||
+            (code >= 97 && code <= 122) ||
+            (code >= 48 && code <= 57) ||
+            (code === 95 && !property)
+          ? ch
+          : `_x${unsignedHex(code)}_`;
+  }
+  return result;
 }
 
 export function mangleFunction(name: string): string {
   return `sc_f_${sanitize(name)}`;
+}
+
+/** Synchronous body whose proven parameters borrow from the caller. */
+export function mangleBorrowedFunction(name: string): string {
+  return `sc_bf_${sanitize(name)}`;
 }
 
 export function mangleLocal(localId: string): string {
@@ -36,12 +55,18 @@ export function mangleWrapper(fnName: string): string {
   return `sc_w_${sanitize(fnName)}`;
 }
 
+/** Env-signature wrapper of a declared function's borrowing body: the
+ * closure entry that lends every reference argument. */
+export function mangleBorrowingWrapper(fnName: string): string {
+  return `sc_wb_${sanitize(fnName)}`;
+}
+
 /** The interned (immortal) closure value of a declared function. */
 export function mangleFnClosure(fnName: string): string {
   return `sc_fc_${sanitize(fnName)}`;
 }
 
-/** Per-class emitted C struct and RC helpers. */
+/** Per-class emitted LLVM struct and RC helpers. */
 export function mangleClassStruct(className: string): string {
   return `sc_o_${sanitize(className)}`;
 }
@@ -63,7 +88,9 @@ export function mangleClassRelease(className: string): string {
   return `sc_release_${sanitize(className)}`;
 }
 export function mangleField(fieldName: string): string {
-  return `sc_fld_${sanitize(fieldName)}`;
+  // Property keys are arbitrary strings. Encode both dots and underscores
+  // so a literal key cannot collide with either a separator or an escape.
+  return `sc_fld_${sanitize(fieldName, true)}`;
 }
 /** Hierarchy classes only (an `extends` anywhere): the per-class DIRECT
  * release — the whole-object teardown stored in the class's vtable, which
@@ -81,6 +108,13 @@ export function mangleVtStruct(rootClassName: string): string {
  * differ before any user-controlled text, so the two can never collide. */
 export function mangleVtInstance(className: string): string {
   return `sc_vtable_${sanitize(className)}`;
+}
+/** The per-HIERARCHY array of the vtables of its classes in preorder, for
+ * hierarchies whose instances keep their class id in the rc word
+ * (classes.ts LlClassMeta.idInRc). `sc_vta_` differs from `sc_vtable_` and
+ * `sc_vtt_` before any user-controlled text. */
+export function mangleVtArray(rootClassName: string): string {
+  return `sc_vta_${sanitize(rootClassName)}`;
 }
 /** A virtual slot's member name inside the vtable struct. Sibling
  * branches of one hierarchy can each declare a slot for the SAME method
@@ -107,7 +141,7 @@ export function mangleClassGcFree(className: string): string {
   return `sc_gcfree_${sanitize(className)}`;
 }
 
-/** Per-record-shape emitted C struct and RC helpers. Shape ids are
+/** Per-record-shape emitted LLVM struct and RC helpers. Shape ids are
  * compiler-generated (`r0`, `r1`, ...), but the prefixes are still disjoint
  * from every class prefix above (sc_rs_X vs sc_o_Y, sc_rnew_X vs
  * sc_new_Y, ...) so no user class name can collide with a record symbol. */
@@ -145,6 +179,27 @@ export function mangleGlobal(globalId: string): string {
 export function mangleAsyncSpawn(fnName: string): string {
   return `sc_as_${sanitize(fnName)}`;
 }
+/** `await f(...)` of a direct async call: the call and its await as one
+ * entry that returns the awaited value. */
+export function mangleAsyncAwaitCall(fnName: string): string {
+  return `sc_aw_${sanitize(fnName)}`;
+}
+/** `return f(...)` of a direct async call in an async function: the call,
+ * the adoption turn, and the await as one entry returning the value. */
+export function mangleAsyncAdoptCall(fnName: string): string {
+  return `sc_ad_${sanitize(fnName)}`;
+}
+/** A stackless coroutine body's `await f(...)` of a fiberless async f: the
+ * body run in place, returning its result with any throw left pending; the
+ * coroutine takes the await's turn itself. */
+export function mangleAsyncInlineAwaitCall(fnName: string): string {
+  return `sc_ai_${sanitize(fnName)}`;
+}
+/** A stackless coroutine body's `await f(...)` of a stackless async f: the
+ * spawn of f's fiber record, which keeps its promise inside (direct await). */
+export function mangleAsyncDirectSpawn(fnName: string): string {
+  return `sc_dw_${sanitize(fnName)}`;
+}
 export function mangleTrampoline(fnName: string): string {
   return `sc_tr_${sanitize(fnName)}`;
 }
@@ -161,14 +216,10 @@ export function mangleGenSpawn(fnName: string): string {
 export function mangleGenDrop(fnName: string): string {
   return `sc_gd_${sanitize(fnName)}`;
 }
-/** Emitted ref-kind resolve thunk, interned per inner-type key. */
-export function mangleResolveThunk(n: number): string {
-  return `sc_rslv_${n}`;
-}
-/** Emitted generator-resume result builder (the IteratorResult record),
- * interned per generator-type key. */
-export function mangleGenResThunk(n: number): string {
-  return `sc_gres_${n}`;
+/** The never-started return() hook of a generator that closes its source
+ * argument (an iterator helper). */
+export function mangleGenSourceClose(fnName: string): string {
+  return `sc_gc_${sanitize(fnName)}`;
 }
 /** Emitted Promise.race fulfillment adapter (entry inner type → result
  * inner type), interned per type pair. */

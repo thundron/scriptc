@@ -1,0 +1,9 @@
+{
+  "name": "@internal/effect4-corpus",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "effect": "4.0.0",
+    "@effect/platform-node": "4.0.0"
+  }
+}

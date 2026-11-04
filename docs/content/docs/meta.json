@@ -1,0 +1,23 @@
+{
+  "title": "Documentation",
+  "pages": [
+    "---Get Started---",
+    "index",
+    "quickstart",
+    "---Guides---",
+    "coverage",
+    "dependencies",
+    "platforms",
+    "wasm",
+    "ffi",
+    "threads",
+    "contracts",
+    "experimental",
+    "native-objects",
+    "---Reference---",
+    "cli",
+    "limitations",
+    "[Node.js Compatibility](/compatibility)",
+    "how-it-works"
+  ]
+}

@@ -3,6 +3,30 @@
 // arrays, records, unions, Maps/Sets, undefined/null, regexes, symbols,
 // class instances. Plain STRING arguments print verbatim (never quoted);
 // nested strings quote — the classic console.log vs inspect distinction.
+import * as output from "node:console";
+import { log as print, info, debug, error, warn } from "console";
+
+print("imported %s %d", "log", 3);
+info("imported info", { a: 1 });
+debug("imported debug", [1, 2]);
+error("imported error", { ok: false });
+warn("imported warn", ["w"]);
+output.log("namespace", { n: -0 });
+output.error("namespace stderr");
+function consoleModule(): typeof output {
+  console.log("receiver first");
+  return output;
+}
+function logArgument(): string {
+  console.log("argument second");
+  return "argument";
+}
+consoleModule().log(logArgument());
+consoleModule().log("formatted %s", logArgument());
+function shadowPrint(print: (value: string) => void): void {
+  print("shadow");
+}
+shadowPrint((value: string) => console.log("local", value));
 
 // The motivating shapes: a find() miss union and plain undefined.
 const xs = [1, 2, 3];

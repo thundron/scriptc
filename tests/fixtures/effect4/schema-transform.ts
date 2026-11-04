@@ -1,0 +1,1 @@
+import * as Schema from "effect/Schema";import * as SchemaTransformation from "effect/SchemaTransformation";const S=Schema.String.pipe(Schema.decodeTo(Schema.Number,SchemaTransformation.transform({decode:s=>Number(s),encode:n=>String(n)})));console.log(Schema.decodeSync(S)("42"),Schema.encodeSync(S)(42))

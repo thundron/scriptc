@@ -1,0 +1,11 @@
+const shared = [1, 2, 3];
+const a = {values: shared}, b = {nested: {values: shared}};
+console.log('identity', a.values === b.nested.values, a.values === shared);
+a.values[1] = 8;
+console.log('write', shared[1], b.nested.values[1]);
+shared.push(4);
+console.log('push', a.values.length, b.nested.values.join(','));
+b.nested.values.pop();
+console.log('pop', shared.length, a.values.join(','));
+const separate = {values: [1, 8, 3]};
+console.log('distinct', separate.values === a.values);

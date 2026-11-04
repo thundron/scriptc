@@ -7,7 +7,7 @@
 //   node gen-url-cases.mjs > url-cases.txt
 //
 // Each line: <op>\t<arg-hex>\t<expected-hex>; expected is "OK:<value>" or
-// "ERR:<name>: <message>" (what scr_caught_to_string renders). Node v24
+// "ERR:<name>: <message>" (the fields test_url.c compares). Node v24
 // required; chdir("/") first (pathToFileURL resolves relative paths
 // against the cwd — test_url.c chdir's to the same place).
 //
@@ -114,7 +114,7 @@ const paths = [
   "..",
   "\\rooted\\x",
   "/rooted/y",
-  "C:\\a?#[]^|`{}\"<>",
+  'C:\\a?#[]^|`{}"<>',
   "C:\\a\nb\tc\rd",
   "C:\\per%25cent",
   "\\\\server\\share",
@@ -163,7 +163,7 @@ for (const u of posixUrls) emit("u2p-posix", u, () => fileURLToPath(u, { windows
 const posixPaths = [
   "/tmp/a b/c%d",
   "/tmp/é🌍",
-  "/a[]^|`{}\"<>?#z",
+  '/a[]^|`{}"<>?#z',
   "/back\\slash",
   "/trailing/",
   "/trailing//",

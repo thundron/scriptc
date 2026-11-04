@@ -1,7 +1,10 @@
 import { InternalCompilerError } from "../errors.js";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { extname } from "node:path";
-import ts from "typescript5";
+import type ts from "typescript5";
+
+const require = createRequire(import.meta.url);
 
 interface SemanticToken {
   kind: "token" | "comment";
@@ -11,7 +14,8 @@ interface SemanticToken {
   end: number;
 }
 
-const TOKEN_PATTERN = /(?:\s+|\/\/[^\r\n\u2028\u2029]*|\/\*[\s\S]*?\*\/|(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(?:0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)|(?:(?:[$_\p{ID_Start}]|\\u(?:[0-9a-fA-F]{4}|\{[0-9a-fA-F]+\}))(?:(?:[$_\u200C\u200D\p{ID_Continue}]|\\u(?:[0-9a-fA-F]{4}|\{[0-9a-fA-F]+\})))*)|(?:===|!==|>>>|>>=|<<=|\*\*=|&&=|\|\|=|\?\?=|=>|==|!=|<=|>=|\+\+|--|&&|\|\||\?\?|\?\.|\*\*|<<|>>>|>>|\+=|-=|\*=|\/=|%=|&=|\|=|\^=)|[^\s])/guy;
+const TOKEN_PATTERN =
+  /(?:\s+|\/\/[^\r\n\u2028\u2029]*|\/\*[\s\S]*?\*\/|(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(?:0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)|(?:(?:[$_\p{ID_Start}]|\\u(?:[0-9a-fA-F]{4}|\{[0-9a-fA-F]+\}))(?:(?:[$_\u200C\u200D\p{ID_Continue}]|\\u(?:[0-9a-fA-F]{4}|\{[0-9a-fA-F]+\})))*)|(?:===|!==|>>>|>>=|<<=|\*\*=|&&=|\|\|=|\?\?=|=>|==|!=|<=|>=|\+\+|--|&&|\|\||\?\?|\?\.|\*\*|<<|>>>|>>|\+=|-=|\*=|\/=|%=|&=|\|=|\^=)|[^\s])/guy;
 
 const LINE_BREAK_PATTERN = /[\r\n\u2028\u2029]/;
 
@@ -32,15 +36,18 @@ function semanticTokens(path: string, source: string): SemanticToken[] | null {
   // both syntax validity (including a shebang's byte-zero requirement) and
   // exact regular-expression spans, then keep the cheap scanner for trivia
   // equivalence and location mapping.
-  const sourceFile = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
-  const parseDiagnostics = (sourceFile as ts.SourceFile & {
-    parseDiagnostics: readonly ts.Diagnostic[];
-  }).parseDiagnostics;
+  const parser = require("typescript5") as typeof ts;
+  const sourceFile = parser.createSourceFile(path, source, parser.ScriptTarget.Latest, true);
+  const parseDiagnostics = (
+    sourceFile as ts.SourceFile & {
+      parseDiagnostics: readonly ts.Diagnostic[];
+    }
+  ).parseDiagnostics;
   if (parseDiagnostics.length > 0) return null;
   const regexEnds = new Map<number, number>();
   const collectRegex = (node: ts.Node): void => {
-    if (ts.isRegularExpressionLiteral(node)) regexEnds.set(node.getStart(sourceFile), node.end);
-    ts.forEachChild(node, collectRegex);
+    if (parser.isRegularExpressionLiteral(node)) regexEnds.set(node.getStart(sourceFile), node.end);
+    parser.forEachChild(node, collectRegex);
   };
   collectRegex(sourceFile);
 
@@ -49,7 +56,8 @@ function semanticTokens(path: string, source: string): SemanticToken[] | null {
   TOKEN_PATTERN.lastIndex = 0;
   while (TOKEN_PATTERN.lastIndex < source.length) {
     const match = TOKEN_PATTERN.exec(source);
-    if (match === null) throw new InternalCompilerError(`semantic scanner stopped at ${TOKEN_PATTERN.lastIndex}`);
+    if (match === null)
+      throw new InternalCompilerError(`semantic scanner stopped at ${TOKEN_PATTERN.lastIndex}`);
     let text = match[0]!;
     const start = match.index;
     let end = start + text.length;
@@ -80,12 +88,17 @@ function semanticTokens(path: string, source: string): SemanticToken[] | null {
 }
 
 function tokensEqual(left: readonly SemanticToken[], right: readonly SemanticToken[]): boolean {
-  return left.length === right.length && left.every((token, index) => {
-    const other = right[index]!;
-    return token.kind === other.kind &&
-      token.text === other.text &&
-      (index === 0 || token.lineBreakBefore === other.lineBreakBefore);
-  });
+  return (
+    left.length === right.length &&
+    left.every((token, index) => {
+      const other = right[index]!;
+      return (
+        token.kind === other.kind &&
+        token.text === other.text &&
+        (index === 0 || token.lineBreakBefore === other.lineBreakBefore)
+      );
+    })
+  );
 }
 
 /** Content identity after discarding TypeScript comments proven to be trivia. */
@@ -94,18 +107,18 @@ export function semanticSourceDigest(path: string, source: string): string {
   const tokens = semanticTokens(path, source);
   if (tokens === null) return hash.update("invalid\0").update(source).digest("hex");
   for (const token of tokens) {
-    hash.update(String(token.kind)).update("\0")
-      .update(token.lineBreakBefore ? "nl" : "same-line").update("\0")
-      .update(token.text).update("\0");
+    hash
+      .update(String(token.kind))
+      .update("\0")
+      .update(token.lineBreakBefore ? "nl" : "same-line")
+      .update("\0")
+      .update(token.text)
+      .update("\0");
   }
   return hash.digest("hex");
 }
 
-export function semanticallyEqualSource(
-  path: string,
-  previous: string,
-  current: string,
-): boolean {
+export function semanticallyEqualSource(path: string, previous: string, current: string): boolean {
   const left = semanticTokens(path, previous);
   const right = semanticTokens(path, current);
   return left !== null && right !== null && tokensEqual(left, right);
@@ -175,7 +188,7 @@ function lineAt(starts: readonly number[], offset: number): number {
 }
 
 /** Build a cheap old-line to current-line mapper for semantically identical
- * sources. C emission records only a location's line, not its byte offset, so
+ * sources. The emitted location metadata uses line numbers, so
  * representative semantic tokens anchor each old line across trivia edits. */
 export function createSourceLineRebaser(
   path: string,
@@ -198,9 +211,8 @@ export function createSourceLineRebaser(
   return (line): number => {
     if (!Number.isSafeInteger(line) || line < 1 || line > oldStarts.length) return line;
     const tokenIndex = firstTokenByLine.get(line);
-    const offset = tokenIndex === undefined
-      ? mapper.start(oldStarts[line - 1]!)
-      : newTokens[tokenIndex]!.start;
+    const offset =
+      tokenIndex === undefined ? mapper.start(oldStarts[line - 1]!) : newTokens[tokenIndex]!.start;
     return lineAt(newStarts, offset);
   };
 }
@@ -220,16 +232,14 @@ export function sourceLineRebaseIsIdentity(
   }
   const oldStarts = lineStarts(previous);
   const newStarts = lineStarts(current);
-  // The C emitter counts only LF bytes. TypeScript also treats bare CR and
+  // The emitted location metadata counts LF bytes. TypeScript also treats bare CR and
   // the Unicode separators as line breaks, so normalizing one of those to LF
   // preserves semantic tokens while moving later annotations to a different
   // emitter line. Check every corresponding token, including multiple
   // TypeScript lines that the emitter previously collapsed into one.
   for (let index = 0; index < oldTokens.length; index++) {
-    if (
-      lineAt(oldStarts, oldTokens[index]!.start) !==
-      lineAt(newStarts, newTokens[index]!.start)
-    ) return false;
+    if (lineAt(oldStarts, oldTokens[index]!.start) !== lineAt(newStarts, newTokens[index]!.start))
+      return false;
   }
   const rebase = createSourceLineRebaser(path, previous, current);
   let line = 1;

@@ -12,7 +12,7 @@
  * This pass runs once per lowered statement (lowerStmts calls it inside the
  * per-statement poison window) and re-checks every libCall / strIntrinsic /
  * regexIntrinsic / arrIntrinsic / callValue argument against the SAME
- * signature tables the validator enforces (exported from ir/validate.ts —
+ * signature tables the validator enforces (owned by the IR contract —
  * one table, two consumers, no drift):
  *
  *   - a dyn argument whose slot dynCheck can validate (JSON-safe types,
@@ -36,10 +36,29 @@
  * The pass never rewrites a well-typed argument: typeEquals matches are
  * untouched, so byte-stability holds for every program that lowered
  * cleanly before. The validator stays the backstop for anything else. */
+import {
+  everyExprChild,
+  everyStmtChild,
+  mapExprChildren,
+  mapStmtChildren,
+} from "../../ir/traverse.js";
 import type { Lowerer } from "./lowerer.js";
 import { PoisonError } from "./lowerer.js";
-import { canAdaptDynFuncTo, canMarshalTypedFuncIntoIsland, DYN, IrExpr, IrType, JSVAL, SrcLoc, STRING, isUnitType, typeEquals } from "../../ir/ir.js";
-import { LIB_FN_SIGS, REGEX_INTRINSIC_SIGS, STR_INTRINSIC_SIGS } from "../../ir/validate.js";
+import {
+  canAdaptDynFuncTo,
+  DYN,
+  DYN_HANDLE_KINDS,
+  type IrExpr,
+  type IrStmt,
+  type IrType,
+  type SrcLoc,
+  STRING,
+  isDynTypedRefType,
+  isUnitType,
+  typeEquals,
+} from "../../ir/ir.js";
+import { libFnSignatures } from "../../ir/builtin-signatures.js";
+import { REGEX_INTRINSIC_SIGS, STR_INTRINSIC_SIGS } from "../../ir/intrinsic-signatures.js";
 import { unionMismatchDiag, unsupportedDiag } from "../../diagnostics/diagnostic.js";
 
 /** What a dynCheck can validate — coerceToExpected's dyn→typed domain,
@@ -51,12 +70,26 @@ function dynCheckable(lowerer: Lowerer, want: IrType): boolean {
   if (lowerer.jsonSafe(want)) return true;
   if (want.kind === "bytes" && want.elem === "u8") return true;
   if (want.kind === "object" && want.className === "%Error") return true;
+  if (isDynTypedRefType(want) || DYN_HANDLE_KINDS.has(want.kind)) return true;
   if (want.kind === "func") {
-    return canAdaptDynFuncTo(want, (id) => lowerer.shapes.get(id), (id) => lowerer.unions.get(id));
+    return canAdaptDynFuncTo(
+      want,
+      (id) => lowerer.shapes.get(id),
+      (id) => lowerer.unions.get(id),
+    );
   }
   if (want.kind === "union") {
     const def = lowerer.unions.get(want.unionId);
-    return !!def && def.arms.every((a) => a.kind === "undefinedT" || lowerer.jsonSafe(a));
+    return (
+      !!def &&
+      def.arms.every(
+        (a) =>
+          a.kind === "undefinedT" ||
+          lowerer.jsonSafe(a) ||
+          isDynTypedRefType(a) ||
+          DYN_HANDLE_KINDS.has(a.kind),
+      )
+    );
   }
   return false;
 }
@@ -66,34 +99,42 @@ function dynCheckable(lowerer: Lowerer, want: IrType): boolean {
  * statement takes the runtime-fence path in JS sources. */
 function coerceSlot(lowerer: Lowerer, arg: IrExpr, want: IrType, what: string): IrExpr {
   if (typeEquals(arg.type, want)) return arg;
-  // An ISLAND value in a typed intrinsic slot (`/x/.test(anyText)`,
-  // `" ".repeat(anyN)` — checker-`any` arguments the surface signatures
-  // accept): the VALIDATED island exit, exactly the dynCheck stance one
-  // branch down — strict for primitives, JSON round-trip for composites,
-  // a lying handle throws the catchable TypeError. Targets outside the
-  // exit set keep the named fence.
-  if (arg.type.kind === "jsval" && want.kind !== "jsval") {
-    // A jsval into a dyn slot: the by-reference jsval→dyn wrap — the same
-    // edge coerceToExpected converts (dyn slots accept engine values;
-    // world unification's engine-handle kind).
-    if (want.kind === "dyn") {
-      return { kind: "dynFromJsval", value: arg, type: DYN, loc: arg.loc };
-    }
-    if (lowerer.boundaryExitSafe(want)) {
-      return { kind: "jsExit", value: arg, type: want, loc: arg.loc };
-    }
-    fence(lowerer, "SC1100", arg.loc, `passing 'any'-typed values where '${lowerer.fmt(want)}' is expected (${what})`);
-  }
+
+  // Checked-value arguments validate against supported native slot types.
+  // A mismatch throws a catchable TypeError; unsupported targets refuse.
   if (arg.type.kind === "dyn" && want.kind !== "dyn") {
     if (dynCheckable(lowerer, want)) {
       return { kind: "dynCheck", value: arg, type: want, loc: arg.loc };
     }
-    fence(lowerer, "SC1100", arg.loc, `passing 'unknown' values where '${lowerer.fmt(want)}' is expected (${what})`);
+    fence(
+      lowerer,
+      "SC1100",
+      arg.loc,
+      `passing 'unknown' values where '${lowerer.fmt(want)}' is expected (${what})`,
+    );
   }
   if (isUnitType(arg.type) && want.kind !== "union" && !isUnitType(want)) {
-    fence(lowerer, "SC1090", arg.loc, `'${arg.type.kind === "undefinedT" ? "undefined" : "null"}' values where '${lowerer.fmt(want)}' is expected (${what})`);
+    fence(
+      lowerer,
+      "SC1090",
+      arg.loc,
+      `'${arg.type.kind === "undefinedT" ? "undefined" : "null"}' values where '${lowerer.fmt(want)}' is expected (${what})`,
+    );
   }
   if (arg.type.kind === "union" && want.kind !== "union" && !containsDynOrUnit(want)) {
+    // A stored union at a slot whose signature names one concrete type: the
+    // checker approved the call, so the SITE's type is that slot type and the
+    // stored union is the declaration's wider one — an absence arm the
+    // compiler itself carries (a checked-dynamic JSON stringify's
+    // `string | undefined`), a stale capture, a widened inferred return.
+    // That is coerceToExpected's checked ARM rule, not a refusal to lay the
+    // union out: the proven arm's payload comes out, every other arm throws
+    // the existing catchable TypeError (divergence 38 — sound narrowing
+    // never reaches them). A union with no such arm keeps the refusal.
+    if (lowerer.armTag(arg.type.unionId, want) >= 0) {
+      const narrowed = lowerer.coerceToExpected(arg, want);
+      if (typeEquals(narrowed.type, want)) return narrowed;
+    }
     lowerer.pushDiag(unionMismatchDiag(lowerer.fmt(want), lowerer.fmt(arg.type), arg.loc));
     throw new PoisonError();
   }
@@ -116,20 +157,25 @@ function fence(lowerer: Lowerer, code: "SC1090" | "SC1100", loc: SrcLoc, feature
  * signature-table argument slot. Idempotent: a wrapped argument matches its
  * slot on a revisit (nested statement lists are walked by their own
  * lowerStmts call first, then again inside the enclosing statement). */
-export function enforceLibBoundary(lowerer: Lowerer, node: unknown): void {
-  if (node === null || typeof node !== "object") return;
-  if (Array.isArray(node)) {
-    for (const item of node) enforceLibBoundary(lowerer, item);
-    return;
-  }
-  const rec = node as Record<string, unknown>;
-  for (const key of Object.keys(rec)) {
-    if (key !== "loc") enforceLibBoundary(lowerer, rec[key]);
-  }
-  const kind = rec["kind"];
+export function enforceLibBoundary(lowerer: Lowerer, node: IrStmt | IrStmt[]): void {
+  const stmt = (value: IrStmt): boolean => everyStmtChild(value, expr, stmt);
+  const expr = (value: IrExpr): boolean => {
+    everyExprChild(value, expr, stmt);
+    enforceExprBoundary(lowerer, value);
+    return true;
+  };
+  if (Array.isArray(node))
+    node.forEach((value) => {
+      stmt(value);
+    });
+  else stmt(node);
+}
+
+function enforceExprBoundary(lowerer: Lowerer, node: IrExpr): void {
+  const kind = node.kind;
   if (kind === "libCall") {
-    const e = rec as unknown as Extract<IrExpr, { kind: "libCall" }>;
-    const sig = LIB_FN_SIGS[e.fn];
+    const e = node;
+    const sig = libFnSignatures()[e.fn];
     if (!sig) return;
     e.args.forEach((a, i) => {
       const want = sig.argTypes[i];
@@ -138,7 +184,7 @@ export function enforceLibBoundary(lowerer: Lowerer, node: unknown): void {
     return;
   }
   if (kind === "strIntrinsic") {
-    const e = rec as unknown as Extract<IrExpr, { kind: "strIntrinsic" }>;
+    const e = node;
     e.receiver = coerceSlot(lowerer, e.receiver, STRING, `the receiver of .${e.method}`);
     const sig = STR_INTRINSIC_SIGS[e.method];
     if (!sig) return;
@@ -149,7 +195,7 @@ export function enforceLibBoundary(lowerer: Lowerer, node: unknown): void {
     return;
   }
   if (kind === "regexIntrinsic") {
-    const e = rec as unknown as Extract<IrExpr, { kind: "regexIntrinsic" }>;
+    const e = node;
     const sig = REGEX_INTRINSIC_SIGS[e.method];
     if (!sig) return;
     e.receiver = coerceSlot(lowerer, e.receiver, sig.receiver, `the receiver of .${e.method}`);
@@ -160,33 +206,38 @@ export function enforceLibBoundary(lowerer: Lowerer, node: unknown): void {
     return;
   }
   if (kind === "arrIntrinsic") {
-    const e = rec as unknown as Extract<IrExpr, { kind: "arrIntrinsic" }>;
-    if (e.receiver.type.kind === "dyn" || e.receiver.type.kind === "jsval" || isUnitType(e.receiver.type)) {
-      // No element type exists to validate a dyn receiver against — the
-      // honest answer is the operations-on-unknown fence. An island
-      // (jsval) receiver fences too: the exit would COPY the engine
-      // array, so a static intrinsic over it silently mutates the copy —
-      // the producing sites route jsval receivers through the engine's
-      // own methods instead. Other non-array receivers stay the
+    const e = node;
+    if (e.receiver.type.kind === "dyn" || isUnitType(e.receiver.type)) {
+      // No element type exists to validate a checked-value receiver against.
+      // Copying it would redirect mutations, so use its native checked-value
+      // methods instead. Other non-array receivers stay the
       // validator's ICE (frontend breakage, not a checked-dynamic
       // escape).
-      fence(lowerer, "SC1100", e.receiver.loc, `'.${e.method}()' on '${lowerer.fmt(e.receiver.type)}' array receivers`);
+      fence(
+        lowerer,
+        "SC1100",
+        e.receiver.loc,
+        `'.${e.method}()' on '${lowerer.fmt(e.receiver.type)}' array receivers`,
+      );
     }
     return;
   }
   if (kind === "callValue") {
-    const e = rec as unknown as Extract<IrExpr, { kind: "callValue" }>;
-    if (e.callee.type.kind === "dyn" || e.callee.type.kind === "jsval" || isUnitType(e.callee.type)) {
+    const e = node;
+    if (e.callee.type.kind === "dyn" || isUnitType(e.callee.type)) {
       fence(lowerer, "SC1100", e.loc, `calling '${lowerer.fmt(e.callee.type)}' values`);
     }
     if (e.callee.type.kind !== "func") return; // validator's ICE otherwise
     const params = e.callee.type.params;
-    if (e.args.length !== params.length) {
+    // A checked-dynamic variadic value hides one trailing dyn array after
+    // its declared parameters (the slot its lifted signature carries).
+    const hidden = e.callee.type.rest === true && e.callee.type.restAbi === undefined ? 1 : 0;
+    if (e.args.length !== params.length + hidden) {
       fence(
         lowerer,
         "SC1090",
         e.loc,
-        `calling a function value with ${e.args.length} argument${e.args.length === 1 ? "" : "s"} where its lowered signature takes ${params.length}`,
+        `calling a function value with ${e.args.length} argument${e.args.length === 1 ? "" : "s"} where its lowered signature takes ${params.length + hidden}`,
       );
     }
     e.args.forEach((a, i) => {
@@ -195,62 +246,102 @@ export function enforceLibBoundary(lowerer: Lowerer, node: unknown): void {
     });
     return;
   }
-  if (kind === "jsOp") {
-    // Engine-op arguments must be jsval. The producing sites marshal with
-    // jsvalIn, but a checker-`any` expression can LOWER to another world
-    // (dyn.this, the checked-dynamic tree WeakSet placeholder, JS rest-args) — re-apply
-    // jsvalIn's rules here: units become the engine's own units, typed
-    // values with an island representation marshal in, and dyn values (no
-    // dyn→engine bridge that preserves handles/functions) fence with
-    // jsvalIn's own message.
-    const e = rec as unknown as Extract<IrExpr, { kind: "jsOp" }>;
-    e.args.forEach((a, i) => {
-      if (a.type.kind === "jsval") return;
-      if (isUnitType(a.type)) {
-        e.args[i] = { kind: "jsOp", op: a.type.kind === "undefinedT" ? "undefLit" : "nullLit", args: [], type: JSVAL, loc: a.loc };
-        return;
-      }
-      if (a.type.kind === "dyn") {
-        fence(lowerer, "SC1100", a.loc, "passing 'unknown' values into dynamically-executed ('any'-typed) code (validate with 'as <type>' first)");
-      }
-      if (
-        lowerer.boundarySafe(a.type) ||
-        (a.type.kind === "func" && canMarshalTypedFuncIntoIsland(a.type, (id) => lowerer.shapes.get(id), (id) => lowerer.unions.get(id)))
-      ) {
-        e.args[i] = { kind: "jsMarshal", value: a, type: JSVAL, loc: a.loc };
-        return;
-      }
-      fence(lowerer, "SC1090", a.loc, `'${lowerer.fmt(a.type)}' values crossing into dynamically-executed ('any'-typed) code`);
-    });
-    return;
-  }
   if (kind === "dynCall" || kind === "dynInvoke") {
-    // Checked-dynamic call arguments must be dyn. Convertible typed values
-    // take the ordinary dynFrom crossing; island values have NO bridge
-    // into the checked-dynamic tree (a jsval handle cannot ride the deep-copy), so they
-    // fence — named, catchable at runtime in JS sources, never an ICE.
-    const e = rec as unknown as Extract<IrExpr, { kind: "dynCall" | "dynInvoke" }>;
+    // Checked-value call arguments must be dyn. Convert supported typed
+    // values and refuse the rest with a named diagnostic.
+    const e = node;
     if (kind === "dynInvoke") {
       const inv = e as Extract<IrExpr, { kind: "dynInvoke" }>;
       if (inv.recv.type.kind !== "dyn") {
-        fence(lowerer, "SC1100", inv.recv.loc, `'.${inv.method}()' calls through '${lowerer.fmt(inv.recv.type)}' receivers in checked-dynamic positions`);
+        fence(
+          lowerer,
+          "SC1100",
+          inv.recv.loc,
+          `'.${inv.method}()' calls through '${lowerer.fmt(inv.recv.type)}' receivers in checked-dynamic positions`,
+        );
       }
     }
     e.args.forEach((a, i) => {
       if (a.type.kind === "dyn") return;
-      if (a.type.kind === "jsval") {
-        // An island value in a checked-dynamic argument slot: the
-        // jsval→dyn crossing (by-reference wrap, scalars normalized) —
-        // the routed call converts it back by reference at the boundary.
-        e.args[i] = { kind: "dynFromJsval", value: a, type: DYN, loc: a.loc };
-        return;
-      }
+
       if (a.kind === "unitLit" || lowerer.dynConvertible(a.type)) {
         e.args[i] = { kind: "dynFrom", value: a, type: DYN, loc: a.loc };
         return;
       }
-      fence(lowerer, "SC1100", a.loc, `passing '${lowerer.fmt(a.type)}' values into calls through 'unknown' values`);
+      fence(
+        lowerer,
+        "SC1100",
+        a.loc,
+        `passing '${lowerer.fmt(a.type)}' values into calls through 'unknown' values`,
+      );
     });
     return;
   }
+}
+
+/** JavaScript evaluates surplus arguments before invoking a fixed native callback. */
+export function lowerSurplusCalls(lowerer: Lowerer, body: IrStmt[]): IrStmt[] {
+  const stmt = (value: IrStmt): IrStmt => {
+    // Only JavaScript permits this call shape. Preserve untouched IR
+    // identities, including the compiler's own recursive union layouts.
+    let needed = false;
+    const inspectStmt = (node: IrStmt): boolean => everyStmtChild(node, inspectExpr, inspectStmt);
+    const inspectExpr = (node: IrExpr): boolean => {
+      // A checked-dynamic variadic's trailing argument IS part of its
+      // lowered signature (the hidden rest array), not a surplus one.
+      if (
+        node.kind === "callValue" &&
+        node.callee.type.kind === "func" &&
+        !(node.callee.type.rest === true && node.callee.type.restAbi === undefined) &&
+        node.args.length > node.callee.type.params.length &&
+        /\.(?:[cm]?js)$/.test(node.loc.file)
+      )
+        needed = true;
+      return everyExprChild(node, inspectExpr, inspectStmt);
+    };
+    inspectStmt(value);
+    if (!needed) return value;
+    const next = mapStmtChildren(value, expr, stmt);
+    if (next.kind === "return")
+      for (const entry of lowerer.ctx.inferReturn?.entries ?? []) {
+        if (entry.stmt === value) entry.stmt = next;
+      }
+    return next;
+  };
+  const expr = (value: IrExpr): IrExpr => {
+    const e = mapExprChildren(value, expr, stmt);
+    if (e.kind !== "callValue" || e.callee.type.kind !== "func") return e;
+    const params = e.callee.type.params;
+    if (
+      e.args.length > params.length &&
+      !(e.callee.type.rest === true && e.callee.type.restAbi === undefined) &&
+      /\.(?:[cm]?js)$/.test(e.loc.file)
+    ) {
+      const callee = lowerer.declareHiddenLocal("%surplusCallee", e.callee.type);
+      const stmts: IrStmt[] = [{ kind: "varDecl", localId: callee.id, init: e.callee, loc: e.loc }];
+      let receiver = e.receiver;
+      if (receiver) {
+        const local = lowerer.declareHiddenLocal("%surplusReceiver", receiver.type);
+        stmts.push({ kind: "varDecl", localId: local.id, init: receiver, loc: receiver.loc });
+        receiver = { kind: "varRef", localId: local.id, type: receiver.type, loc: receiver.loc };
+      }
+      const args = e.args.map((value) => {
+        const local = lowerer.declareHiddenLocal("%surplusArgument", value.type);
+        stmts.push({ kind: "varDecl", localId: local.id, init: value, loc: value.loc });
+        return { kind: "varRef" as const, localId: local.id, type: local.type, loc: value.loc };
+      });
+      const result: IrExpr = {
+        ...e,
+        callee: { kind: "varRef", localId: callee.id, type: e.callee.type, loc: e.loc },
+        args: args.slice(0, params.length),
+      };
+      if (receiver) result.receiver = receiver;
+      result.args.forEach((value, i) => {
+        result.args[i] = coerceSlot(lowerer, value, params[i]!, `argument ${i + 1} of the call`);
+      });
+      return { kind: "seqExpr", stmts, result, type: e.type, loc: e.loc };
+    }
+    return e;
+  };
+  return body.map(stmt);
 }

@@ -2,12 +2,12 @@
 
 #include <stdlib.h>
 
-/* The process-global retained-registration ledger. Format-4 script-thread
+/* The context-local retained-registration ledger. Format-4 script-thread
  * tables use the lock-free path in this always-linked unit. Format-5 foreign
  * tables install an optional teardown hook owned by scr_ffi_queue.c, keeping
  * all queue/thread machinery out of unrelated binaries. */
-static ScrFfiTable *scr_ffi_tables;
-static bool scr_ffi_exit_registered;
+static SCR_TL ScrFfiTable *scr_ffi_tables;
+static SCR_TL bool scr_ffi_exit_registered;
 
 static void scr_ffi_oom(void) { scr_trap("scriptc: out of memory\n"); }
 
@@ -136,4 +136,8 @@ void scr_ffi_release(ScrFfiTable *table, ScrClosure *callback) {
     return;
   }
   scr_trap("scriptc: releasing a native callback registration that does not exist\n");
+}
+
+void scr_ffi_release_optional(ScrFfiTable *table, ScrClosure *callback) {
+  if (callback) scr_ffi_release(table, callback);
 }

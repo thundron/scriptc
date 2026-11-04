@@ -1,7 +1,21 @@
+import { resolveBuildCacheRoot } from "./cache-root.js";
+export { resolveBuildCacheRoot, resolveCompilerStateRoot } from "./cache-root.js";
 import { createHash } from "node:crypto";
-import { chmod, copyFile, mkdir, readdir, readFile, rename, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import {
+  chmod,
+  copyFile,
+  link,
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  unlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 
 export async function fileExists(path: string): Promise<boolean> {
   return stat(path).then(
@@ -13,6 +27,22 @@ export async function fileExists(path: string): Promise<boolean> {
 export function protectCachedArtifact(paths: Set<string> | undefined, path: string): void {
   paths?.add(path);
   paths?.add(cacheDigestPath(path));
+}
+
+/** Pin a cache input for an active build and promote its shared name in the
+ * LRU. Copies cover filesystem boundaries; eviction after a successful link
+ * may remove the shared name without invalidating the staged input. */
+export async function stageCachedFile(
+  source: string,
+  destination: string,
+  accessedAt: Date,
+): Promise<void> {
+  try {
+    await link(source, destination);
+  } catch {
+    await copyFile(source, destination);
+  }
+  await utimes(source, accessedAt, accessedAt).catch(() => undefined);
 }
 
 export function privateSiblingPath(destination: string, label: string): string {
@@ -42,28 +72,6 @@ export async function installArtifact(
   } finally {
     await rm(tmp, { force: true }).catch(() => undefined);
   }
-}
-
-/** Resolve the build cache without touching the filesystem. Exported from this
- * internal module so its platform and override behavior can be pinned directly. */
-export function resolveBuildCacheRoot(
-  env: NodeJS.ProcessEnv = process.env,
-  platform: NodeJS.Platform = process.platform,
-  userHome: string = homedir(),
-): string | null {
-  if (env["SCRIPTC_NO_CACHE"] === "1") return null;
-  const configured = env["SCRIPTC_CACHE_DIR"];
-  if (configured !== undefined) return configured === "" ? null : resolve(configured);
-
-  const xdg = env["XDG_CACHE_HOME"];
-  if (xdg !== undefined && xdg !== "") return resolve(xdg, "scriptc", "build");
-  if (platform === "win32") {
-    const local = env["LOCALAPPDATA"];
-    if (local !== undefined && local !== "") return resolve(local, "scriptc", "cache", "build");
-  }
-  return platform === "darwin"
-    ? resolve(userHome, "Library", "Caches", "scriptc", "build")
-    : resolve(userHome, ".cache", "scriptc", "build");
 }
 
 /** Shared persistent-cache root for compiler-level tiers.  The early library
@@ -101,10 +109,7 @@ export function cacheRootDir(): string | null {
  * per-user LOCALAPPDATA ACL. POSIX platform-default roots are hardened for
  * upgrades; an arbitrary existing SCRIPTC_CACHE_DIR override is never chmod'd
  * and participates only when its caller-provided mode is already private. */
-export async function ensurePrivateCacheRoot(
-  root: string,
-  hardenExisting: boolean,
-): Promise<void> {
+export async function ensurePrivateCacheRoot(root: string, hardenExisting: boolean): Promise<void> {
   const existing = await stat(root).then(
     (info) => info,
     (error: NodeJS.ErrnoException) => {
@@ -134,7 +139,9 @@ export function cacheDigestPath(path: string): string {
 }
 
 export async function fileDigest(path: string): Promise<string> {
-  return createHash("sha256").update(await readFile(path)).digest("hex");
+  return createHash("sha256")
+    .update(await readFile(path))
+    .digest("hex");
 }
 
 /** Cache entries are disposable data, not trusted compiler output. Atomic
@@ -215,7 +222,10 @@ export async function publishCachedFile(source: string, destination: string): Pr
  * mtimes. Active links use private staged names/hard links, so cache names can
  * be unlinked safely. */
 const rootWriteCounts = new Map<string, number>();
-export async function pruneCache(root: string, protectedPaths?: ReadonlySet<string>): Promise<void> {
+export async function pruneCache(
+  root: string,
+  protectedPaths?: ReadonlySet<string>,
+): Promise<void> {
   const configuredCap = process.env["SCRIPTC_CACHE_MAX_MB"];
   const writes = (rootWriteCounts.get(root) ?? 0) + 1;
   rootWriteCounts.set(root, writes);
@@ -235,7 +245,8 @@ export async function pruneCache(root: string, protectedPaths?: ReadonlySet<stri
           ent.name.startsWith(".scriptc-") ||
           ent.name.startsWith(".tmp-") ||
           ent.name.includes(".tmp-")
-        ) continue;
+        )
+          continue;
         if (protectedPaths?.has(p)) continue;
         const s = await stat(p).catch(() => null);
         if (s !== null) files.push({ path: p, size: s.size, mtimeMs: s.mtimeMs });

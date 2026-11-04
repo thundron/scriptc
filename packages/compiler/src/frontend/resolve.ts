@@ -5,23 +5,44 @@
  * TypeScript world cross this module, so both lanes may share it.
  *
  * The contract is PARITY with typescript@5.9.3's answers under scriptc's
- * fixed resolution options (moduleResolution bundler, allowJs, checkJs,
- * resolveJsonModule, allowImportingTsExtensions — program.ts's
- * COMPILER_OPTIONS): candidate lists below are transcribed from probed
- * failedLookupLocations of ts.resolveModuleName / the resolved answers on
+ * fixed resolution options plus the active project's normalized `paths`
+ * mappings (moduleResolution bundler, allowJs, checkJs, resolveJsonModule,
+ * allowImportingTsExtensions — program.ts's COMPILER_OPTIONS): candidate
+ * lists below are transcribed from probed failedLookupLocations of
+ * ts.resolveModuleName / the resolved answers on
  * the fixture tree, and the resolver parity suite (test/ts7/resolver-
  * parity.test.ts) sweeps every specifier of the whole corpus through BOTH
  * implementations and requires identical answers. Change 5.9.3's options
  * and these tables are wrong — that is what the suite is for. */
 
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { isNpmStaticPackage, npmStaticPackageOfPath, npmStaticTransformPkgJson } from "./npm-static.js";
+import {
+  isNpmStaticPackage,
+  npmStaticActive,
+  npmStaticPackageOfPath,
+  npmStaticTransformPkgJson,
+} from "./npm-static.js";
+import {
+  clearPackageShimCaches,
+  isUnloadedPackage,
+  packageShimFor,
+  throughBundledShimForwarder,
+} from "./package-shims.js";
 import { provenanceEntryFor } from "./provenance-registry.js";
-import { trackedAccessibleEntries, trackedDirectoryExists, trackedExists, trackedFileExists, trackedReadFile, trackedRealpath } from "./input-tracker.js";
-import { packageNameOfSpecifier } from "./workspace-registry.js";
+import {
+  trackedAccessibleEntries,
+  trackedDirectoryExists,
+  trackedExists,
+  trackedFileExists,
+  trackedReadFile,
+  trackedRealpath,
+} from "./input-tracker.js";
+import { isRelativeSpecifier, packageNameOfSpecifier } from "./workspace-registry.js";
+import { typePatchFileExists } from "./type-patches/layer.js";
 
 function isFile(path: string): boolean {
-  return trackedFileExists(path);
+  // A declaration entry a project type patch supplies (type-patches/layer.ts).
+  return trackedFileExists(path) || typePatchFileExists(path);
 }
 
 function isDirectory(path: string): boolean {
@@ -29,7 +50,19 @@ function isDirectory(path: string): boolean {
 }
 
 function realpathOr(path: string): string {
-  return trackedRealpath(path) ?? path;
+  return normalizeResolvedPath(trackedRealpath(path) ?? path);
+}
+
+/** TypeScript exposes resolved file names in its platform-independent path
+ * spelling, including on Windows where node:path and node:fs use `\\`.
+ * Keep native paths while probing, then normalize every resolver answer at
+ * the boundary so TS5 and TS7 callers observe the same contract. */
+function normalizeResolvedPath(path: string): string {
+  return path.replaceAll("\\", "/");
+}
+
+function normalizeResolvedAnswer(path: string | null): string | null {
+  return path === null ? null : normalizeResolvedPath(path);
 }
 
 interface PkgJson {
@@ -39,6 +72,7 @@ interface PkgJson {
   types?: string;
   typings?: string;
   main?: string;
+  imports?: unknown;
   exports?: unknown;
   /** The workspace ROOT's member declaration: an array of directory globs
    * (or `{ packages: [...] }` — the tool-config twin of the same field). */
@@ -145,7 +179,7 @@ function workspaceMembersOf(root: string, patterns: string[]): Map<string, strin
  * don't nest; a root whose globs don't name the package answers null).
  * Realpath'd like the symlink classification stamps. */
 function workspaceMemberDirOf(fromDir: string, packageName: string): string | null {
-  for (let dir = fromDir; ; ) {
+  for (let dir = fromDir; ;) {
     const patterns = workspacePatternsOf(pkgJsonOf(dir));
     if (patterns !== null) {
       const member = workspaceMembersOf(dir, patterns).get(packageName);
@@ -212,6 +246,19 @@ function loadAsFile(base: string): string | null {
   return null;
 }
 
+/** The source file a worker entry path runs. Node's worker loader takes the
+ * path as given, without directory or extension probing, but a JavaScript
+ * spelling of a TypeScript source answers that source exactly as a relative
+ * static import does (`./task.js` → task.ts). Declaration files never run.
+ * Null when no candidate exists. */
+export function resolveWorkerEntrySource(path: string): string | null {
+  for (const candidate of substitutionCandidates(path)) {
+    if (/\.d\.(?:[mc]?ts|json\.ts)$/.test(candidate)) continue;
+    if (isFile(candidate)) return candidate;
+  }
+  return isFile(path) ? path : null;
+}
+
 /** Loads `base` as a DIRECTORY: package.json types/typings then main (each
  * like a relative file), then the index files. */
 function loadAsDirectory(base: string): string | null {
@@ -233,27 +280,6 @@ function loadAsDirectory(base: string): string | null {
   return null;
 }
 
-/** The RUNTIME sibling of a PROJECT declaration twin — "src/index.js" for
- * "src/index.d.ts" when both exist OUTSIDE node_modules — or null. Node
- * loads the JS (declaration files do not exist in its world), and a
- * project module's implementation is what scriptc compiles: a hand-kept
- * .d.ts beside runtime JS (the classic typed-JS-library entry, the classic
- * typed-JS-library pattern) is the author's claim about the code, not
- * the code. EXACTLY the .d.ts/.js pair: the per-format spellings
- * (.d.mts/.d.cts twins — an openh264.d.mts beside its island-bound
- * wasm loader, the npm fixtures' shape.d.mts) are the established
- * scriptc idiom for declaring a typed surface over JS that deliberately
- * runs in the island, and stay authoritative. npm packages keep the npm
- * story (their declarations ARE the consumer surface; --npm-static opts
- * into the JS per package), and a declaration with NO runtime sibling
- * stays a type-only module exactly as before. The tsgo host hides the
- * same twins (loadProgram's composed fsShadow), so both resolution
- * worlds answer the JS.
- *
- * "PROJECT" means the entry's own package realm: a workspace-linked
- * package's realpaths carry no node_modules segment either, but its
- * declarations ARE the consumer surface (the npm story), so twins hide
- * only under the same package.json as the entry. */
 let projectRealmPkgJson: string | null = null;
 
 export function setProjectRealm(entryPath: string): void {
@@ -268,6 +294,57 @@ export function projectDtsRuntimeSibling(path: string): string | null {
   return isFile(sibling) ? sibling : null;
 }
 
+/** Active tsconfig `paths` mappings for the program being compiled. The
+ * targets are absolute: program.ts resolves them against the real config's
+ * baseUrl/config directory before handing the same map to tsgo's synthesized
+ * config and this resolver. Keeping the normalized map here prevents the
+ * checker and lowering from resolving the same bare project specifier in
+ * different coordinate systems. */
+let projectPathMappings: Readonly<Record<string, readonly string[]>> | null = null;
+
+export function setProjectPathMappings(
+  paths: Readonly<Record<string, readonly string[]>> | null,
+): void {
+  projectPathMappings = paths;
+}
+
+function resolveViaProjectPaths(specifier: string): string | null {
+  if (projectPathMappings === null) return null;
+  let match: { key: string; targets: readonly string[]; prefix: string; suffix: string } | null =
+    null;
+  for (const [key, targets] of Object.entries(projectPathMappings)) {
+    const star = key.indexOf("*");
+    if (star < 0) {
+      if (key === specifier) {
+        match = { key, targets, prefix: key, suffix: "" };
+        break;
+      }
+      continue;
+    }
+    const prefix = key.slice(0, star);
+    const suffix = key.slice(star + 1);
+    if (
+      specifier.startsWith(prefix) &&
+      specifier.length >= prefix.length + suffix.length &&
+      specifier.endsWith(suffix) &&
+      (match === null || (match.key.includes("*") && prefix.length > match.prefix.length))
+    ) {
+      match = { key, targets, prefix, suffix };
+    }
+  }
+  if (match === null) return null;
+  const wildcard = match.key.includes("*")
+    ? specifier.slice(match.prefix.length, specifier.length - match.suffix.length)
+    : "";
+  for (const target of match.targets) {
+    const candidate = target.includes("*") ? target.split("*").join(wildcard) : target;
+    const answer =
+      loadAsFile(candidate) ?? loadAsDirectory(candidate) ?? (isFile(candidate) ? candidate : null);
+    if (answer !== null) return projectDtsRuntimeSibling(answer) ?? answer;
+  }
+  return null;
+}
+
 /** Resolves a RELATIVE import specifier from `fromFile` the way 5.9.3's
  * ts.resolveModuleName does under scriptc's options. Returns the resolved
  * absolute path (not realpath'd — matching 5.9.3, which keeps in-project
@@ -279,16 +356,16 @@ export function resolveRelativeModule(fromFile: string, specifier: string): stri
   // claim, the JS is the code that compiles (npm-static.ts — the tsgo
   // host hides the same files, so both worlds answer the JS).
   if (npmStaticPackageOfPath(resolve(fromFile)) !== null) {
-    return loadAsJsFile(base) ?? loadAsJsDirectory(base);
+    return normalizeResolvedAnswer(loadAsJsFile(base) ?? loadAsJsDirectory(base));
   }
   const answer = loadAsFile(base) ?? loadAsDirectory(base);
   // A project declaration TWIN answers its runtime sibling (see
   // projectDtsRuntimeSibling — Node's truth for project code).
   if (answer !== null) {
     const sibling = projectDtsRuntimeSibling(answer);
-    if (sibling !== null) return sibling;
+    if (sibling !== null) return normalizeResolvedPath(sibling);
   }
-  return answer;
+  return normalizeResolvedAnswer(answer);
 }
 
 /** The JS-only twin of loadAsFile for --npm-static package internals:
@@ -338,6 +415,11 @@ const EXPORT_CONDITIONS = new Set(["types", "import", "default"]);
  * runtime JS is the compile target). Mirrors the types-stripped
  * package.json the tsgo host serves for the same package. */
 const JS_ONLY_CONDITIONS = new Set(["import", "default"]);
+const JS_REQUIRE_CONDITIONS = new Set(["require", "default"]);
+
+/** Node's ESM runtime conditions. Source-only workspace detection follows
+ * the executable branch rather than the checker-only "types" branch. */
+const RUNTIME_IMPORT_CONDITIONS = new Set(["import", "node", "default"]);
 
 /** package.json "exports" lookup: exact subpath keys, then '*' patterns
  * (longest literal prefix wins), condition objects matched against the
@@ -440,7 +522,7 @@ function nearestPkgDir(dir: string): string | null {
 
 /** The nearest package.json FILE, whether or not its JSON parses. Runtime
  * module-format lookup must stop at a malformed nearest scope: Node reports
- * ERR_INVALID_PACKAGE_CONFIG there rather than silently inheriting a parent
+ * ERR_INVALID_PACKAGE_CONFIG there rather than inheriting a parent
  * package's `type`. The resolver's historical nearestPkgDir stays parseable-
  * package-only because its callers need a package OBJECT to inspect. */
 function nearestPackageConfigDir(dir: string): string | null {
@@ -454,8 +536,15 @@ function nearestPackageConfigDir(dir: string): string | null {
 }
 
 /** package.json "imports" lookup — the exports machinery over "#" keys
- * (exact keys, then '*' patterns, condition objects in key order). */
-function resolveImportsField(imports: unknown, specifier: string): string | null {
+ * (exact keys, then '*' patterns, condition objects in key order). The
+ * caller supplies its resolution world's conditions: TypeScript bundler
+ * conditions for project code, or Node import/require conditions for the
+ * embedded npm runtime graph. */
+export function resolvePackageImports(
+  imports: unknown,
+  specifier: string,
+  conditions: ReadonlySet<string>,
+): string | null {
   if (!imports || typeof imports !== "object" || Array.isArray(imports)) return null;
   const map = imports as Record<string, unknown>;
   // Reuse the exports resolver by re-rooting the key space: "./" + the
@@ -465,7 +554,7 @@ function resolveImportsField(imports: unknown, specifier: string): string | null
     if (!k.startsWith("#")) continue;
     rekeyed["." + k.slice(1)] = v;
   }
-  return resolveExports(rekeyed, "." + specifier.slice(1), EXPORT_CONDITIONS);
+  return resolveExports(rekeyed, "." + specifier.slice(1), conditions);
 }
 
 /** Absolute path of the nearest package.json at or above `fromFile`'s
@@ -474,6 +563,27 @@ function resolveImportsField(imports: unknown, specifier: string): string | null
 export function nearestPkgJsonPath(fromFile: string): string | null {
   const dir = nearestPkgDir(dirname(resolve(fromFile)));
   return dir === null ? null : join(dir, "package.json");
+}
+
+/** The nearest package scope's "imports" field (undefined without one). */
+export function nearestPackageImports(fromFile: string): unknown {
+  const dir = nearestPkgDir(dirname(resolve(fromFile)));
+  return dir === null ? undefined : pkgJsonOf(dir)?.imports;
+}
+
+/** The target the nearest package scope's "imports" field maps a '#'
+ * specifier to under Node's ESM runtime conditions: a './' path inside the
+ * package or another package's specifier. Null when no entry maps it. */
+export function packageImportTarget(fromFile: string, specifier: string): string | null {
+  const dir = nearestPkgDir(dirname(resolve(fromFile)));
+  if (dir === null) return null;
+  const imports = pkgJsonOf(dir)?.imports;
+  if (!imports || typeof imports !== "object" || Array.isArray(imports)) return null;
+  // The "imports" map matches like a subpath "exports" map keyed by '#'.
+  const asExports = Object.fromEntries(
+    Object.entries(imports).map(([key, value]) => ["." + key, value]),
+  );
+  return resolveExports(asExports, "." + specifier, RUNTIME_IMPORT_CONDITIONS);
 }
 
 /** The explicit module format of the nearest package scope. A package.json
@@ -508,19 +618,37 @@ export function resolveProjectImport(fromFile: string, specifier: string): strin
   // registered bare specifier answers its attested SOURCE entry — the one
   // chokepoint that makes preflight's user-module edges, the module
   // order, and the CJS link check all agree the package compiles as
-  // program modules instead of island-embedding its published dist.
+
   const provenance = provenanceEntryFor(specifier);
-  if (provenance !== null) return provenance;
+  if (provenance !== null) return normalizeResolvedPath(provenance);
+  const viaPaths = resolveViaProjectPaths(specifier);
+  if (viaPaths !== null) return normalizeResolvedPath(viaPaths);
+  // A package scriptc implements itself (package-shims.ts): the installed
+  // version's shim module compiles in the package's place.
+  const shim = packageShimFor(fromFile, specifier);
+  if (shim !== null) return normalizeResolvedPath(shim);
   const pkgDir = nearestPkgDir(dirname(resolve(fromFile)));
   if (pkgDir === null) return null;
-  const pkg = pkgJsonOf(pkgDir) as (PkgJson & { imports?: unknown; exports?: unknown; type?: string }) | null;
+  const pkg = pkgJsonOf(pkgDir);
   if (!pkg) return null;
   let target: string | null = null;
   if (specifier.startsWith("#")) {
     // Node's validity rule: only the bare "#" is never resolvable ("#/..."
     // matches "#/*"-pattern keys on current Node).
     if (specifier === "#") return null;
-    target = resolveImportsField((pkg as { imports?: unknown }).imports, specifier);
+    // Inside an opted-in --npm-static package, an imports entry resolves
+    // the way the tsgo host's fs shadow does: the transformed document
+    // (the "node" condition hoisted), the runtime JS conditions, and the
+    // shipped JS rather than a declaration twin (see resolveRelativeModule).
+    if (npmStaticPackageOfPath(resolve(fromFile)) !== null) {
+      const transformed = JSON.parse(JSON.stringify(pkg)) as PkgJson & Record<string, unknown>;
+      npmStaticTransformPkgJson(transformed);
+      const jsTarget = resolvePackageImports(transformed.imports, specifier, JS_ONLY_CONDITIONS);
+      if (jsTarget === null || !jsTarget.startsWith("./")) return null;
+      const jsPath = join(pkgDir, jsTarget);
+      return normalizeResolvedAnswer(loadAsJsFile(jsPath) ?? loadAsJsDirectory(jsPath));
+    }
+    target = resolvePackageImports(pkg.imports, specifier, EXPORT_CONDITIONS);
     // An imports target that is not "./"-relative is PACKAGE_RESOLVE'd as
     // a bare specifier (Node's PACKAGE_IMPORTS_EXPORTS_RESOLVE): the
     // project-internal half of that re-entry is the self-name rule below —
@@ -542,7 +670,29 @@ export function resolveProjectImport(fromFile: string, specifier: string): strin
   }
   if (target === null) return null;
   const path = join(pkgDir, target);
-  return loadAsFile(path) ?? (isFile(path) ? path : null);
+  return normalizeResolvedAnswer(loadAsFile(path) ?? (isFile(path) ? path : null));
+}
+
+/** The one resolver entry point for source modules that compile into the
+ * current program. Relative paths, tsconfig aliases, package imports, package
+ * self-references, provenance entries, and TypeScript-entry workspace
+ * packages all meet here; builtins and JavaScript npm packages deliberately
+ * answer null for their dedicated callers. */
+export function resolveProjectModule(fromFile: string, specifier: string): string | null {
+  if (isRelativeSpecifier(specifier) || isAbsolute(specifier)) {
+    // A bundled copy's forwarder (a virtual declaration module) answers
+    // the shim it forwards to.
+    const forwarder = join(dirname(resolve(fromFile)), `${specifier}.d.ts`);
+    const forwarded = throughBundledShimForwarder(forwarder);
+    if (forwarded !== forwarder) return forwarded;
+    return resolveRelativeModule(fromFile, specifier);
+  }
+  if (specifier.startsWith("node:")) return null;
+  return (
+    resolveProjectImport(fromFile, specifier) ??
+    resolveWorkspaceSourceModule(fromFile, specifier)?.typesFile ??
+    null
+  );
 }
 
 /* 5.9.3 with allowJs resolves node_modules in TWO FULL PASSES (probed): the
@@ -552,32 +702,60 @@ export function resolveProjectImport(fromFile: string, specifier: string): strin
  * fails does a second identical walk run admitting the JavaScript files
  * themselves. An untyped package with an @types twin therefore answers the
  * @types files; an untyped package without one answers its own .js. */
-type ResolutionPass = "types" | "js";
+type ResolutionPass = "types" | "source" | "js";
 
 function extensionsFor(pass: ResolutionPass, flavor: "plain" | "x" | "m" | "c"): string[] {
   if (pass === "types") {
     switch (flavor) {
-      case "m": return [".mts", ".d.mts"];
-      case "c": return [".cts", ".d.cts"];
-      case "x": return [".tsx", ".ts", ".d.ts"];
-      default: return [".ts", ".tsx", ".d.ts"];
+      case "m":
+        return [".mts", ".d.mts"];
+      case "c":
+        return [".cts", ".d.cts"];
+      case "x":
+        return [".tsx", ".ts", ".d.ts"];
+      default:
+        return [".ts", ".tsx", ".d.ts"];
+    }
+  }
+  if (pass === "source") {
+    switch (flavor) {
+      case "m":
+        return [".mts"];
+      case "c":
+        return [".cts"];
+      case "x":
+        return [".tsx", ".ts"];
+      default:
+        return [".ts", ".tsx"];
     }
   }
   switch (flavor) {
-    case "m": return [".mjs"];
-    case "c": return [".cjs"];
-    case "x": return [".jsx", ".js"];
-    default: return [".js", ".jsx"];
+    case "m":
+      return [".mjs"];
+    case "c":
+      return [".cjs"];
+    case "x":
+      return [".jsx", ".js"];
+    default:
+      return [".js", ".jsx"];
   }
 }
 
 /** File resolution of an exports-map target (or types/typings/main field)
  * inside node_modules, for one pass: recognized-extension substitution,
  * extension addition, then directory index. */
-function loadTargetInPass(pkgDir: string, target: string, pass: ResolutionPass): string | null {
+function loadTargetInPass(
+  pkgDir: string,
+  target: string,
+  pass: ResolutionPass,
+  runtimeOnly = false,
+): string | null {
   const path = join(pkgDir, target);
   if (pass === "types") {
     if (/\.(d\.ts|d\.mts|d\.cts|ts|tsx|mts|cts)$/.test(path) && isFile(path)) return path;
+  } else if (pass === "source") {
+    if (/\.(ts|tsx|mts|cts)$/.test(path) && !/\.d\.(ts|mts|cts)$/.test(path) && isFile(path))
+      return path;
   } else if (/\.(js|jsx|mjs|cjs)$/.test(path) && isFile(path)) {
     return path;
   }
@@ -602,9 +780,10 @@ function loadTargetInPass(pkgDir: string, target: string, pass: ResolutionPass):
   if (isDirectory(path)) {
     const nested = pkgJsonOf(path);
     if (nested) {
-      for (const field of [nested.types, nested.typings, nested.main]) {
+      const fields = runtimeOnly ? [nested.main] : [nested.types, nested.typings, nested.main];
+      for (const field of fields) {
         if (typeof field === "string" && field !== "") {
-          const via = loadTargetInPass(path, field, pass);
+          const via = loadTargetInPass(path, field, pass, runtimeOnly);
           if (via) return via;
         }
       }
@@ -619,24 +798,31 @@ function loadTargetInPass(pkgDir: string, target: string, pass: ResolutionPass):
 
 /** node_modules file-or-directory resolution for a package-internal path (a
  * subpath without exports, the root lookup), for one pass. */
-function loadPathInPass(pkgDir: string, rel: string, pass: ResolutionPass): string | null {
+function loadPathInPass(
+  pkgDir: string,
+  rel: string,
+  pass: ResolutionPass,
+  runtimeOnly = false,
+): string | null {
   const base = rel === "." ? pkgDir : join(pkgDir, rel);
   if (rel !== ".") {
-    const viaFile = loadTargetInPass(pkgDir, rel, pass);
+    const viaFile = loadTargetInPass(pkgDir, rel, pass, runtimeOnly);
     if (viaFile) return viaFile;
     return null;
   }
   if (!isDirectory(base)) return null;
   const pkg = pkgJsonOf(base);
   if (pkg) {
-    for (const field of [pkg.types, pkg.typings]) {
-      if (typeof field === "string" && field !== "") {
-        const viaTypes = loadTargetInPass(base, field, pass);
-        if (viaTypes) return viaTypes;
+    if (!runtimeOnly) {
+      for (const field of [pkg.types, pkg.typings]) {
+        if (typeof field === "string" && field !== "") {
+          const viaTypes = loadTargetInPass(base, field, pass, runtimeOnly);
+          if (viaTypes) return viaTypes;
+        }
       }
     }
     if (typeof pkg.main === "string" && pkg.main !== "") {
-      const viaMain = loadTargetInPass(base, pkg.main, pass);
+      const viaMain = loadTargetInPass(base, pkg.main, pass, runtimeOnly);
       if (viaMain) return viaMain;
     }
   }
@@ -689,9 +875,14 @@ function packageAnswer(pkgDir: string, fallbackName: string, typesFile: string):
 export function resolveBareModule(
   fromFile: string,
   specifier: string,
-  /** "js-only" forces the runtime-JS resolution regardless of the active
-   * --npm-static set (the auto-detection probe); default follows the set. */
-  mode?: "js-only",
+  /** "js-only" forces --npm-static's runtime-JS resolution regardless of
+   * the active set (the auto-detection probe); "types-only" forces the
+   * unshadowed declaration pass for overload-overlay discovery;
+   * "runtime-js" and "runtime-source" probe Node's import-condition entry
+   * by executable file kind; default follows the active set. */
+  mode?: "js-only" | "types-only" | "runtime-js" | "runtime-source",
+  /** Select the actual module edge when compiling an opted-in package. */
+  resolutionKind: "import" | "require" = "import",
 ): BareResolution | null {
   const pkgName = packageNameOfSpecifier(specifier);
   const rest = specifier.slice(pkgName.length).replace(/^\//, "");
@@ -699,10 +890,27 @@ export function resolveBareModule(
   // An opted-in --npm-static package resolves to its RUNTIME JS: the js
   // pass only, the "types" export condition dropped, the @types mangling
   // never consulted — mirroring the shadowed world the tsgo host serves.
-  const npmStatic = mode === "js-only" || isNpmStaticPackage(pkgName);
-  const conditions = npmStatic ? JS_ONLY_CONDITIONS : EXPORT_CONDITIONS;
+  const runtimeImport = mode === "runtime-js" || mode === "runtime-source";
+  const npmStatic =
+    mode === "js-only" ||
+    (!runtimeImport &&
+      mode !== "types-only" &&
+      (isNpmStaticPackage(pkgName) ||
+        (npmStaticActive() && isNpmStaticPackage(aliasedPackageOf(fromFile, pkgName)))));
+  const conditions = runtimeImport
+    ? RUNTIME_IMPORT_CONDITIONS
+    : npmStatic
+      ? resolutionKind === "require"
+        ? JS_REQUIRE_CONDITIONS
+        : JS_ONLY_CONDITIONS
+      : EXPORT_CONDITIONS;
+  const runtimeOnly = runtimeImport || npmStatic;
 
-  const inPackage = (nmPkgDir: string, name: string, pass: ResolutionPass): BareResolution | null => {
+  const inPackage = (
+    nmPkgDir: string,
+    name: string,
+    pass: ResolutionPass,
+  ): BareResolution | null => {
     // A workspace link: the answer's realpath escaped node_modules, so the
     // package directory is a symlink into the project. Stamp the realpath'd
     // package root so callers can classify (and register) the package.
@@ -727,7 +935,7 @@ export function resolveBareModule(
     };
     const rawPkg = pkgJsonOf(nmPkgDir);
     // The opted-in exports lookup runs over the SAME transformed document
-    // the tsgo host serves (types stripped, import:=require) — the two
+    // the tsgo host serves (types stripped, runtime conditions preserved) — the two
     // resolvers must answer one file. Cloned per lookup; never cached, so
     // the raw cache stays clean for flagless compiles.
     const pkg =
@@ -741,23 +949,24 @@ export function resolveBareModule(
     if (pkg?.exports !== undefined) {
       const target = resolveExports(pkg.exports, subpath, conditions);
       if (target !== null) {
-        const file = loadTargetInPass(nmPkgDir, target, pass);
+        const file = loadTargetInPass(nmPkgDir, target, pass, runtimeOnly);
         if (file) return withWorkspace(packageAnswer(nmPkgDir, name, file));
       }
       return null;
     }
-    const file = loadPathInPass(nmPkgDir, subpath === "." ? "." : `./${rest}`, pass);
+    const file = loadPathInPass(nmPkgDir, subpath === "." ? "." : `./${rest}`, pass, runtimeOnly);
     if (!file) return null;
     // A SUBPATH answered through a nested package.json (the
     // @restart/hooks/useMergedRefs shape): 5.9.3 forms the packageId from
     // THAT package.json — its (usually absent) version, not the root's.
     const subDir = subpath === "." ? null : join(nmPkgDir, rest);
-    const answerDir = subDir !== null && isDirectory(subDir) && pkgJsonOf(subDir) ? subDir : nmPkgDir;
+    const answerDir =
+      subDir !== null && isDirectory(subDir) && pkgJsonOf(subDir) ? subDir : nmPkgDir;
     return withWorkspace(packageAnswer(answerDir, name, file));
   };
 
   const passOnce = (pass: ResolutionPass): BareResolution | null => {
-    for (let dir = dirname(resolve(fromFile)); ; ) {
+    for (let dir = dirname(resolve(fromFile)); ;) {
       const nm = join(dir, "node_modules");
       if (isDirectory(nm)) {
         // 1. The package directory.
@@ -783,7 +992,53 @@ export function resolveBareModule(
     }
   };
 
+  if (mode === "types-only") return passOnce("types");
+  if (mode === "runtime-source") return passOnce("source");
+  if (mode === "runtime-js") return passOnce("js");
   return npmStatic ? passOnce("js") : (passOnce("types") ?? passOnce("js"));
+}
+
+/** The package an npm alias directory installs (`"x-updated":
+ * "npm:x@6.3.0"` puts package x under node_modules/x-updated): the name
+ * the nearest node_modules/<dirName>/package.json declares when it
+ * differs from the directory name, else null. */
+function aliasedPackageOf(fromFile: string, dirName: string): string | null {
+  for (let dir = dirname(resolve(fromFile)); ;) {
+    const pkgDir = join(dir, "node_modules", dirName);
+    if (isDirectory(pkgDir)) {
+      const name = pkgJsonOf(pkgDir)?.name;
+      return typeof name === "string" && name !== dirName ? name : null;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+export function resolveWorkspaceSourceModule(
+  fromFile: string,
+  specifier: string,
+): BareResolution | null {
+  if (
+    isRelativeSpecifier(specifier) ||
+    isAbsolute(specifier) ||
+    specifier.startsWith("node:") ||
+    specifier.startsWith("#")
+  ) {
+    return null;
+  }
+  // A workspace package the project marks never loaded (package-shims.ts)
+  // resolves like a missing one.
+  if (isUnloadedPackage(specifier)) return null;
+  const source = resolveBareModule(fromFile, specifier, "runtime-source");
+  if (
+    source?.workspaceDir === undefined ||
+    !/\.(?:ts|tsx|mts|cts)$/.test(source.typesFile) ||
+    /\.d\.(?:ts|mts|cts)$/.test(source.typesFile)
+  ) {
+    return null;
+  }
+  return resolveBareModule(fromFile, specifier, "runtime-js") === null ? source : null;
 }
 
 /** Resolves a `/// <reference types="name" />`-style TYPE DIRECTIVE the way
@@ -805,7 +1060,7 @@ export function resolveTypeDirective(name: string, fromFile: string): string | n
     const idx = join(base, "index.d.ts");
     return isFile(idx) ? idx : null;
   };
-  for (let dir = dirname(resolve(fromFile)); ; ) {
+  for (let dir = dirname(resolve(fromFile)); ;) {
     const nm = join(dir, "node_modules");
     if (isDirectory(nm)) {
       const viaSelf = tryPkg(join(nm, name));
@@ -822,13 +1077,15 @@ export function resolveTypeDirective(name: string, fromFile: string): string | n
 /** Resolver metadata and the active project realm are shared within one
  * compile, never across compiles in a long-lived process. */
 export function clearResolveCaches(): void {
+  clearPackageShimCaches();
   pkgJsonCache.clear();
   workspaceMembersCache.clear();
   projectRealmPkgJson = null;
+  projectPathMappings = null;
 }
 
 /** True when `path` is under a node_modules directory (the
  * isExternalLibraryImport test 5.9.3 answers on resolutions). */
 export function isNodeModulesPath(path: string): boolean {
-  return isAbsolute(path) && path.split("/").includes("node_modules");
+  return isAbsolute(path) && normalizeResolvedPath(path).split("/").includes("node_modules");
 }

@@ -1,0 +1,103 @@
+---
+title: "Quickstart"
+---
+
+In this guide you install scriptc, compile a small TypeScript program into an executable, check what compiles, and add an npm dependency.
+
+## Prerequisites
+
+- A supported computer: macOS 15 or later (arm64 or x64), Linux (arm64 or x64), or Windows (x64). See [Platform Support](/docs/platforms) for details.
+- Node.js 24 or later and npm, to install scriptc. The compiler itself and the executables it builds run without Node.js. Standalone compiler archives are also available from [GitHub Releases](https://github.com/vercel-labs/scriptc/releases).
+- A linker, to build executables. On macOS, install the Xcode Command Line Tools with `xcode-select --install`. On glibc-based Linux, install clang. On Windows and musl-based Linux, install [zig](https://ziglang.org).
+
+## Install
+
+Install the CLI globally with npm:
+
+```console
+$ npm install -g scriptc
+```
+
+npm installs the native compiler for your platform as an optional dependency, so keep optional dependencies and install scripts enabled. Check that it works:
+
+```console
+$ scriptc --version
+0.3.0
+```
+
+## Create a program
+
+Create `hello.ts`. It greets the name passed on the command line, or `world` when there is none:
+
+```ts:hello.ts
+const who: string = process.argv.length > 2 ? process.argv[2] : "world";
+console.log(`hello, ${who}`);
+```
+
+## Compile and run
+
+`scriptc run` compiles the program and runs it immediately:
+
+```console
+$ scriptc run hello.ts
+hello, world
+```
+
+`scriptc build` writes an executable instead. It prints the path of the file it writes; the examples in these docs discard that line with `>/dev/null`:
+
+```console
+$ scriptc build hello.ts -o hello >/dev/null
+$ ./hello scriptc
+hello, scriptc
+```
+
+The executable runs on its own, without Node.js or scriptc installed. `scriptc run` does not pass extra arguments to the program, so build an executable when you need them.
+
+On Windows, build `hello.exe` and run it with `.\hello.exe`.
+
+## Check compilation support
+
+Before building a larger program, run `scriptc coverage`. It analyzes the program without building it and reports how much compiles:
+
+```console
+$ cat hello.ts
+const who: string = process.argv.length > 2 ? process.argv[2] : "world";
+console.log(`hello, ${who}`);
+
+$ scriptc coverage hello.ts
+
+  statements analyzed   2
+  compile statically    2  (100%)
+
+  fully static — all analyzed statements compile to native code.
+```
+
+When a program uses an unsupported operation, the report lists each site with a diagnostic code and a hint. See [Coverage Reports](/docs/coverage).
+
+## Use an npm dependency
+
+Create `cli.ts`:
+
+```ts:cli.ts
+import pc from "picocolors";
+
+console.log(pc.green("hello"));
+```
+
+Install the package, then build as usual:
+
+```console
+$ npm install picocolors
+$ scriptc build cli.ts -o demo >/dev/null
+$ ./demo
+hello
+```
+
+The package compiles into the executable at build time, so the executable doesn't need `node_modules` when it runs. See [npm Dependencies](/docs/dependencies) for which packages compile and how to check them.
+
+## Next steps
+
+- [Coverage Reports](/docs/coverage): find out whether an existing program compiles.
+- [Platform Support](/docs/platforms): cross-compile for Linux, Windows, and WebAssembly.
+- [CLI Reference](/docs/cli): output formats, optimization levels, and other options.
+- [Limitations](/docs/limitations): restrictions and differences from Node.js.

@@ -1,9 +1,6 @@
-/* Executable runtime reachability. The source-runtime recipe intentionally
- * still includes the complete historical base for direct compileC callers;
- * executable section GC is what makes its unused functions/data disappear.
- * These fixtures therefore pin both halves of that contract: hello has no
- * reachable members from the formerly-unavoidable families, while every
- * feature fixture retains an anchor and behaves exactly like Node. */
+/* Executable runtime reachability. Section GC removes unused code from the
+ * precompiled runtime pack. Hello must discard unreachable families, while
+ * each feature fixture retains its runtime anchor and matches Node. */
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdirSync, statSync, writeFileSync } from "node:fs";
@@ -15,13 +12,8 @@ import { compile } from "@scriptc/compiler";
 const execFileAsync = promisify(execFile);
 const repoRoot = join(import.meta.dirname, "../..");
 const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests/runtime-tree-shaking");
-// These source-toolchain contracts are safe in the Linux Sandboxes used by
-// `test:sandbox`: they deliberately use the C backend and `nm`, both of
-// which are part of that image. Keep the Windows host out of this POSIX
-// fixture (its child program uses /bin/echo), but do not use
-// SCRIPTC_PORTABLE_ONLY here: that marker means "run in a Linux Sandbox",
-// not "skip native executable assertions".
-const sourceToolchainTest = process.platform === "win32" ? test.skip : test;
+// The executable and symbol contracts use POSIX tools and /bin/echo.
+const nativeToolchainTest = process.platform === "win32" ? test.skip : test;
 
 interface Fixture {
   name: string;
@@ -30,6 +22,11 @@ interface Fixture {
 }
 
 const FIXTURES: Fixture[] = [
+  {
+    name: "regex",
+    source: `console.log(/world/.test("hello world"));\n`,
+    anchor: "scr_regex_test",
+  },
   {
     name: "child",
     source: `import { spawnSync } from "node:child_process";
@@ -94,9 +91,7 @@ async function build(name: string, source: string) {
   const result = await compile(sourcePath, {
     outPath: join(outDir, "program"),
     outDir,
-    // The C lane proves source-toolchain linking. macOS additionally runs
-    // the default lane below, which selects the helper/runtime-pack path.
-    backend: "c",
+    backend: "llvm",
   });
   if (!result.ok) {
     throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
@@ -115,7 +110,17 @@ async function symbols(binaryPath: string): Promise<string> {
   return output("nm", [binaryPath]);
 }
 
-async function expectNodeParity(sourcePath: string, binaryPath: string, args: string[] = []): Promise<void> {
+async function expectNoReleaseDebugInfo(binaryPath: string): Promise<void> {
+  if (process.platform !== "linux") return;
+  const sections = await output("readelf", ["--section-headers", "--wide", binaryPath]);
+  expect(sections).not.toMatch(/\.(?:z?debug_|stab)/);
+}
+
+async function expectNodeParity(
+  sourcePath: string,
+  binaryPath: string,
+  args: string[] = [],
+): Promise<void> {
   const [node, native] = await Promise.all([
     output(process.execPath, [sourcePath, ...args]),
     output(binaryPath, args),
@@ -123,42 +128,83 @@ async function expectNodeParity(sourcePath: string, binaryPath: string, args: st
   expect(native).toBe(node);
 }
 
-sourceToolchainTest("static hello strips unreachable runtime families while feature programs retain them", async () => {
-  const helloSource = `console.log("hello", "world");\n`;
-  const hello = await build("hello", helloSource);
-  await expectNodeParity(hello.sourcePath, hello.binaryPath);
-  const helloSymbols = await symbols(hello.binaryPath);
-  for (const family of [
-    "scr_path_win32_",
-    "scr_exec_",
-    "scr_url_",
-    "scr_json_parse",
-    "scr_date_",
-  ]) {
-    expect(helloSymbols, `hello retains ${family}`).not.toContain(family);
-  }
+nativeToolchainTest(
+  "static hello strips unreachable runtime families while feature programs retain them",
+  async () => {
+    const helloSource = `console.log("hello", "world");\n`;
+    const hello = await build("hello", helloSource);
+    await expectNodeParity(hello.sourcePath, hello.binaryPath);
+    await expectNoReleaseDebugInfo(hello.binaryPath);
+    const helloSymbols = await symbols(hello.binaryPath);
+    for (const family of [
+      "scr_path_win32_",
+      "scr_exec_",
+      "scr_url_",
+      "scr_json_parse",
+      "scr_date_",
+      // The generator runtime installs its tag reader with its first
+      // generator; a load-time constructor would retain it everywhere.
+      "scr_gen_tag",
+    ]) {
+      expect(helloSymbols, `hello retains ${family}`).not.toContain(family);
+    }
 
-  for (const fixture of FIXTURES) {
-    // /bin/echo is the portable POSIX child fixture. The Windows child
-    // surface remains covered by its cross-target corpus contracts.
-    if (fixture.name === "child" && process.platform === "win32") continue;
-    const result = await build(fixture.name, fixture.source);
-    await expectNodeParity(result.sourcePath, result.binaryPath);
-    const nativeSymbols = await symbols(result.binaryPath);
-    expect(nativeSymbols, `${fixture.name} lost ${fixture.anchor}`).toContain(fixture.anchor);
-  }
+    for (const fixture of FIXTURES) {
+      // /bin/echo is the portable POSIX child fixture. The Windows child
+      // surface remains covered by its cross-target corpus contracts.
+      if (fixture.name === "child" && process.platform === "win32") continue;
+      const result = await build(fixture.name, fixture.source);
+      await expectNodeParity(result.sourcePath, result.binaryPath);
+      await expectNoReleaseDebugInfo(result.binaryPath);
+      const nativeSymbols = await symbols(result.binaryPath);
+      expect(nativeSymbols, `${fixture.name} lost ${fixture.anchor}`).toContain(fixture.anchor);
+    }
 
-  // Symbol absence is the primary reachability contract. Keep a deliberately
-  // roomy, platform-specific hello-world ceiling too: it catches losing
-  // section GC without pinning an exact linker/SDK byte count. The canonical
-  // Linux C build is about 41KB and current Mach-O builds are about 70KB;
-  // these limits leave several native pages of linker-version slack while
-  // remaining far below the former roughly-400KB always-linked runtime.
-  const helloSizeLimit = process.platform === "linux" ? 64 * 1024 : 96 * 1024;
-  expect(statSync(hello.binaryPath).size).toBeLessThan(helloSizeLimit);
-});
+    // Symbol absence is the primary reachability contract. Keep a deliberately
+    // roomy, platform-specific hello-world ceiling too: it catches losing
+    // section GC without pinning an exact linker/SDK byte count. The Linux
+    // build is about 65KB with lld (CI's pinned LLVM provides it) and about
+    // 94KB with GNU ld, which keeps a unit's string literals whole once any of
+    // them is reachable; current Mach-O builds are about 70KB. Most
+    // of Linux hello's runtime code is the cycle collector, which its exit
+    // path reaches (scr_lib_cleanup releases an array). ELF segments are page
+    // aligned, so the Linux size moves in 4 KiB steps whenever .text crosses
+    // a page boundary. These limits leave several native pages of
+    // linker-version slack while remaining far below the former roughly-400KB
+    // always-linked runtime.
+    const helloSizeLimit = 96 * 1024;
+    expect(statSync(hello.binaryPath).size).toBeLessThan(helloSizeLimit);
+  },
+);
 
-sourceToolchainTest("fetch response JSON retains the URL and parser runtime", async () => {
+nativeToolchainTest(
+  "the event loop links the child-process unit only for programs that spawn",
+  async () => {
+    const timer = await build(
+      "async-timer",
+      `await new Promise((resolve) => setTimeout(resolve, 1));
+console.log("timer");
+`,
+    );
+    await expectNodeParity(timer.sourcePath, timer.binaryPath);
+    const timerSymbols = await symbols(timer.binaryPath);
+    for (const family of ["scr_children_", "scr_child_", "scr_ipc_"]) {
+      expect(timerSymbols, `the timer program retains ${family}`).not.toContain(family);
+    }
+
+    const spawned = await build(
+      "async-spawn",
+      `import { spawn } from "node:child_process";
+const child = spawn("/bin/echo", ["child"], { stdio: "ignore" });
+child.on("close", (code) => console.log("close", code));
+`,
+    );
+    await expectNodeParity(spawned.sourcePath, spawned.binaryPath);
+    expect(await symbols(spawned.binaryPath)).toContain("scr_children_poll");
+  },
+);
+
+nativeToolchainTest("fetch response JSON retains the URL and parser runtime", async () => {
   const server = createServer((_request, response) => {
     response.setHeader("content-type", "application/json");
     response.end('{"ok":true}');
@@ -166,7 +212,8 @@ sourceToolchainTest("fetch response JSON retains the URL and parser runtime", as
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const address = server.address();
-    if (address === null || typeof address === "string") throw new Error("test server has no TCP address");
+    if (address === null || typeof address === "string")
+      throw new Error("test server has no TCP address");
     const fixture: Fixture = {
       name: "fetch-response-json",
       source: `const response = await fetch(process.argv[2]);
@@ -175,18 +222,21 @@ console.log((await response.json()).ok);
       anchor: "scr_json_parse",
     };
     const result = await build(fixture.name, fixture.source);
-    await expectNodeParity(result.sourcePath, result.binaryPath, [`http://127.0.0.1:${address.port}`]);
+    await expectNodeParity(result.sourcePath, result.binaryPath, [
+      `http://127.0.0.1:${address.port}`,
+    ]);
+    await expectNoReleaseDebugInfo(result.binaryPath);
     const nativeSymbols = await symbols(result.binaryPath);
     expect(nativeSymbols).toContain("scr_json_parse");
     expect(nativeSymbols).toContain("scr_url_release");
   } finally {
-    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
   }
 });
 
-// The helper emits a native program object only on supported macOS arm64.
-// Its normal backend path links the precompiled runtime pack; run the same
-// reachability assertion there so the source-only C lane cannot regress it.
+// Also exercise default backend selection on the Darwin shipping host.
 test.skipIf(process.platform !== "darwin" || process.arch !== "arm64")(
   "macOS helper/runtime-pack links dead-strip static hello too",
   async () => {
@@ -198,7 +248,13 @@ test.skipIf(process.platform !== "darwin" || process.arch !== "arm64")(
     if (!result.ok) throw new Error(result.diagnostics.map((d) => d.message).join("\n"));
     await expectNodeParity(sourcePath, result.binaryPath);
     const nativeSymbols = await symbols(result.binaryPath);
-    for (const family of ["scr_path_win32_", "scr_exec_", "scr_url_", "scr_json_parse", "scr_date_"]) {
+    for (const family of [
+      "scr_path_win32_",
+      "scr_exec_",
+      "scr_url_",
+      "scr_json_parse",
+      "scr_date_",
+    ]) {
       expect(nativeSymbols, `runtime pack retained ${family}`).not.toContain(family);
     }
   },

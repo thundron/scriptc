@@ -1,0 +1,1 @@
+import * as Entity from "effect/cluster/Entity";import * as Rpc from "effect/rpc/Rpc";import * as Schema from "effect/Schema";import * as Effect from "effect/Effect";const C=Entity.make("C",[Rpc.make("Inc",{success:Schema.Int})]);const handlers=C.toLayer(Effect.succeed(C.of({Inc:()=>Effect.succeed(42)})));console.log(typeof handlers)

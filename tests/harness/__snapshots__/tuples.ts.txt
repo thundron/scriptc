@@ -1,10 +1,3 @@
-tuples.ts:11:18 - error SC1090: tuple indexing with a non-literal index (tuples are fixed-shape — use t[0], t[1], ...) is not supported yet
-
-  10 | let i = 0;
-  11 | console.log(pair[i]);
-     |                  ^
-  12 | pair[i] = "b";
-
 tuples.ts:12:6 - error SC1090: tuple indexing with a non-literal index (tuples are fixed-shape — use t[0], t[1], ...) is not supported yet
 
   11 | console.log(pair[i]);
@@ -12,57 +5,37 @@ tuples.ts:12:6 - error SC1090: tuple indexing with a non-literal index (tuples a
      |      ^
   13 | 
 
-tuples.ts:15:7 - error SC2011: values of type '[string, (number | undefined)?]' have no static representation but run in the embedded dynamic engine, which this build does not include
+tuples.ts:15:7 - error SC2001: values of type '[string, (number | undefined)?]' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, Dates, functions, classes, records, unions of those, and 'unknown')
 
   14 | // Optional and rest elements have no fixed arity/shape.
   15 | const opt: [string, number?] = ["x"];
      |       ^~~
   16 | const rest: [string, ...number[]] = ["y", 1, 2];
 
-  hint: build with --dynamic to run these values in the embedded engine (adds ~620KB to the binary), or restate the type inside the static surface (https://scriptc.dev/limitations describes the boundary)
-
-tuples.ts:16:7 - error SC2011: values of type '[string, ...number[]]' have no static representation but run in the embedded dynamic engine, which this build does not include
+tuples.ts:16:7 - error SC2001: values of type '[string, ...number[]]' cannot be compiled yet (supported: number, string, boolean, arrays, Maps, Sets, RegExp, Dates, functions, classes, records, unions of those, and 'unknown')
 
   15 | const opt: [string, number?] = ["x"];
   16 | const rest: [string, ...number[]] = ["y", 1, 2];
      |       ^~~~
   17 | 
 
-  hint: build with --dynamic to run these values in the embedded engine (adds ~620KB to the binary), or restate the type inside the static surface (https://scriptc.dev/limitations describes the boundary)
+tuples.ts:25:15 - error SC1090: spreading a variable-length value into a fixed tuple literal is not supported yet
 
-tuples.ts:25:33 - error SC1090: spread elements in tuple literals (positions must be spelled out) are not supported yet
-
-  24 | // Spread has no fixed positions inside a tuple literal.
-  25 | const copy: [string, number] = [...pair];
-     |                                 ^~~~~~~
+  24 | // An array's runtime length cannot determine a fixed tuple's positions.
+  25 | const copy = [...(["a", 1] as (string | number)[])] as [string, number];
+     |               ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   26 | 
 
-tuples.ts:31:13 - error SC1090: '.length' of a computed tuple expression (the arity is a constant — bind the tuple to a const first) is not supported yet
+tuples.ts:29:13 - error SC1090: '.join()' on arrays of this element type (number, string, boolean and Date arrays join — unions of those with undefined/null arms too, the units printing empty like JS) is not supported yet
 
-  30 | }
-  31 | console.log(mk().length);
-     |             ^~~~~~~~~~~
-  32 | 
-
-tuples.ts:35:13 - error SC1090: '.join()' on arrays of this element type (number, string, and boolean arrays join — unions of those with undefined/null arms too, the units printing empty like JS) is not supported yet
-
-  34 | const recs: { id: number }[] = [{ id: 1 }];
-  35 | console.log(recs.join(","));
+  28 | const recs: { id: number }[] = [{ id: 1 }];
+  29 | console.log(recs.join(","));
      |             ^~~~~~~~~~~~~~
-  36 | const tuples: [string, string][] = [["k", "v"]];
+  30 | const tuples: [string, string][] = [["k", "v"]];
 
-tuples.ts:37:13 - error SC1090: '.join()' on arrays of this element type (number, string, and boolean arrays join — unions of those with undefined/null arms too, the units printing empty like JS) is not supported yet
+tuples.ts:31:13 - error SC1090: '.join()' on arrays of this element type (number, string, boolean and Date arrays join — unions of those with undefined/null arms too, the units printing empty like JS) is not supported yet
 
-  36 | const tuples: [string, string][] = [["k", "v"]];
-  37 | console.log(tuples.join(";"));
+  30 | const tuples: [string, string][] = [["k", "v"]];
+  31 | console.log(tuples.join(";"));
      |             ^~~~~~~~~~~~~~~~
-  38 | 
-
-tuples.ts:41:7 - error SC2009: values of type 'Map<string, number>[]' cannot be compiled: the array shape is supported, but 'Map<string, number>' elements have no array representation yet
-
-  40 | // element kind).
-  41 | const maps: Map<string, number>[] = [];
-     |       ^~~~
-  42 | 
-
-  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+  32 | // Map elements compile through the same REF storage as function elements.

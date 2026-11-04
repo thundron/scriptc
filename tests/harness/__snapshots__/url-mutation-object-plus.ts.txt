@@ -1,0 +1,6 @@
+url-mutation-object-plus.ts:3:13 - error SC1090: URL += operands requiring object-to-primitive conversion (assign an explicit string) is not supported yet
+
+  2 | const value: any = { toString() { return "next"; } };
+  3 | u.search += value;
+    |             ^~~~~
+  4 | 

@@ -4,6 +4,7 @@ import { mkdtempSync, copyFileSync, readFileSync, rmSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { wasmApi } from "./wasm-test-api.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "../../../..");
@@ -11,7 +12,12 @@ const CLI = join(REPO, "packages/cli/dist/main.js");
 const FIXTURE = join(REPO, "tests/library-mode/callbacks");
 
 function hasZig(): boolean {
-  try { execFileSync("zig", ["version"], { stdio: "ignore" }); return true; } catch { return false; }
+  try {
+    execFileSync("zig", ["version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 describe.runIf(hasZig())("wasm host imports (library callbacks -> wasm imports)", () => {
@@ -32,10 +38,12 @@ describe.runIf(hasZig())("wasm host imports (library callbacks -> wasm imports)"
         env: { ...process.env, SCRIPTC_CC: "zigcc", SCRIPTC_TARGET: "wasm32-wasi" },
       });
 
-      const WA = (globalThis as unknown as { WebAssembly: any }).WebAssembly;
+      const WA = wasmApi;
       const mod = new WA.Module(readFileSync(join(dir, ".scriptc", "lib.wasm")));
       const hostImports = WA.Module.imports(mod)
-        .filter((i: { module: string }) => i.module === "host")
+        .filter(
+          (i: { module: string; name: string }) => i.module === "scriptc" && i.name !== "panic",
+        )
         .map((i: { name: string }) => i.name);
       expect(hostImports.sort()).toEqual(["emitChunk", "mix", "note", "orphan", "progress"]);
 
@@ -43,11 +51,23 @@ describe.runIf(hasZig())("wasm host imports (library callbacks -> wasm imports)"
       const glue = await import(glueUrl);
       const calls: unknown[][] = [];
       const api = await glue.instantiateFromBytes(readFileSync(join(dir, ".scriptc", "lib.wasm")), {
-        emitChunk: (b: Uint8Array, seq: number) => { calls.push(["emitChunk", Array.from(b), seq]); },
-        progress: (a: number, b: number) => { calls.push(["progress", a, b]); return 7; },
-        note: (s: string, f: number) => { calls.push(["note", s, f]); },
-        mix: (a: number, b: number) => { calls.push(["mix", a, b]); return 9; },
-        orphan: (x: number) => { calls.push(["orphan", x]); },
+        emitChunk: (b: Uint8Array, seq: number) => {
+          calls.push(["emitChunk", Array.from(b), seq]);
+        },
+        progress: (a: number, b: number) => {
+          calls.push(["progress", a, b]);
+          return 7;
+        },
+        note: (s: string, f: number) => {
+          calls.push(["note", s, f]);
+        },
+        mix: (a: number, b: number) => {
+          calls.push(["mix", a, b]);
+          return 9;
+        },
+        orphan: (x: number) => {
+          calls.push(["orphan", x]);
+        },
       });
 
       expect(api.cb_stream(2, 3)).toBe(10);

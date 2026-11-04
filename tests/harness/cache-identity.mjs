@@ -5,9 +5,9 @@
  * Identical output is the gate for trusting the cache; any drift exits 1
  * with the differing lines.
  *
- * Usage: node tests/harness/cache-identity.mjs [--san] [--keep-cache]
+ * Usage: node tests/harness/cache-identity.mjs [--san] [--keep-llvmache]
  *   --san         run the sanitized lane (SCRIPTC_SAN=1)
- *   --keep-cache  don't wipe the cache before the populate pass
+ *   --keep-llvmache  don't wipe the cache before the populate pass
  * Prints a timing table (uncached / populate / cached) as a side effect. */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -17,9 +17,10 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = join(fileURLToPath(import.meta.url), "../../..");
 const san = process.argv.includes("--san");
-const keepCache = process.argv.includes("--keep-cache");
+const keepLlvmache = process.argv.includes("--keep-llvmache");
 // Must match vitest.config.ts's default.
-const cacheDir = process.env.SCRIPTC_CACHE_DIR ?? join(repoRoot, "node_modules/.cache/scriptc-tests/cas");
+const cacheDir =
+  process.env.SCRIPTC_CACHE_DIR ?? join(repoRoot, "node_modules/.cache/scriptc-tests/cas");
 const outDir = mkdtempSync(join(tmpdir(), "scr-cache-identity-"));
 
 function runSuite(label, extraEnv) {
@@ -31,7 +32,14 @@ function runSuite(label, extraEnv) {
   const t0 = Date.now();
   const res = spawnSync(
     "pnpm",
-    ["exec", "vitest", "run", "--reporter=dot", "--reporter=json", `--outputFile.json=${outputFile}`],
+    [
+      "exec",
+      "vitest",
+      "run",
+      "--reporter=dot",
+      "--reporter=json",
+      `--outputFile.json=${outputFile}`,
+    ],
     { cwd: repoRoot, env, stdio: ["ignore", "inherit", "inherit"] },
   );
   const seconds = (Date.now() - t0) / 1000;
@@ -57,7 +65,7 @@ function counts(json) {
   return `${json.numTotalTests} tests, ${json.numPassedTests} passed, ${json.numFailedTests} failed, ${json.numPendingTests} skipped`;
 }
 
-if (!keepCache) {
+if (!keepLlvmache) {
   console.log(`wiping cache at ${cacheDir}`);
   rmSync(cacheDir, { recursive: true, force: true });
 }
@@ -68,7 +76,9 @@ const cached = runSuite("cached", {});
 
 console.log(`\n=== timing (${san ? "SCRIPTC_SAN=1 lane" : "plain lane"}) ===`);
 for (const pass of [uncached, populate, cached]) {
-  console.log(`${pass.label.padEnd(9)} ${pass.seconds.toFixed(1).padStart(8)}s   ${counts(pass.json)}`);
+  console.log(
+    `${pass.label.padEnd(9)} ${pass.seconds.toFixed(1).padStart(8)}s   ${counts(pass.json)}`,
+  );
 }
 
 const a = resultLines(uncached.json);
@@ -80,7 +90,9 @@ const onlyCached = b.filter((l) => !aSet.has(l));
 
 console.log(`\n=== identity: cached vs uncached ===`);
 if (onlyUncached.length === 0 && onlyCached.length === 0) {
-  console.log(`IDENTICAL: ${a.length} test results match exactly (names, statuses, failure output)`);
+  console.log(
+    `IDENTICAL: ${a.length} test results match exactly (names, statuses, failure output)`,
+  );
   process.exit(0);
 }
 console.log(`DIFFER: ${onlyUncached.length} only-in-uncached, ${onlyCached.length} only-in-cached`);

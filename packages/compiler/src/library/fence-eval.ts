@@ -7,9 +7,10 @@
  *
  *   - an `id` names exactly one manifest entry; a `prefix` fences every
  *     entry it string-prefixes. An id or prefix matching NOTHING refuses
- *     loudly at load (ratified): fences pin to a compiler release's
- *     manifest, and a silently-inert fence is a footgun, so there is no
- *     forward-compatible acceptance of unknown selectors.
+ *     at load with SC4001 (ratified): fences pin to a compiler release's
+ *     manifest, and an inert fence that reports nothing would mislead the
+ *     author, so there is no forward-compatible acceptance of unknown
+ *     selectors.
  *   - a fenced entry the static tier refuses anyway (status not "static")
  *     needs no new machinery: the surface's own refusal fires, and the
  *     fence's teaching rides it as the attributed note (spec §1: "changes
@@ -17,7 +18,7 @@
  *   - a fenced STATIC entry is policed against the COMPILED module graph:
  *     the emit pass lowers only reachability-discovered bodies, so the
  *     module IR *is* the reached graph — the same ground the sidecar's
- *     `deterministic` attestation stands on (ir/ir.ts's
+ *     `deterministic` attestation stands on (library/ir-policy.ts's
  *     moduleLibNondeterministicSurface). Fence evaluation reuses that
  *     posture with one generic walk collecting the reached surface facts
  *     (libCall spellings, str/arr/map/set intrinsic methods); each fenced
@@ -48,19 +49,23 @@
  * covering the refused surface. The text renders as the diagnostic's
  * `note`, always prefixed with the profile's name — the tool's message
  * stays the tool's. */
-import { generateSurfaceManifest, type SurfaceEntryKind, type SurfaceManifestEntry } from "../coverage/surface-manifest.js";
+import {
+  generateSurfaceManifest,
+  type SurfaceEntryKind,
+  type SurfaceManifestEntry,
+} from "../coverage/surface-manifest.js";
 import { libFenceDiag, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
 import {
-  AMBIENT_SURFACE_FNS,
+  ambientSurfaceFns,
   BUILTIN_MODULE_CONSTS,
-  BUILTIN_MODULE_FNS,
+  builtinModuleFns,
   BUILTIN_MODULE_FN_ALIASES,
   STATIC_MATH_FNS,
   STATIC_MATH_PROPS,
   STATIC_NUMBER_METHODS,
   STR_METHODS,
 } from "../frontend/lowering/surfaces.js";
-import type { IrModule, SrcLoc } from "../ir/ir.js";
+import type { IrExpr, IrModule, SrcLoc } from "../ir/ir.js";
 import { compilerReleaseVersion } from "./sidecar.js";
 
 /** One raw fence declaration as the profile spelled it (validated for
@@ -120,7 +125,7 @@ interface FenceTaxonomy {
   /** node-builtin constant ids: reads fold to literals at compile time. */
   foldedIds: Set<string>;
   /** Ambient dedicated-path surfaces (Date/perf_hooks/process): manifest
-   * id → the libCall spellings witnessing reach (AMBIENT_SURFACE_FNS —
+   * id → the libCall spellings witnessing reach (ambientSurfaceFns() —
    * the same rows the manifest projects the entries from). */
   ambientFns: Map<string, readonly string[]>;
 }
@@ -143,15 +148,15 @@ function fenceTaxonomy(): FenceTaxonomy {
   const builtinFns = new Map<string, readonly string[]>();
   const builtinRoots = new Map<string, readonly string[]>();
   const foldedIds = new Set<string>();
-  for (const [mod, members] of Object.entries(BUILTIN_MODULE_FNS)) {
+  for (const [mod, members] of Object.entries(builtinModuleFns())) {
     const root = new Set<string>();
     for (const [member, entry] of Object.entries(members!)) {
       if (entry === undefined) continue;
-      const fns = new Set([entry.fn]);
+      const fns = new Set([mod === "util/types" ? `${entry.fn}.${member}` : entry.fn]);
       // The bare-path and url tables rebind per TARGET platform
       // (builtinModuleFnsOf): a fence on the bare id covers both flavors.
       if (mod === "path") {
-        const w = BUILTIN_MODULE_FNS["path/win32"]?.[member];
+        const w = builtinModuleFns()["path/win32"]?.[member];
         if (w !== undefined) fns.add(w.fn);
       }
       if (mod === "url" && member === "pathToFileURL") fns.add("url.pathToFileURLWin32");
@@ -167,8 +172,17 @@ function fenceTaxonomy(): FenceTaxonomy {
     for (const member of Object.keys(members!)) foldedIds.add(`${builtinRootId(mod)}.${member}`);
   }
   for (const member of Object.keys(STATIC_MATH_PROPS)) foldedIds.add(`stdlib.math.${member}`);
-  const ambientFns = new Map(AMBIENT_SURFACE_FNS.map((row) => [row.id, row.fns as readonly string[]]));
-  taxonomy = { byId, ids: manifest.entries.map((e) => e.id), builtinFns, builtinRoots, foldedIds, ambientFns };
+  const ambientFns = new Map(
+    ambientSurfaceFns().map((row) => [row.id, row.fns as readonly string[]]),
+  );
+  taxonomy = {
+    byId,
+    ids: manifest.entries.map((e) => e.id),
+    builtinFns,
+    builtinRoots,
+    foldedIds,
+    ambientFns,
+  };
   return taxonomy;
 }
 
@@ -248,11 +262,13 @@ function classifySurface(entry: SurfaceManifestEntry, tax: FenceTaxonomy): Surfa
       return { kind: "unfenceable", why: DESUGARED_WHY };
     }
     if (family === "map") {
-      if (MAP_DETECTABLE.has(member)) return { kind: "detector", detector: { mapMethods: [member] } };
+      if (MAP_DETECTABLE.has(member))
+        return { kind: "detector", detector: { mapMethods: [member] } };
       return { kind: "unfenceable", why: DESUGARED_WHY };
     }
     if (family === "set") {
-      if (SET_DETECTABLE.has(member)) return { kind: "detector", detector: { setMethods: [member] } };
+      if (SET_DETECTABLE.has(member))
+        return { kind: "detector", detector: { setMethods: [member] } };
       return { kind: "unfenceable", why: DESUGARED_WHY };
     }
   }
@@ -284,7 +300,7 @@ function classifySurface(entry: SurfaceManifestEntry, tax: FenceTaxonomy): Surfa
  * release's surface manifest. Every failure returns the exact-path detail
  * the loader wraps as SC4001. Selector strictness is RATIFIED: an id or
  * prefix matching nothing refuses; a covered static entry no detector can
- * police refuses (loudly, never silently inert). Compile-time-folded
+ * police refuses instead of staying inert. Compile-time-folded
  * constants refuse as `id` fences (the message says why) and are exempt
  * under a `prefix` — the family sweep stays usable, and the fold means
  * there is genuinely nothing at runtime to deny. */
@@ -316,7 +332,10 @@ export function resolveLibraryFences(
       }
       const cls = classifySurface(entry, tax);
       if (cls.kind === "unfenceable") {
-        return { ok: false, detail: `'${d.path}.id' names '${d.id}', which cannot be fenced: ${cls.why}` };
+        return {
+          ok: false,
+          detail: `'${d.path}.id' names '${d.id}', which cannot be fenced: ${cls.why}`,
+        };
       }
       keep(entry, cls);
     } else {
@@ -334,7 +353,10 @@ export function resolveLibraryFences(
         const cls = classifySurface(entry, tax);
         if (cls.kind === "unfenceable") {
           if (tax.foldedIds.has(id)) continue; // the fold IS the exemption — see above
-          return { ok: false, detail: `'${d.path}.prefix' ('${d.prefix}') covers '${id}', which cannot be fenced: ${cls.why}` };
+          return {
+            ok: false,
+            detail: `'${d.path}.prefix' ('${d.prefix}') covers '${id}', which cannot be fenced: ${cls.why}`,
+          };
         }
         keep(entry, cls);
       }
@@ -390,8 +412,14 @@ function collectReachedSurfaces(mod: IrModule): ReachedSurfaces {
     const node = v as { kind?: unknown; fn?: unknown; method?: unknown; loc?: SrcLoc };
     const here = node.loc ?? loc;
     if (typeof node.kind === "string") {
-      if (node.kind === "libCall" && typeof node.fn === "string") note(reached.libFns, node.fn, here);
-      else if (typeof node.method === "string") {
+      if (node.kind === "libCall" && typeof node.fn === "string") {
+        note(reached.libFns, node.fn, here);
+        if (node.fn === "util.typeIs") {
+          const call = v as Extract<IrExpr, { kind: "libCall" }>;
+          const probe = call.args[1];
+          if (probe?.kind === "strLit") note(reached.libFns, `${node.fn}.${probe.value}`, here);
+        }
+      } else if (typeof node.method === "string") {
         if (node.kind === "strIntrinsic") note(reached.strMethods, node.method, here);
         else if (node.kind === "arrIntrinsic") note(reached.arrMethods, node.method, here);
         else if (node.kind === "mapIntrinsic") note(reached.mapMethods, node.method, here);
@@ -454,14 +482,23 @@ export function evaluateLibraryFences(mod: IrModule, profile: FenceProfileView):
 /* ── the generalized teaching rider ────────────────────────────────────── */
 
 function surfaceMatchesDiag(
-  surface: { code?: string; name: string; kind: SurfaceEntryKind },
+  surface: { code?: string | undefined; name: string; kind: SurfaceEntryKind },
   diag: ScrDiagnostic,
 ): boolean {
   if (surface.code === undefined || surface.code !== diag.code) return false;
-  // A diagnostic-fence entry IS the code family; member entries must also
-  // appear by name in the refusal's message (SC2020/SC2012 refusals spell
-  // the surface exactly as the manifest names it).
-  return surface.kind === "diagnostic-fence" || diag.message.includes(surface.name);
+  // A diagnostic-fence entry IS the code family. Method refusals use a
+  // receiver description instead of the manifest's prototype spelling.
+  if (surface.kind === "diagnostic-fence" || diag.message.includes(surface.name)) return true;
+  for (const [prefix, receiver] of [
+    ["number.prototype.", "numbers"],
+    ["string.prototype.", "strings"],
+  ] as [string, string][]) {
+    if (surface.name.startsWith(prefix)) {
+      const method = surface.name.slice(prefix.length);
+      return diag.message.includes(`'.${method}()' on ${receiver}`);
+    }
+  }
+  return false;
 }
 
 function teachingForRefusal(profile: FenceProfileView, diag: ScrDiagnostic): string | undefined {
@@ -478,14 +515,19 @@ function teachingForRefusal(profile: FenceProfileView, diag: ScrDiagnostic): str
   for (const [key, text] of Object.entries(profile.teachings)) {
     if (!key.includes(".")) continue;
     const entry = fenceTaxonomy().byId.get(key);
-    if (entry !== undefined && surfaceMatchesDiag(entry, diag)) return text;
+    if (
+      entry !== undefined &&
+      surfaceMatchesDiag({ code: entry.code, name: entry.name, kind: entry.kind }, diag)
+    )
+      return text;
   }
   // 3. A fence covering the refused surface: the teaching rides the
   // surface's own refusal (the non-static half of fence coverage).
   for (const fence of profile.fences) {
     if (fence.teaching === undefined) continue;
     for (const s of fence.surfaces) {
-      if (surfaceMatchesDiag(s, diag)) return fence.teaching;
+      if (surfaceMatchesDiag({ code: s.code, name: s.name, kind: s.kind }, diag))
+        return fence.teaching;
     }
   }
   return undefined;
@@ -499,7 +541,8 @@ export function decorateLibraryRefusals(
   diagnostics: ScrDiagnostic[],
   profile: FenceProfileView,
 ): ScrDiagnostic[] {
-  if (Object.keys(profile.teachings).length === 0 && profile.fences.length === 0) return diagnostics;
+  if (Object.keys(profile.teachings).length === 0 && profile.fences.length === 0)
+    return diagnostics;
   return diagnostics.map((d) => {
     if (d.note !== undefined) return d;
     const teaching = teachingForRefusal(profile, d);

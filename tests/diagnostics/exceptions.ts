@@ -1,14 +1,13 @@
-try {
-  throw "boom";
-} catch ({ message }: any) {
-  console.log("destructuring catch bindings are fenced");
-}
+// A catch CLAUSE that destructures compiles now (corpus 8603); a promise
+// handler's destructuring parameter is the remaining SC1062 fence.
+Promise.reject(new Error("boom")).catch(({ message }: any) => {
+  console.log(message);
+});
 function f(): number {
   try {
     console.log("body");
   } finally {
-    // return crossing OUT of a try/catch body compiles now; a return
-    // INSIDE the finally body (replacing the pending completion) stays out.
+    // A return inside finally replaces the pending completion.
     return 1;
   }
 }

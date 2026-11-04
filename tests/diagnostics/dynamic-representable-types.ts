@@ -1,11 +1,4 @@
-/* COMPOSITE types the dynamic engine represents but the static surface
- * does not — `any[]`, records and functions with `any`-typed members, the
- * evolving `const arr = []`: each site reports the SC2011 dynamic-family
- * choice ("runs in the embedded dynamic engine"), proved by re-running the
- * type mapping with the engine enabled — never the generic supported-types
- * recitation. Bare `any` keeps its own SC2011 arm (the stronger stay-static
- * hint: 'unknown' + a checked cast); types with NO dynamic representation
- * (an optional-element tuple) keep the SC2001 recitation. */
+// Checked arrays and functions with any pieces compile natively; optional tuple elements retain their diagnostic.
 const arr: any[] = [1, "x"];
 var evolving = []; // never used — the tsc-clean evolving-array shape
 const rec = { workItem: {} as any, width: "10px" };

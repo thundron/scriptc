@@ -1,0 +1,18 @@
+import { Raycaster } from 'three/src/core/Raycaster.js';
+import { Vector2 } from 'three/src/math/Vector2.js';
+import { Vector3 } from 'three/src/math/Vector3.js';
+import { PerspectiveCamera } from 'three/src/cameras/PerspectiveCamera.js';
+import { OrthographicCamera } from 'three/src/cameras/OrthographicCamera.js';
+const ray = new Raycaster();
+const p = new PerspectiveCamera(90, 1, 0.1, 100);
+p.position.set(0,0,5); p.updateMatrixWorld();
+ray.setFromCamera(new Vector2(0,0),p);
+console.log('perspective', ray.ray.origin.z, ray.ray.direction.x, ray.ray.direction.y, ray.ray.direction.z, ray.camera === p);
+ray.setFromCamera(new Vector2(0.5,0.5),p);
+console.log('offset', ray.ray.direction.x.toFixed(4), ray.ray.direction.y.toFixed(4), ray.ray.direction.z.toFixed(4));
+const o = new OrthographicCamera(-2,2,2,-2,0.1,100);
+o.position.set(0,0,5); o.updateMatrixWorld();
+ray.setFromCamera(new Vector2(0.5,0.5),o);
+console.log('orthographic', ray.ray.origin.x.toFixed(4), ray.ray.origin.y.toFixed(4), ray.ray.origin.z.toFixed(4), ray.ray.direction.z, ray.camera === o);
+ray.set(new Vector3(1,2,3),new Vector3(0,1,0));
+console.log('set', ray.ray.origin.x, ray.ray.origin.y, ray.ray.origin.z, ray.ray.direction.y);

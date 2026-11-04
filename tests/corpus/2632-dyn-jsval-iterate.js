@@ -1,10 +1,6 @@
-// @dynamic
-// for-of and destructuring over island values held in 'unknown' (lane
-// dom-jsval-long-tail): the checked-dynamic for-of packs the source once
-// through the spread walk, and the JSVAL arm drains the ENGINE's own
-// iterator protocol (dyn.iterPack -> iter_drain) — engine arrays,
-// generators, Maps, Sets, and Symbol.iterator implementations step
-// exactly as Node runs them, elements wrapping back scalar-normalized.
+// for-of and destructuring over island values held in 'unknown'. Checked
+// for-of retains the engine IteratorRecord and steps it live; destructuring
+// uses the existing drain. Iterator method calls preserve the engine receiver.
 // Non-iterables throw V8's for-of CallPrinter spellings: named sources
 // verbatim ("o.a is not iterable"), nameable callees the
 // not-a-function-or form, everything else the runtime kind wording.

@@ -1,28 +1,22 @@
 import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, copyFileSync, readFileSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, copyFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { wasmReactorLinkArgs } from "./native-toolchain.js";
-
+import { wasmApi, type WasmMemory } from "./wasm-test-api.js";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, "../../../..");
 const CLI = join(REPO, "packages/cli/dist/main.js");
-const RT = join(REPO, "packages/runtime/src");
 const FIXTURE = join(REPO, "tests/library-mode/scalars");
 
-const LIB_SOURCES = [
-  "scr_number", "scr_string", "scr_array", "scr_bytes", "scr_bytes_io", "scr_map",
-  "scr_closure", "scr_object", "scr_union", "scr_exception", "scr_error", "scr_console",
-  "scr_lib", "scr_path", "scr_url", "scr_json", "scr_cycle", "scr_library", "scr_wasm",
-];
-const APP_EXPORTS = ["kt_add", "kt_passthrough", "kt_neg_zero", "kt_is_nan", "kt_invert", "kt_plumb", "kt_init"];
-const WASI_DEFS = ["-D_GNU_SOURCE", "-D_WASI_EMULATED_SIGNAL", "-D_WASI_EMULATED_PROCESS_CLOCKS", "-D_WASI_EMULATED_GETPID"];
-const WASI_LIBS = ["-lwasi-emulated-signal", "-lwasi-emulated-process-clocks", "-lwasi-emulated-getpid"];
-
 function hasZig(): boolean {
-  try { execFileSync("zig", ["version"], { stdio: "ignore" }); return true; } catch { return false; }
+  try {
+    execFileSync("zig", ["version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 describe.runIf(hasZig())("TS -> wasm reactor (end-to-end)", () => {
@@ -37,39 +31,46 @@ describe.runIf(hasZig())("TS -> wasm reactor (end-to-end)", () => {
         env: { ...process.env, SCRIPTC_CC: "zigcc", SCRIPTC_TARGET: "wasm32-wasi" },
       });
 
-      const obj = join(dir, "obj");
-      mkdirSync(obj, { recursive: true });
-      execFileSync("zig", ["cc", "-target", "wasm32-wasi", "-O2", "-c",
-        join(dir, ".scriptc", "lib.lib.ll"), "-o", join(obj, "prog.o")]);
-      for (const s of LIB_SOURCES) {
-        execFileSync("zig", ["cc", "-target", "wasm32-wasi", "-O2", "-DSCR_LIB",
-          ...WASI_DEFS, "-I", RT, "-c", join(RT, `${s}.c`), "-o", join(obj, `${s}.o`)]);
-      }
-      const objs = ["prog.o", ...LIB_SOURCES.map((s) => `${s}.o`)].map((o) => join(obj, o));
-      execFileSync("zig", ["cc", "-target", "wasm32-wasi", "-O2",
-        ...wasmReactorLinkArgs(APP_EXPORTS), ...objs, ...WASI_LIBS,
-        "-o", join(dir, "reactor.wasm")]);
-
-      const WA = (globalThis as unknown as { WebAssembly: any }).WebAssembly;
-      const mod = new WA.Module(readFileSync(join(dir, "reactor.wasm")));
-      let inst: any;
+      const mod = new wasmApi.Module(readFileSync(join(dir, ".scriptc", "lib.wasm")));
+      const state: { memory: WasmMemory | null } = { memory: null };
       const logged: string[] = [];
-      const wasi = new Proxy({
-        fd_write: (_fd: number, iov: number, cnt: number, nwritten: number) => {
-          const dv = new DataView(inst.exports.memory.buffer);
-          let total = 0;
-          for (let i = 0; i < cnt; i++) {
-            const p = dv.getUint32(iov + i * 8, true);
-            const l = dv.getUint32(iov + i * 8 + 4, true);
-            logged.push(Buffer.from(inst.exports.memory.buffer, p, l).toString());
-            total += l;
-          }
-          dv.setUint32(nwritten, total, true);
-          return 0;
+      const wasi = new Proxy<Record<string, (...args: number[]) => number>>(
+        {
+          fd_write: (_fd: number, iov: number, cnt: number, nwritten: number) => {
+            const memory = state.memory!;
+            const dv = new DataView(memory.buffer);
+            let total = 0;
+            for (let i = 0; i < cnt; i++) {
+              const p = dv.getUint32(iov + i * 8, true);
+              const l = dv.getUint32(iov + i * 8 + 4, true);
+              logged.push(Buffer.from(memory.buffer, p, l).toString());
+              total += l;
+            }
+            dv.setUint32(nwritten, total, true);
+            return 0;
+          },
         },
-      }, { get: (t: any, k: string) => (k in t ? t[k] : () => 0) });
-      inst = new WA.Instance(mod, { wasi_snapshot_preview1: wasi });
-      const ex = inst.exports;
+        { get: (target, key: string) => target[key] ?? (() => 0) },
+      );
+      const inst = new wasmApi.Instance(mod, {
+        wasi_snapshot_preview1: wasi,
+        scriptc: {
+          panic: (p: number, n: number) => {
+            throw new Error(Buffer.from(state.memory!.buffer, p, n).toString());
+          },
+        },
+      });
+      state.memory = inst.exports.memory as WasmMemory;
+      const ex = inst.exports as {
+        _initialize: () => void;
+        kt_init: () => void;
+        kt_add: (a: number, b: number) => number;
+        kt_passthrough: (value: number) => number;
+        kt_neg_zero: () => number;
+        kt_is_nan: (value: number) => number;
+        kt_invert: (value: number) => number;
+        kt_plumb: (a: number, b: number, c: number) => number;
+      };
       ex._initialize();
       ex.kt_init();
       expect(logged.join("").trim()).toBe("scalars ready");

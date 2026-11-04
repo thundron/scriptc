@@ -1,0 +1,13 @@
+globalThis.nativeU64 = value => BigInt.asUintN(64, value);
+globalThis.nativeI64 = value => BigInt.asIntN(64, value);
+globalThis.nativePointer = value => value;
+globalThis.pointerNew = () => 12345n;
+globalThis.pointerCheck = value => value === 12345n;
+globalThis.callbackU64 = (callback, value) => BigInt.asUintN(64, callback(BigInt.asUintN(64, value)));
+globalThis.callbackI64 = (callback, value) => BigInt.asIntN(64, callback(BigInt.asIntN(64, value)));
+globalThis.callbackPointer = (callback, value) => callback(value);
+globalThis.wideMix = (a,b,c,d,e,f,g,h,i,j,k,l,m,n) => a+c+e+g+i+k+m+BigInt(Math.trunc(b+Math.fround(d)+f+Math.fround(h)+j+Math.fround(l)+n));
+let saved;
+globalThis.wideStart = callback => { saved = callback; };
+globalThis.wideFire = value => BigInt.asUintN(64, saved(value));
+globalThis.wideStop = callback => { if (saved === callback) saved = undefined; };

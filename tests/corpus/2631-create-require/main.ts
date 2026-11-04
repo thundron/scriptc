@@ -33,6 +33,26 @@ console.log("os:", os.platform() === process.platform, os.tmpdir().length > 0);
 const inline = createRequire(import.meta.url)("./cfg.json") as { port: number };
 console.log("inline:", inline.port);
 
+// Bundled let/var syntax can still have an immutable loader value. A
+// hoisted function sees it only after initialization, and a shadow's
+// assignment does not mutate the module binding.
+var bundledLoader = createRequire(import.meta.url);
+let stableLoader = createRequire(import.meta.url);
+const bundledPath = bundledLoader("node:path") as typeof import("node:path");
+function readBundledPort(): number {
+  return (bundledLoader("./cfg.json") as { port: number }).port;
+}
+function shadowLoader(bundledLoader: string): string {
+  bundledLoader = "local";
+  return bundledLoader;
+}
+console.log("bundled:", readBundledPort(), bundledPath.join("a", "b"), shadowLoader("original"));
+console.log("stable:", (stableLoader("./cfg.json") as { port: number }).port, bundledLoader.resolve("node:path"), stableLoader.resolve.paths("node:path") === null);
+const importedConsole = bundledLoader("node:console") as typeof import("node:console");
+importedConsole.log("createRequire console", { port: readBundledPort() });
+const { info: loaderInfo } = stableLoader("console") as typeof import("console");
+loaderInfo("createRequire console alias");
+
 // A bare specifier nothing installed resolves: Node's MODULE_NOT_FOUND,
 // catchable at the call — the optional-dependency try/require pattern.
 try {

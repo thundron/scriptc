@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import type { FrontendInputExclusions } from "../frontend/input-tracker.js";
 import { compilerReleaseVersion } from "./sidecar.js";
 
-export type CacheBackend = "c" | "llvm";
+export type CacheBackend = "llvm";
 
 interface CacheOutputOptions {
   entryPath: string;
@@ -13,8 +13,7 @@ interface CacheOutputOptions {
 }
 
 export interface CacheOutputPaths {
-  cPath: string;
-  staleCPath: string;
+  llvmPath: string;
   irPath: string;
 }
 
@@ -22,13 +21,12 @@ export function digest(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-export function cacheKey(
-  namespace: string,
-  parts: readonly (string | Uint8Array)[],
-): string {
+export function cacheKey(namespace: string, parts: readonly (string | Uint8Array)[]): string {
   const hash = createHash("sha256")
-    .update(namespace).update("\0")
-    .update(compilerReleaseVersion()).update("\0");
+    .update(namespace)
+    .update("\0")
+    .update(compilerReleaseVersion())
+    .update("\0");
   for (const [index, part] of parts.entries()) {
     hash.update(part);
     if (index + 1 < parts.length) hash.update("\0");
@@ -42,7 +40,8 @@ export function stampPath(root: string, namespace: string, key: string): string 
 
 export function stampIntegrity(namespace: string, stamp: object): string {
   return createHash("sha256")
-    .update(namespace).update("\0")
+    .update(namespace)
+    .update("\0")
     .update(JSON.stringify(stamp))
     .digest("hex");
 }
@@ -54,8 +53,7 @@ export function outputPaths(
 ): CacheOutputPaths {
   const stem = basename(options.entryPath).replace(/\.(ts|mts|cts|js|mjs|cjs)$/, "") + stemSuffix;
   return {
-    cPath: join(options.outDir, `${stem}.${backend === "llvm" ? "ll" : "c"}`),
-    staleCPath: join(options.outDir, `${stem}.${backend === "llvm" ? "c" : "ll"}`),
+    llvmPath: join(options.outDir, `${stem}.ll`),
     irPath: join(options.outDir, `${stem}.ir.json`),
   };
 }
@@ -67,12 +65,9 @@ export function frontendOutputExclusions(
   additionalPaths: readonly string[],
 ): FrontendInputExclusions {
   const paths = outputPaths(options, backend, stemSuffix);
-  const outputArtifacts = [
-    paths.cPath,
-    paths.staleCPath,
-    ...(options.emitIr ? [paths.irPath] : []),
-    ...additionalPaths,
-  ].map((path) => resolve(path));
+  const outputArtifacts = [paths.llvmPath, paths.irPath, ...additionalPaths].map((path) =>
+    resolve(path),
+  );
   const outputDirectories = new Set<string>();
   for (const artifact of outputArtifacts) {
     for (let directory = dirname(artifact); ; directory = dirname(directory)) {
@@ -80,7 +75,7 @@ export function frontendOutputExclusions(
       if (dirname(directory) === directory) break;
     }
   }
-  return { outputPaths: outputArtifacts, outputDirectories };
+  return { outputPaths: outputArtifacts, outputDirectories: [...outputDirectories] };
 }
 
 export async function readCachedFile(path: string, expected: string): Promise<Buffer | null> {
@@ -114,7 +109,9 @@ export function validNativeFeatures<T extends { backend: CacheBackend }>(
 ): value is T {
   if (value === null || typeof value !== "object") return false;
   const native = value as Partial<T>;
-  return (native.backend === "c" || native.backend === "llvm") &&
+  return (
+    native.backend === "llvm" &&
     booleanKeys.every((key) => typeof native[key] === "boolean") &&
-    validAdditional(native);
+    validAdditional(native)
+  );
 }

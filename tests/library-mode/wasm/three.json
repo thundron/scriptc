@@ -1,0 +1,66 @@
+{
+  "profile_format": 1,
+  "name": "three-wasm-embedding",
+  "entry": "three.mjs",
+  "emission": "llvm",
+  "npm_static": [
+    "three"
+  ],
+  "abi": {
+    "prefix": "app_",
+    "init_symbol": "app_init",
+    "sink_register_symbol": "app_sink",
+    "callback_register_symbol": "app_callback",
+    "collect_symbol": "app_collect",
+    "result_reset_symbol": "app_reset_results"
+  },
+  "callbacks": [
+    {
+      "name": "vertex",
+      "params": [
+        "u32",
+        "f64",
+        "f64",
+        "f64"
+      ],
+      "returns": "void"
+    },
+    {
+      "name": "surface",
+      "params": [
+        "f64",
+        "f64",
+        "f64",
+        "f64",
+        "f64"
+      ],
+      "returns": "void"
+    },
+    {
+      "name": "resource",
+      "params": [
+        "u32",
+        "f64",
+        "f64"
+      ],
+      "returns": "void"
+    }
+  ],
+  "exports": [
+    {
+      "export": "frame",
+      "symbol": "app_frame",
+      "params": [
+        "f64",
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "dispose",
+      "symbol": "app_dispose",
+      "params": [],
+      "returns": "f64"
+    }
+  ]
+}

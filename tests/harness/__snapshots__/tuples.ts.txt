@@ -1,4 +1,4 @@
-tuples.ts:12:6 - error SC1090: tuple indexing with a non-literal index (tuples are fixed-shape — use t[0], t[1], ...) is not supported yet
+tuples.ts:12:6 - error SC1090: runtime-index writes to a heterogeneous fixed tuple (homogeneous tuple families use growable array storage) is not supported yet
 
   11 | console.log(pair[i]);
   12 | pair[i] = "b";

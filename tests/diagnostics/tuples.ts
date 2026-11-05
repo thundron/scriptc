@@ -1,12 +1,12 @@
 // Tuple + ref-element-array fences — what stays OUT of the new surface and
-// why: dynamic tuple index WRITES, optional/rest tuple elements (no fixed shape), variable-length
+// why: heterogeneous tuple index WRITES, optional/rest tuple elements (no fixed shape), variable-length
 // spreads into tuple literals, join on ref-element arrays (JS would
 // recursively toString). Map-element arrays now use reference storage;
 // keep them here as accepted adjacent coverage.
 const pair: [string, number] = ["a", 1];
 
 // Dynamic index: a READ dispatches over the positions (undefined off the
-// end, as Node); a WRITE still needs the literal-index shape.
+// end, as Node); a heterogeneous WRITE still needs a literal-index shape.
 let i = 0;
 console.log(pair[i]);
 pair[i] = "b";

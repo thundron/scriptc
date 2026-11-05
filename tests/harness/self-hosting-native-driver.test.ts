@@ -130,7 +130,7 @@ test(
       const manifestPath = seed + ".json";
       const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as NativeToolchainManifest;
       manifest.linker = absoluteCommand(manifest.linker);
-      if (process.platform === "linux") {
+      if (process.platform === "linux" || process.platform === "darwin") {
         // Clang delegates linking to a separate executable. Resolve it before
         // removing PATH so the complete native toolchain remains available.
         const linker = await exec(
@@ -148,7 +148,7 @@ test(
       let sanitizerCompiler: string | undefined;
       if (sanitize) {
         sanitizerCompiler = absoluteCommand(process.env["SCRIPTC_CC"] ?? "clang");
-        if (process.platform === "linux") {
+        if (process.platform === "linux" || process.platform === "darwin") {
           const linker = await exec(sanitizerCompiler, ["--print-prog-name=ld"], options);
           const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
           const wrapper = join(directory, "sanitizer-clang");
@@ -166,6 +166,12 @@ test(
         env: {
           ...process.env,
           PATH: "",
+          ...(sanitize && process.platform === "darwin"
+            ? {
+                ASAN_SYMBOLIZER_PATH:
+                  process.env["ASAN_SYMBOLIZER_PATH"] ?? absoluteCommand("llvm-symbolizer"),
+              }
+            : {}),
           SCRIPTC_TOOLCHAIN: manifestPath,
           SCRIPTC_CACHE_DIR: join(directory, "cache"),
           ...(sanitizerCompiler === undefined ? {} : { SCRIPTC_CC: sanitizerCompiler }),

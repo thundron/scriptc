@@ -9,14 +9,19 @@ import { afterEach, expect, test } from "vitest";
 import { compile } from "@scriptc/compiler";
 import type { TargetCpu } from "../target-cpu.js";
 
-const repoRoot = join(import.meta.dirname, "../../../..");
+const repoRoot = join(import.meta.dirname, "../../../../..");
 const cacheDir = join(repoRoot, "node_modules/.cache/scriptc-tests");
-const saved = { plan: process.env["SCRIPTC_LANES_PLAN"], cache: process.env["SCRIPTC_NO_CACHE"] };
+const saved = {
+  plan: process.env["SCRIPTC_LANES_PLAN"],
+  cache: process.env["SCRIPTC_NO_CACHE"],
+  target: process.env["SCRIPTC_TARGET"],
+};
 
 afterEach(() => {
   for (const [key, value] of [
     ["SCRIPTC_LANES_PLAN", saved.plan],
     ["SCRIPTC_NO_CACHE", saved.cache],
+    ["SCRIPTC_TARGET", saved.target],
   ] as const) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -48,11 +53,12 @@ async function emittedLlvm(
     outPath: join(outDir, name),
     outDir,
     backend: "llvm",
+    outputKind: "llvm",
     ...(options.targetCpu === undefined ? {} : { targetCpu: options.targetCpu }),
   });
   if (!result.ok)
     throw new Error(result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"));
-  return readFileSync(result.llvmPath, "utf8");
+  return readFileSync(result.artifact.path, "utf8");
 }
 
 function body(llvm: string, name: string): string {
@@ -149,6 +155,8 @@ test("a count's limit must be an exact integer in the element range", async () =
 });
 
 test("the target's vector width decides the lane count", async () => {
+  // Inspect x86 LLVM on every host; no x86 executable or cross runtime is needed.
+  process.env["SCRIPTC_TARGET"] = "x86_64-unknown-linux-gnu";
   const v3 = await emittedLlvm("v3", SOURCE, { plan: "sum", targetCpu: "x86-64-v3" });
   expect(body(v3, "sc_bf_sum")).toMatch(/load <8 x i16>, ptr [^,]+, align 1/);
   const v4 = await emittedLlvm("v4", SOURCE, { plan: "sum", targetCpu: "x86-64-v4" });

@@ -19,6 +19,7 @@ import {
   readSync,
   rmdirSync,
   unlinkSync,
+  writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -212,21 +213,44 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * would have been drained into the stream's buffer before the probe's short
  * line was flushed, and the write would find room and complete.
  *
- * The probe fills the FIFO, marks stderr, buffers one short line, then
- * writes to stderr again: that publish of the line blocks on the full FIFO.
+ * The parent fills the FIFO to its actual capacity before spawning the probe.
+ * The probe marks stderr, buffers one short line, then writes to stderr again:
+ * that publish of the line blocks on the full FIFO.
  * The signal lands while it is blocked; afterwards every byte is drained.
  * Returns everything that arrived. */
 async function interruptedFlush(
   cmd: string,
-): Promise<{ stdout: Buffer; stderr: string; code: number | null }> {
+): Promise<{ stdout: Buffer; stderr: string; code: number | null; filled: number }> {
   const dir = mkdtempSync(join(tmpdir(), "scriptc-console-io-"));
   const fifo = join(dir, "stdout.fifo");
   execFileSync("mkfifo", [fifo]);
   const readFd = openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK);
   const writeFd = openSync(fifo, constants.O_WRONLY);
+  let filled = 0,
+    writeOpen = true;
   try {
-    const child = spawn(cmd, [], { stdio: ["ignore", writeFd, "pipe"] });
+    // FIFO capacity is not universally 64 KiB (Darwin may allocate a smaller
+    // FIFO). Fill through a separate nonblocking open file description, leaving
+    // the child's descriptor blocking so the interrupted write is genuine.
+    const filler = openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK);
+    try {
+      const chunk = Buffer.alloc(4096, "a");
+      while (filled < 16 * 1024 * 1024) {
+        try {
+          filled += writeSync(filler, chunk);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "EAGAIN") break;
+          throw error;
+        }
+      }
+      if (filled === 0 || filled >= 16 * 1024 * 1024)
+        throw new Error("could not fill the probe FIFO");
+    } finally {
+      closeSync(filler);
+    }
+    const child = spawn(cmd, ["--prefilled"], { stdio: ["ignore", writeFd, "pipe"] });
     closeSync(writeFd);
+    writeOpen = false;
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     const closed = new Promise<number | null>((resolveClose, rejectClose) => {
@@ -278,8 +302,14 @@ async function interruptedFlush(
       stdout.push(Buffer.from(chunk.subarray(0, n)));
     }
     const code = await closed;
-    return { stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr).toString("utf8"), code };
+    return {
+      stdout: Buffer.concat(stdout),
+      stderr: Buffer.concat(stderr).toString("utf8"),
+      code,
+      filled,
+    };
   } finally {
+    if (writeOpen) closeSync(writeFd);
     closeSync(readFd);
     unlinkSync(fifo);
     rmdirSync(dir);
@@ -587,7 +617,7 @@ describe(`buffered stdout (--stdout-buffering)${sanitize ? " (sanitized)" : ""}`
       const trailer = "interrupted=1\n";
       expect(res.stdout.toString("utf8").endsWith(trailer)).toBe(true);
       const body = res.stdout.subarray(0, res.stdout.length - trailer.length);
-      expect(body.toString("utf8")).toBe("a".repeat(65536) + "pending-line\n");
+      expect(body.toString("utf8")).toBe("a".repeat(res.filled) + "pending-line\n");
     },
   );
 });

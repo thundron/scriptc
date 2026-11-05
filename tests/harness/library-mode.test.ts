@@ -188,6 +188,21 @@ function nmSymbols(archive: string): { defined: Set<string>; undef: Set<string> 
   return { defined, undef };
 }
 
+platformTest(
+  "checked-unknown library casts link adoption metadata on fresh and cached builds",
+  async () => {
+    const sanitize = flavor === "san";
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const { archive, outDir } = await buildLibrary("checked-adoption", "llvm", { sanitize });
+      const probe = buildProbe("checked-adoption", archive, outDir, { sanitize });
+      const result = runProbe(probe);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe("100 native checked-cast library calls passed\n");
+    }
+  },
+);
+
 /* ── K2 + K1 + K8: scalars ─────────────────────────────────────────────── */
 
 const SCALARS_EXPECTED = `scalars ready

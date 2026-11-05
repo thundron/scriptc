@@ -1,0 +1,23 @@
+{
+  "profile_format": 1,
+  "name": "native_adoption",
+  "entry": "main.ts",
+  "emission": "llvm",
+  "abi": {
+    "prefix": "n_",
+    "init_symbol": "n_init",
+    "sink_register_symbol": "n_sink",
+    "collect_symbol": "n_collect"
+  },
+  "callbacks": [],
+  "exports": [
+    {
+      "export": "parse",
+      "symbol": "n_parse",
+      "params": [
+        "string"
+      ],
+      "returns": "f64"
+    }
+  ]
+}

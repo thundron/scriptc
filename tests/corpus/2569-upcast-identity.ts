@@ -1,7 +1,7 @@
 // Identity compares across hierarchy upcasts: one object retained and
 // released through BOTH its base-typed and derived-typed spellings in a
 // single statement frame, plus a freshly constructed operand in the same
-// call — the emitted C type-puns the object header through both struct
+// call — the emitted LLVM type-puns the object header through both struct
 // types, which clang's TBAA at -O2 used to miscompile into a premature
 // free (the global still owned the object when release_globals ran).
 class Base {

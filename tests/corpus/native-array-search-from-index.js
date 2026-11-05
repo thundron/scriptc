@@ -1,0 +1,11 @@
+const values = JSON.parse('[1,2,1,3]');
+console.log(values.indexOf(1), values.indexOf(1, 1), values.indexOf(1, -2));
+console.log(values.indexOf(2, 3), values.indexOf(2, -9));
+console.log(values.lastIndexOf(1), values.lastIndexOf(1, 1), values.lastIndexOf(1, -2));
+console.log(values.lastIndexOf(3, -9), values.lastIndexOf(3, 99));
+console.log(values.includes(1, 2), values.includes(1, 3), values.includes(3, -1));
+console.log(values.includes(2, 8), values.includes(2, -8));
+const empty = JSON.parse('[]');
+let conversions = 0;
+const from = { valueOf() { conversions++; return 0; } };
+console.log(empty.indexOf(1, from), empty.lastIndexOf(1, from), empty.includes(1, from), conversions);

@@ -1,29 +1,33 @@
-import createMDX from "@next/mdx";
-import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { createGeistdocs } from "@vercel/geistdocs/next";
 
-// Resolve the plugin to an absolute path (still a string, so the config
-// stays serializable for Turbopack). A bare "remark-gfm" is require()d
-// from the MDX loader's own package context, which under pnpm's strict
-// module isolation cannot see this app's dependencies — production
-// builds resolved it, the Turbopack dev server did not.
-const require = createRequire(import.meta.url);
+const withGeistdocs = createGeistdocs();
+const legacySlugs = ["quickstart", "coverage", "dependencies", "ffi", "native-objects", "wasm", "platforms", "cli", "how-it-works", "limitations"];
 
-const withMDX = createMDX({
-  options: {
-    // GFM is what gives .mdx pages autolinks and strikethrough. Tables are
-    // authored as literal HTML per AGENTS.md, but the plugin stays so a
-    // stray pipe table degrades gracefully instead of rendering as a
-    // paragraph of pipes.
-    remarkPlugins: [[require.resolve("remark-gfm")]],
-  },
-});
+// The compatibility page fetches its data under a content hash of the
+// committed artifact, so a deploy never serves a cached older copy, and
+// checks the row count it expects. Both are derived here at build time.
+const compatibilityArtifact = readFileSync(new URL("./src/generated/node-v24-compatibility.json", import.meta.url), "utf8");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  pageExtensions: ["ts", "tsx", "md", "mdx"],
-  // CI-style builds set NEXT_DIST_DIR so `pnpm check` never shares .next
-  // with a running dev server (a shared dist dir corrupts the dev cache).
+  env: {
+    COMPATIBILITY_ARTIFACT_VERSION: createHash("sha256").update(compatibilityArtifact).digest("hex").slice(0, 20),
+    COMPATIBILITY_ROW_COUNT: String(JSON.parse(compatibilityArtifact).rows.length),
+  },
+  agentRules: false,
+  allowedDevOrigins: ["127.0.0.1"],
   distDir: process.env.NEXT_DIST_DIR || ".next",
+  skipProxyUrlNormalize: true,
+  async redirects() {
+    return [
+      { source: "/introduction", destination: "/docs", permanent: true },
+      { source: "/docs/introduction", destination: "/docs", permanent: true },
+      ...legacySlugs.map((slug) => ({ source: `/${slug}`, destination: `/docs/${slug}`, permanent: true })),
+    ];
+  },
+  outputFileTracingIncludes: { "/og/[...slug]": ["./public/*.ttf"], "/og": ["./public/*.ttf"] },
 };
 
-export default withMDX(nextConfig);
+export default withGeistdocs(nextConfig);

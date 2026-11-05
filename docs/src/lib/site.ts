@@ -16,4 +16,4 @@ export const tagline = "TypeScript-to-Native Compiler";
 
 /** The one-sentence description used in metadata. */
 export const description =
-  "scriptc compiles ordinary TypeScript into small, fast native executables — no Node, no V8, no JavaScript engine in the binary. Same code, checked by the real TypeScript compiler, compiled to native.";
+  "scriptc compiles TypeScript and JavaScript to native executables and WebAssembly. Build executables, compile npm dependencies, and check Node.js API support.";

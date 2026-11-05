@@ -1,0 +1,1 @@
+import * as Schema from "effect/Schema";import * as JsonSchema from "effect/JsonSchema";import * as SchemaRepresentation from "effect/SchemaRepresentation";const S=SchemaRepresentation.fromJsonSchemaDocument(JsonSchema.fromSchemaDraft2020_12({type:"string"}));console.log(Schema.decodeUnknownSync(S as Schema.Codec<string>)("world"))

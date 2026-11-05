@@ -1,12 +1,12 @@
 // Tuple + ref-element-array fences — what stays OUT of the new surface and
-// why: dynamic tuple indexing (heterogeneous positions have no single
-// element type), optional/rest tuple elements (no fixed shape), for-of over
-// tuples, spread into tuple literals, join on ref-element arrays (JS would
-// recursively toString), and Map-element arrays (hashed storage has no
-// element representation in the array runtime).
+// why: heterogeneous tuple index WRITES, optional/rest tuple elements (no fixed shape), variable-length
+// spreads into tuple literals, join on ref-element arrays (JS would
+// recursively toString). Map-element arrays now use reference storage;
+// keep them here as accepted adjacent coverage.
 const pair: [string, number] = ["a", 1];
 
-// Dynamic index: reads and writes both need the literal-index shape.
+// Dynamic index: a READ dispatches over the positions (undefined off the
+// end, as Node); a heterogeneous WRITE still needs a literal-index shape.
 let i = 0;
 console.log(pair[i]);
 pair[i] = "b";
@@ -21,21 +21,13 @@ for (const part of pair) {
   console.log(part);
 }
 
-// Spread has no fixed positions inside a tuple literal.
-const copy: [string, number] = [...pair];
-
-// The arity constant folds only off side-effect-free receivers.
-function mk(): [string, number] {
-  return ["z", 9];
-}
-console.log(mk().length);
+// An array's runtime length cannot determine a fixed tuple's positions.
+const copy = [...(["a", 1] as (string | number)[])] as [string, number];
 
 // join on ref-element arrays: JS would recursively toString — dishonest.
 const recs: { id: number }[] = [{ id: 1 }];
 console.log(recs.join(","));
 const tuples: [string, string][] = [["k", "v"]];
 console.log(tuples.join(";"));
-
-// Map elements stay out entirely (function elements compile — the REF
-// element kind).
+// Map elements compile through the same REF storage as function elements.
 const maps: Map<string, number>[] = [];

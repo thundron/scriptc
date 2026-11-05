@@ -19,6 +19,15 @@ static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
 static int inited = 0, a_trapped = 0;
 
+static void init_instance(void) {
+  /* The startup message writes its text and newline separately. Serialize
+   * initialization before the barrier that begins the re-entry checks. */
+  pthread_mutex_lock(&mu);
+  cbt_init();
+  fflush(stdout);
+  pthread_mutex_unlock(&mu);
+}
+
 typedef struct {
   pthread_t self;
   int reenter;
@@ -97,8 +106,7 @@ static void *worker_a(void *arg) {
   cbt_set_panic_sink(sink, w);
   cbt_set_callback("emitChunk", (cb_fn)on_chunk, w);
   cbt_set_callback("note", (cb_fn)on_note, NULL);
-  cbt_init();
-  fflush(stdout); /* keep the two independent init logs line-separated */
+  init_instance();
   signal_value(&inited);
   wait_for(&inited, 2);
   if (setjmp(w->trap_jmp) == 0) {
@@ -116,8 +124,7 @@ static void *worker_b(void *arg) {
   cbt_set_panic_sink(sink, w);
   cbt_set_callback("emitChunk", (cb_fn)on_chunk, w);
   cbt_set_callback("note", (cb_fn)on_note, NULL);
-  cbt_init();
-  fflush(stdout); /* keep the two independent init logs line-separated */
+  init_instance();
   signal_value(&inited);
   wait_for(&inited, 2);
   wait_for(&a_trapped, 1);

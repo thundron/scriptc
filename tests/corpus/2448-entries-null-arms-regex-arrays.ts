@@ -1,13 +1,13 @@
 // Three static families in one program: Object.entries/values over
 // unit-armed (null | undefined) fields, RegExp values as array elements,
 // and JSON.stringify over a dyn root holding undefined — all byte-exact
-// against Node on both backends.
+// against Node through LLVM.
 //
 // ── Object.entries/values over shapes whose fields are `null | undefined` —
 // the mixed-defaults spread idiom (`{ ...defaults, ...overrides }` where a
 // default is null and the merged field types optional): a unit-armed field
 // with null as its ONE value arm pushes the null literal, guarded by the
-// undefined skip (an unset optional never made it into the object).
+// field's presence (an unset optional never made it into the object).
 interface MergedDefaults {
   rangeStart: number;
   parser: string;
@@ -33,7 +33,7 @@ for (const [k, v] of Object.entries(bothSet)) {
   console.log(`${k}=${String(v)}`);
 }
 
-// Neither present: the undefined guard skips both keys, exactly Node's
+// Neither present: the presence guard skips both keys, exactly Node's
 // missing-key answer for unset optionals.
 const noneSet: MergedDefaults = { rangeStart: 7, parser: "meriyah" };
 console.log(Object.keys(noneSet).join(","));
@@ -88,7 +88,7 @@ console.log(popped === undefined ? "none" : popped.source, grown.length);
 
 // ── JSON.stringify over a dyn root holding undefined ─────────────────────
 // JSON.stringify(undefined) is the undefined VALUE; printing it spells the
-// word — both backends ride the same dyn walker (a nested-position writer
+// word — the dyn walker handles both paths (a nested-position writer
 // would spell null; the root is special).
 const u: unknown = undefined;
 console.log(JSON.stringify(u));

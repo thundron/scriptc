@@ -6,8 +6,7 @@
  *   }
  *   console.log(fib(10));           // 55
  *
- * Exercises the IR (and later the C emitter) from the consumer side before
- * any frontend exists.
+ * Exercises the IR and LLVM emitter directly, without the frontend.
  */
 import type { IrExpr, IrModule, SrcLoc } from "../../src/ir/ir.js";
 import { BOOL, F64, VOID } from "../../src/ir/ir.js";
@@ -18,7 +17,7 @@ const n = (localId: string): IrExpr => ({ kind: "varRef", localId, type: F64, lo
 const num = (value: number): IrExpr => ({ kind: "numLit", value, type: F64, loc });
 
 export const fibModule: IrModule = {
-  irVersion: 6,
+  irVersion: 17,
   sourceFile: "fib.ts",
   entry: "__main",
   functions: [

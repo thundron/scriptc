@@ -1,11 +1,26 @@
 const encoder = new TextEncoder();
-console.log(encoder);
 
 function encodeCaptured(s: string): Uint8Array {
   return sharedEncoder.encode(s);
 }
+
+const decoder = new TextDecoder();
+new TextDecoder("utf-8", { fatal: true });
+encoder.encodeInto("hello", new Uint8Array(10));
+const forged = JSON.parse("{}") as TextDecoder;
+console.log(forged.decode());
 const sharedEncoder = new TextEncoder();
 console.log(encodeCaptured("x").length);
+// A module var's pre-initialization value is not a codec instance.
+var varEncoder = new TextEncoder();
+let uninitializedDecoder: TextDecoder;
+function earlyVarCapture(): Uint8Array {
+  const use = () => localEncoder.encode("x");
+  const bytes = use();
+  var localEncoder = new TextEncoder();
+  return bytes;
+}
+console.log(earlyVarCapture().length);
 
 let codecCase = 1;
 switch (codecCase) {

@@ -24,6 +24,9 @@ struct ScrUrl {
    * read answers the SAME view — Node's cached-object identity — and
    * view mutations write back into `query` (sp_sync_owner). */
   struct ScrSearchParams *sp_cache;
+  /* Installed by the optional params unit; setters can refresh a cached
+   * list without making params-free URL programs link that unit. */
+  void (*sp_reload)(struct ScrSearchParams *sp, ScrStr *query);
 };
 
 #endif /* SCR_URL_INTERNAL_H */

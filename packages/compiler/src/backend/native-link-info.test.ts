@@ -1,137 +1,102 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { describe, expect, test } from "vitest";
-import { loadFfiProfile } from "../ffi/ffi-manifest.js";
+import { describe, expect, test, vi } from "vitest";
 import { createNativeLinkInfo, type NativeLinkFeatures } from "./native-link-info.js";
-import { MACOS_ARM64_TARGET } from "./targets.js";
+import { MACOS_ARM64_TARGET, WASM32_WASI_TARGET } from "./targets.js";
+import { loadRuntimePack } from "./runtime-pack.js";
 
-const BASE: NativeLinkFeatures = {
-  dynamic: false,
-  regex: false,
-  copying: false,
-  textDecoderLegacy: false,
-  fileHandle: false,
-  fetch: false,
-  netIsland: false,
-  zlib: false,
-  assert: false,
-  inspect: false,
-  dynInvoke: false,
-  dc: false,
-  dynAsync: false,
-  events: false,
-  emitter: false,
-  symbol: false,
-  searchParams: false,
-  qs: false,
-  parseArgs: false,
-  stream: false,
-  net: false,
-  http: false,
-  http2: false,
-  dgram: false,
-  watch: false,
-  foreignFfi: false,
-  nodeTest: false,
-  tls: false,
-  tlsCa: false,
-};
+vi.mock("./runtime-pack.js", () => ({
+  loadRuntimePack: vi.fn(async ({ target, optimization }) => ({
+    root: "/installed/runtime",
+    manifest: { package: target.runtimePackPackage, version: "1.2.3" },
+    flavor: optimization,
+    runtimeObjects: ["/installed/runtime/base.o"],
+    archives: ["/installed/runtime/vendor.a"],
+    selectedRuntimeArtifacts: [{ path: "base.o", sha256: "1".repeat(64), size: 42 }],
+    selectedArchiveArtifacts: [{ path: "vendor.a", sha256: "2".repeat(64), size: 84 }],
+    systemLibraries: [...target.runtimeSystemLibraries],
+  })),
+}));
+const features = {} as NativeLinkFeatures;
 
-describe("native link info recipes", () => {
-  test("feature source sets reproduce runtime and vendor gates", async () => {
+describe("native link info", () => {
+  test("reports verified precompiled inputs with their integrity metadata and link order", async () => {
     const info = await createNativeLinkInfo({
       programObject: "/out/app.o",
       target: MACOS_ARM64_TARGET,
-      features: {
-        ...BASE,
-        dynamic: true,
-        regex: true,
-        inspect: true,
-        zlib: true,
-        tls: true,
+      features,
+      ffi: {
+        ffiFormat: 7,
+        libraries: ["/ffi/native.a"],
+        systemLibraries: ["sqlite3"],
+        frameworks: ["Foundation"],
+        functions: [
+          { name: "native", symbol: "native", params: [], returns: "void" },
+          {
+            name: "release",
+            symbol: "release",
+            params: [],
+            returns: "void",
+            callbackOperation: "release",
+          },
+        ],
       },
-      ffi: null,
     });
-    const runtime = info.runtime_pack.source_sets.find((set) => set.name === "runtime")!;
-    expect(runtime.sources).toEqual(expect.arrayContaining([
-      "src/scr_regex.c",
-      "src/scr_assert.c",
-      "src/scr_inspect.c",
-      "src/scr_zlib.c",
-      "src/scr_zlib_island.c",
-      "src/scr_tls.c",
-      "src/scr_tls_ca.c",
-      "src/scr_island.c",
-      "src/scr_web.c",
-      "src/scr_inspect_island.c",
-    ]));
-    expect(info.runtime_pack.source_sets.map((set) => set.name)).toEqual([
-      "runtime", "quickjs", "mbedtls",
-    ]);
-    expect(info.runtime_pack.source_sets.find((set) => set.name === "mbedtls")!.sources.length)
-      .toBeGreaterThan(100);
-    expect(info.link.system_libraries).toEqual(["System", "z", "m"]);
-  });
-
-  test("dev object recipes keep runtime optimization in lockstep", async () => {
-    const info = await createNativeLinkInfo({
-      programObject: "/out/app.o",
-      target: MACOS_ARM64_TARGET,
-      features: BASE,
-      ffi: null,
-      optimization: "dev",
+    expect(info.runtime_pack).toEqual({
+      kind: "precompiled",
+      package: "@scriptc/runtime-darwin-arm64",
+      version: "1.2.3",
+      root: "/installed/runtime",
+      path_base: "runtime_pack.root",
+      flavor: "release",
+      objects: [{ path: "base.o", sha256: "1".repeat(64), size: 42 }],
+      archives: [{ path: "vendor.a", sha256: "2".repeat(64), size: 84 }],
     });
-    expect(info.runtime_pack.source_sets[0]?.c_flags).toContain("-O0");
-    expect(info.runtime_pack.source_sets[0]?.c_flags).not.toContain("-O2");
-    // External objects are compiled separately and the driver recipe is an
-    // executable link. The two halves must not leak into each other's recipe.
-    expect(info.runtime_pack.source_sets[0]?.c_flags).not.toContain("-Wl,-dead_strip");
-    expect(info.link.driver_flags).toContain("-Wl,-dead_strip");
-  });
-
-  test("static external-object links dead-strip just like dynamic links", async () => {
-    const info = await createNativeLinkInfo({
-      programObject: "/out/app.o",
-      target: MACOS_ARM64_TARGET,
-      features: BASE,
-      ffi: null,
-    });
-    expect(info.link.driver_flags).toContain("-Wl,-dead_strip");
-  });
-
-  test("FFI symbols and resolved inputs remain ordered before the runtime", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "scriptc-native-link-info-unit-"));
-    const library = join(dir, "native.o");
-    const manifest = join(dir, "ffi.json");
-    await writeFile(library, "fixture");
-    await writeFile(manifest, JSON.stringify({
-      ffi_format: 1,
-      functions: [{
-        name: "nativeScale",
-        symbol: "native_scale",
-        params: ["f64"],
-        returns: "f64",
-      }],
-      libraries: ["./native.o"],
-      system_libraries: ["sqlite3"],
-    }));
-    const loaded = loadFfiProfile(manifest);
-    if (!loaded.ok) throw new Error(loaded.diagnostics[0]?.message);
-    const info = await createNativeLinkInfo({
-      programObject: "/out/app.o",
-      target: MACOS_ARM64_TARGET,
-      features: BASE,
-      ffi: loaded.profile,
-    });
-    expect(info.ffi).toEqual({
-      format: 1,
-      symbols: ["native_scale"],
-      libraries: [library],
-    });
-    expect(info.link.input_order.slice(0, 3)).toEqual([
-      "/out/app.o", library, "runtime/*.o",
+    expect(info.ffi.symbols).toEqual(["native"]);
+    expect(info.link.input_order).toEqual([
+      "/installed/runtime/base.o",
+      "/installed/runtime/vendor.a",
+      "/out/app.o",
+      "/ffi/native.a",
     ]);
     expect(info.link.system_libraries).toEqual(["sqlite3", "System"]);
+    expect(info.link.frameworks).toEqual(["Foundation"]);
+    expect(info.link.driver_flags).toContain("-Wl,-dead_strip");
+    expect(loadRuntimePack).toHaveBeenLastCalledWith({
+      target: MACOS_ARM64_TARGET,
+      features,
+      optimization: "release",
+    });
+  });
+
+  test("WASI release and dev select their runtime flavor and debug-link policy", async () => {
+    for (const optimization of ["release", "dev"] as const) {
+      const info = await createNativeLinkInfo({
+        programObject: "/out/app.o",
+        target: WASM32_WASI_TARGET,
+        features,
+        ffi: null,
+        optimization,
+      });
+      expect(info.runtime_pack.flavor).toBe(optimization);
+      expect(info.link.driver_flags.includes("-Wl,--strip-debug")).toBe(optimization === "release");
+    }
+  });
+
+  test("rejects non-Darwin frameworks before selecting a pack", async () => {
+    vi.mocked(loadRuntimePack).mockClear();
+    await expect(
+      createNativeLinkInfo({
+        programObject: "/out/app.o",
+        target: WASM32_WASI_TARGET,
+        features,
+        ffi: {
+          ffiFormat: 7,
+          libraries: [],
+          systemLibraries: [],
+          frameworks: ["Foundation"],
+          functions: [],
+        },
+      }),
+    ).rejects.toThrow("Darwin");
+    expect(loadRuntimePack).not.toHaveBeenCalled();
   });
 });

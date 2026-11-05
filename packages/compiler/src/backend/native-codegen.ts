@@ -1,8 +1,18 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { constants } from "node:fs";
+import { createHash, type Hash } from "node:crypto";
+import { closeSync, constants, openSync, readSync } from "node:fs";
 import { createRequire } from "node:module";
-import { access, chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  copyFile,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -17,8 +27,9 @@ import {
 import {
   nativeArtifactDependenciesStillMatch,
   snapshotNativeArtifactDependencies,
-  type NativeArtifactDependency,
-} from "./native-toolchain.js";
+} from "./native/artifact-stamps.js";
+import { type NativeArtifactDependency } from "./native/contracts.js";
+import { readHelperIdentityDigest, writeHelperIdentity } from "./native/helper-identity-record.js";
 import {
   nativeCodegenTarget,
   nativeCodegenTargetRefusal,
@@ -27,35 +38,31 @@ import {
   type NativeTargetSpec,
 } from "./targets.js";
 import { compilerReleaseVersion } from "../library/sidecar.js";
+import {
+  nativeProfileHelperArgs,
+  nativeProfileKey,
+  parseNativeProfileMatch,
+  type NativeProfileMatch,
+  type NativeProfileOptions,
+} from "./native-profile.js";
+import { writeTextParts } from "../text-parts.js";
+
+import {
+  NativeCodegenError,
+  nativePartitionPaths,
+  validateNativeCodegenVersion as validateHelperVersion,
+  type NativeCodegenVersion,
+  type NativeCodegenOutputKind,
+} from "./native-codegen-core.js";
+export {
+  NATIVE_CODEGEN_PROTOCOL_VERSION,
+  NATIVE_CODEGEN_LLVM_VERSION,
+  NativeCodegenError,
+  type NativeCodegenVersion,
+  type NativeCodegenOutputKind,
+} from "./native-codegen-core.js";
 
 const execFileAsync = promisify(execFile);
-export const NATIVE_CODEGEN_PROTOCOL_VERSION = "1";
-export const NATIVE_CODEGEN_LLVM_VERSION = "22.1.8";
-
-export type NativeCodegenOutputKind = "asm" | "obj";
-
-export class NativeCodegenError extends Error {
-  constructor(
-    readonly diagnosticCode: "SC3002" | "SC3003" | "SC3004",
-    message: string,
-    readonly detailCode?: string,
-  ) {
-    super(message);
-    this.name = "NativeCodegenError";
-  }
-}
-
-export interface NativeCodegenVersion {
-  ok: true;
-  protocol_version: string;
-  scriptc_package_version: string;
-  llvm_version: string;
-  host_triple: string;
-  targets: string[];
-  supported_targets: string[];
-  default_target: string;
-  data_layout: string;
-}
 
 interface HelperIdentity {
   packageName: string;
@@ -73,38 +80,80 @@ interface ResolvedHelper {
 export interface NativeCodegenArtifact {
   /** Exact installed inputs observed before the helper identity and emission. */
   dependencies: NativeArtifactDependency[];
+  /** Every emitted file, starting with the requested output path. */
+  outputPaths: string[];
+  /** How the build's profile matched, when it used one and the helper ran. */
+  profileMatch?: NativeProfileMatch;
 }
 
 const resolvedHelperCache = new Map<string, Promise<ResolvedHelper>>();
 
+/** LLVM text already written to `file`, of `bytes` bytes, which a build passes on without reading it. */
+export interface LlvmFile {
+  readonly file: string;
+  readonly bytes: number;
+}
+
+/** LLVM text as a string, as parts to concatenate, or as a file. */
+export type LlvmInput = string | readonly string[] | LlvmFile;
+
+export function isLlvmFile(llvm: LlvmInput): llvm is LlvmFile {
+  return typeof llvm === "object" && !Array.isArray(llvm);
+}
+
+/** The size of `llvm` in bytes. */
+export function llvmInputBytes(llvm: LlvmInput): number {
+  if (isLlvmFile(llvm)) return llvm.bytes;
+  return (typeof llvm === "string" ? [llvm] : llvm).reduce(
+    (bytes, part) => bytes + Buffer.byteLength(part),
+    0,
+  );
+}
+
 export interface NativeCodegenOptions {
   outputPath: string;
-  llvm: string;
+  llvm: LlvmInput;
   outputKind: NativeCodegenOutputKind;
   sourcePath: string;
   optimization?: "0" | "1" | "2" | "3" | "s" | "z";
   sanitize?: boolean;
   target?: NativeTargetSpec;
   /** Test seam for package selection on a simulated host. */
-  helperHost?: { platform: NodeJS.Platform; arch: string };
+  helperHost?: { platform: NodeJS.Platform; arch: string; linuxLibc?: "gnu" | "musl" };
   /** Test seam: still resolves a package path, never searches PATH. */
   resolvePackageJson?: (specifier: string) => string;
   /** Internal/test override; omitted production calls use the shared cache. */
   cacheRoot?: string | null;
+  /** Program partitions, written to nativePartitionPaths(outputPath). */
+  partitions?: number;
+  /** Profile-guided optimization: instrumentation or an indexed profile. */
+  profile?: NativeProfileOptions;
+}
+
+/** Writes LLVM text in large batches; see `writeTextParts`. */
+export async function writeLlvmSource(
+  path: string,
+  llvm: string | readonly string[],
+  mode = 0o666,
+): Promise<void> {
+  await writeTextParts(path, llvm, mode);
 }
 
 function parseJsonObject(text: string): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(text);
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
+      ? (parsed as Record<string, unknown>)
       : null;
   } catch {
     return null;
   }
 }
 
-function helperFailureMessage(stderr: string, fallback: string): { code?: string; message: string } {
+function helperFailureMessage(
+  stderr: string,
+  fallback: string,
+): { code?: string; message: string } {
   const parsed = parseJsonObject(stderr.trim());
   return {
     ...(typeof parsed?.["code"] === "string" ? { code: parsed["code"] } : {}),
@@ -112,7 +161,10 @@ function helperFailureMessage(stderr: string, fallback: string): { code?: string
   };
 }
 
-async function invoke(binaryPath: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+async function invoke(
+  binaryPath: string,
+  args: string[],
+): Promise<{ stdout: string; stderr: string }> {
   try {
     return await execFileAsync(binaryPath, args, {
       encoding: "utf8",
@@ -136,50 +188,15 @@ export function validateNativeCodegenVersion(
   target: NativeTargetSpec,
   helper: NativeHelperSpec,
 ): NativeCodegenVersion {
-  const expectedPackageVersion = compilerReleaseVersion();
-  const mismatch = (field: string, expected: string): never => {
-    throw new NativeCodegenError(
-      "SC3003",
-      `LLVM native helper is incompatible: ${field} is ${JSON.stringify(value[field])}, expected ${JSON.stringify(expected)}; reinstall scriptc so its compiler and ${helper.packageName} packages have matching versions`,
-      "version_mismatch",
-    );
-  };
-  if (value["ok"] !== true) mismatch("ok", "true");
-  if (value["protocol_version"] !== NATIVE_CODEGEN_PROTOCOL_VERSION) {
-    mismatch("protocol_version", NATIVE_CODEGEN_PROTOCOL_VERSION);
-  }
-  if (value["scriptc_package_version"] !== expectedPackageVersion) {
-    mismatch("scriptc_package_version", expectedPackageVersion);
-  }
-  if (value["llvm_version"] !== NATIVE_CODEGEN_LLVM_VERSION) {
-    mismatch("llvm_version", NATIVE_CODEGEN_LLVM_VERSION);
-  }
-  if (value["default_target"] !== helper.defaultTarget) {
-    mismatch("default_target", helper.defaultTarget);
-  }
-  if (value["data_layout"] !== helper.defaultDataLayout) {
-    mismatch("data_layout", helper.defaultDataLayout);
-  }
-  if (!Array.isArray(value["targets"]) || !value["targets"].includes(target.llvmBackend)) {
-    mismatch("targets", `an array containing ${target.llvmBackend}`);
-  }
-  if (!Array.isArray(value["supported_targets"]) || !value["supported_targets"].includes(target.llvmTriple)) {
-    mismatch("supported_targets", `an array containing ${target.llvmTriple}`);
-  }
-  if (typeof value["host_triple"] !== "string") mismatch("host_triple", "a string");
-  return value as unknown as NativeCodegenVersion;
+  return validateHelperVersion(value, target, helper, compilerReleaseVersion());
 }
 
 async function resolveHelper(
   target: NativeTargetSpec,
   resolver?: (specifier: string) => string,
-  host?: { platform: NodeJS.Platform; arch: string },
+  host?: { platform: NodeJS.Platform; arch: string; linuxLibc?: "gnu" | "musl" },
 ): Promise<ResolvedHelper> {
-  const helper = nativeHelperForTarget(
-    target,
-    host?.platform,
-    host?.arch,
-  );
+  const helper = nativeHelperForTarget(target, host?.platform, host?.arch, host?.linuxLibc);
   if (helper === null) {
     throw new NativeCodegenError(
       "SC3002",
@@ -187,15 +204,15 @@ async function resolveHelper(
       "unsupported_helper_host",
     );
   }
-  const resolvePackageJson = resolver ?? ((specifier: string) =>
-    createRequire(import.meta.url).resolve(specifier));
+  const resolvePackageJson =
+    resolver ?? ((specifier: string) => createRequire(import.meta.url).resolve(specifier));
   let packageJsonPath: string;
   try {
     packageJsonPath = resolvePackageJson(`${helper.packageName}/package.json`);
   } catch {
     throw new NativeCodegenError(
       "SC3003",
-      `LLVM native helper package ${helper.packageName} is not installed; reinstall scriptc with optional dependencies enabled for this host`,
+      `LLVM native helper package ${helper.packageName} is not installed; build it with \`pnpm --filter ${helper.packageName} run build:native\`, or reinstall scriptc with optional dependencies enabled for this host`,
       "missing_package",
     );
   }
@@ -211,7 +228,7 @@ async function resolveHelper(
   } catch {
     throw new NativeCodegenError(
       "SC3003",
-      `LLVM native helper package ${helper.packageName} is incomplete: ${binaryPath} is missing; reinstall scriptc`,
+      `LLVM native helper package ${helper.packageName} is incomplete: ${binaryPath} is missing; build it with \`pnpm --filter ${helper.packageName} run build:native\`, or reinstall scriptc`,
       "missing_binary",
     );
   }
@@ -219,7 +236,8 @@ async function resolveHelper(
     if (
       process.platform !== "win32" &&
       ((binaryStat.mode & 0o444) === 0 || (binaryStat.mode & 0o111) === 0)
-    ) throw new Error("missing read or execute mode bits");
+    )
+      throw new Error("missing read or execute mode bits");
     await access(binaryPath, constants.R_OK | constants.X_OK);
   } catch {
     throw new NativeCodegenError(
@@ -242,19 +260,34 @@ async function resolveHelper(
   // host-native ISA plus WebAssembly). Cache only after the target backend
   // has also been checked; otherwise a prior X86 lookup could accidentally
   // bless a later WASI request against an older X86-only package.
-  const cacheKey = JSON.stringify({ dependencies, targetBackend: target.llvmBackend });
+  const cacheKey = JSON.stringify({ dependencies, targetTriple: target.llvmTriple });
   const load = async (): Promise<ResolvedHelper> => {
+    // An install records its helper digest once; later builds prove the
+    // recorded files are unchanged with a stat of each, instead of reading and
+    // hashing the whole binary for a digest that cannot have changed.
+    const recordedDigest = await readHelperIdentityDigest(
+      packageJsonPath,
+      binaryPath,
+      dependencies,
+    );
     let stdout: string;
-    let binary: Buffer;
+    let binaryDigest: string;
     try {
-      [{ stdout }, binary] = await Promise.all([
-        invoke(binaryPath, ["version", "--format=json"]),
-        readFile(binaryPath),
-      ]);
+      if (recordedDigest !== null) {
+        ({ stdout } = await invoke(binaryPath, ["version", "--format=json"]));
+        binaryDigest = recordedDigest;
+      } else {
+        let binary: Buffer;
+        [{ stdout }, binary] = await Promise.all([
+          invoke(binaryPath, ["version", "--format=json"]),
+          readFile(binaryPath),
+        ]);
+        binaryDigest = createHash("sha256").update(binary).digest("hex");
+      }
     } catch (error) {
       throw new NativeCodegenError(
         "SC3003",
-        `LLVM native helper package ${helper.packageName} could not be read and executed for its identity check: ${error instanceof Error ? error.message : String(error)}; reinstall scriptc`,
+        `LLVM native helper package ${helper.packageName} could not be ${recordedDigest === null ? "read and executed" : "executed"} for its identity check: ${error instanceof Error ? error.message : String(error)}; reinstall scriptc`,
         "identity_probe_failed",
       );
     }
@@ -273,14 +306,22 @@ async function resolveHelper(
         "helper_changed",
       );
     }
+    const version = validateNativeCodegenVersion(rawVersion, target, helper);
+    if (recordedDigest === null) {
+      // The record only saves work on later builds; an install that cannot
+      // hold it, such as a read-only package, builds exactly as before.
+      await writeHelperIdentity(packageJsonPath, binaryPath, binaryDigest, dependencies).catch(
+        () => undefined,
+      );
+    }
     return {
       packageJsonPath,
       binaryPath,
       dependencies,
       identity: {
         packageName: helper.packageName,
-        binaryDigest: createHash("sha256").update(binary).digest("hex"),
-        version: validateNativeCodegenVersion(rawVersion, target, helper),
+        binaryDigest,
+        version,
       },
     };
   };
@@ -295,10 +336,32 @@ async function resolveHelper(
   return pending;
 }
 
-function cacheKey(options: NativeCodegenOptions, target: NativeTargetSpec, helper: HelperIdentity): string {
-  return createHash("sha256")
-    .update("scriptc-native-codegen-v1\0")
-    .update(options.llvm)
+/** Adds the bytes of `file` to `hash`, as `hash.update` of the text written there would. */
+function updateHashFromFile(hash: Hash, file: string): void {
+  const fd = openSync(file, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(4 * 1024 * 1024);
+    for (;;) {
+      const read = readSync(fd, buffer, 0, buffer.length, null);
+      if (read === 0) break;
+      hash.update(buffer.subarray(0, read));
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function cacheKey(
+  options: NativeCodegenOptions,
+  target: NativeTargetSpec,
+  helper: HelperIdentity,
+): string {
+  const hash = createHash("sha256").update("scriptc-native-codegen-v1\0");
+  if (isLlvmFile(options.llvm)) updateHashFromFile(hash, options.llvm.file);
+  else
+    for (const part of typeof options.llvm === "string" ? [options.llvm] : options.llvm)
+      hash.update(part);
+  return hash
     .update("\0")
     .update(JSON.stringify(target))
     .update("\0")
@@ -311,6 +374,8 @@ function cacheKey(options: NativeCodegenOptions, target: NativeTargetSpec, helpe
     .update(options.outputKind)
     .update("\0")
     .update(options.sourcePath)
+    .update((options.partitions ?? 1) > 1 ? `\0partitions:${options.partitions}` : "")
+    .update(options.profile === undefined ? "" : `\0${nativeProfileKey(options.profile)}`)
     .digest("hex");
 }
 
@@ -332,12 +397,40 @@ async function installVerifiedCache(source: string, destination: string): Promis
   }
 }
 
-export async function emitNativeArtifact(options: NativeCodegenOptions): Promise<NativeCodegenArtifact> {
+/** `scriptc merge-profiles`: merges raw or indexed IR profiles into one
+ * indexed profile for `--profile-use`. */
+export async function mergeNativeProfiles(
+  outputPath: string,
+  inputPaths: readonly string[],
+  sparse = false,
+): Promise<void> {
+  const target = nativeCodegenTarget();
+  if (target === null) {
+    throw new NativeCodegenError(
+      "SC3002",
+      nativeCodegenTargetRefusal() ?? "profile merging is unsupported for this target",
+      "unsupported_target",
+    );
+  }
+  const helper = await resolveHelper(target);
+  await invoke(helper.binaryPath, [
+    "merge-profiles",
+    "--output",
+    outputPath,
+    ...(sparse ? ["--sparse"] : []),
+    ...inputPaths,
+  ]);
+}
+
+export async function emitNativeArtifact(
+  options: NativeCodegenOptions,
+): Promise<NativeCodegenArtifact> {
   const target = options.target ?? nativeCodegenTarget();
   if (target === null) {
     throw new NativeCodegenError(
       "SC3002",
-      nativeCodegenTargetRefusal() ?? "native assembly/object emission is unsupported for this target",
+      nativeCodegenTargetRefusal() ??
+        "native assembly/object emission is unsupported for this target",
       "unsupported_target",
     );
   }
@@ -356,58 +449,176 @@ export async function emitNativeArtifact(options: NativeCodegenOptions): Promise
     );
   }
   const helper = await resolveHelper(target, options.resolvePackageJson, options.helperHost);
+  // A build that records block counts runs the helper on every partition.
   const root = await prepareBuildCacheRoot(
-    options.cacheRoot === undefined ? buildCacheRoot() : options.cacheRoot,
+    options.profile?.recordBlocks !== undefined
+      ? null
+      : options.cacheRoot === undefined
+        ? buildCacheRoot()
+        : options.cacheRoot,
   );
   const key = cacheKey(options, target, helper.identity);
-  const cached = root === null
-    ? null
-    : join(root, "native-codegen-v1", key.slice(0, 2), `${key}.${options.outputKind === "obj" ? "o" : "s"}`);
+  const outputs = nativePartitionPaths(options.outputPath, options.partitions ?? 1);
+  const suffix = options.outputKind === "obj" ? "o" : "s";
+  const cached = outputs.map((_, index) =>
+    root === null
+      ? null
+      : join(
+          root,
+          "native-codegen-v1",
+          key.slice(0, 2),
+          index === 0 ? `${key}.${suffix}` : `${key}.part${index}.${suffix}`,
+        ),
+  );
   await mkdir(dirname(options.outputPath), { recursive: true });
   const artifact = {
     dependencies: helper.dependencies,
+    outputPaths: outputs,
   } satisfies NativeCodegenArtifact;
-  if (cached !== null && await validCachedFile(cached) &&
-      await installVerifiedCache(cached, options.outputPath)) return artifact;
+  if (await installCachedPartitions(cached, outputs)) {
+    if (options.profile?.use === undefined) return artifact;
+    return { ...artifact, profileMatch: await cachedProfileMatch(cached[0]!, outputs.length) };
+  }
+  // Partitioned programs also reuse individual partition artifacts, so an
+  // edit recompiles only the partitions it affects. The directory names the
+  // exact helper build and target; the helper keys entries by content.
+  const partitionCache =
+    root === null || outputs.length < 2
+      ? null
+      : join(
+          root,
+          "native-partitions-v1",
+          createHash("sha256")
+            .update(JSON.stringify({ helper: helper.identity, target }))
+            .digest("hex")
+            .slice(0, 32),
+        );
+  if (partitionCache !== null) await mkdir(partitionCache, { recursive: true, mode: 0o700 });
 
-  const stage = privateSiblingPath(options.outputPath, `native-${options.outputKind}`);
+  const stages = outputs.map((output) =>
+    privateSiblingPath(output, `native-${options.outputKind}`),
+  );
+  // The helper reads a private copy: the caller's .ll may be shared with a
+  // concurrent build of another entry that has the same output stem.
   const input = privateSiblingPath(options.outputPath, "native-input");
+  const matchStage = privateSiblingPath(options.outputPath, "native-profile-match");
   try {
-    await writeFile(input, options.llvm, { mode: 0o600 });
-    await invoke(helper.binaryPath, [
+    if (isLlvmFile(options.llvm)) await copyFile(options.llvm.file, input);
+    else await writeLlvmSource(input, options.llvm, 0o600);
+    const { stdout } = await invoke(helper.binaryPath, [
       "emit",
-      "--input", input,
-      "--output", stage,
-      "--filetype", options.outputKind,
-      "--target", target.llvmTriple,
-      "--opt-level", options.optimization ?? "2",
-      "--relocation-model", target.relocationModel,
-      "--diagnostic-format", "json",
-      "--source-path", options.sourcePath,
+      "--input",
+      input,
+      ...stages.flatMap((stage) => ["--output", stage]),
+      "--filetype",
+      options.outputKind,
+      "--target",
+      target.llvmTriple,
+      "--opt-level",
+      options.optimization ?? "2",
+      "--relocation-model",
+      target.relocationModel,
+      "--diagnostic-format",
+      "json",
+      "--source-path",
+      options.sourcePath,
+      ...(partitionCache === null ? [] : ["--cache-dir", partitionCache]),
+      ...nativeProfileHelperArgs(options.profile),
     ]);
-    const emitted = await stat(stage).catch(() => null);
-    if (emitted === null || !emitted.isFile() || emitted.size === 0) {
-      throw new NativeCodegenError(
-        "SC3004",
-        "LLVM native helper completed without producing a non-empty regular artifact",
-        "empty_output",
-      );
+    for (const stage of stages) {
+      const emitted = await stat(stage).catch(() => null);
+      if (emitted === null || !emitted.isFile() || emitted.size === 0) {
+        throw new NativeCodegenError(
+          "SC3004",
+          "LLVM native helper completed without producing a non-empty regular artifact",
+          "empty_output",
+        );
+      }
+      await chmod(stage, artifactMode());
     }
-    await chmod(stage, artifactMode());
+    const profileMatch =
+      options.profile?.use === undefined ? null : parseNativeProfileMatch(stdout);
     // Cache publication is an optimization boundary. The helper has already
     // produced a valid caller artifact, so a read-only/full cache must not
     // discard it or turn an otherwise successful build into an exception.
     if (
-      cached !== null &&
-      await nativeArtifactDependenciesStillMatch(helper.dependencies).catch(() => false)
-    ) await publishCachedFile(stage, cached).catch(() => undefined);
-    await rename(stage, options.outputPath);
+      root !== null &&
+      (await nativeArtifactDependenciesStillMatch(helper.dependencies).catch(() => false))
+    ) {
+      // The match goes in first: a reader that finds every partition finds it too.
+      if (profileMatch !== null) {
+        await writeFile(
+          matchStage,
+          `${JSON.stringify({ profile: helperProfileMatch(profileMatch) })}\n`,
+          {
+            mode: 0o600,
+          },
+        )
+          .then(() => publishCachedFile(matchStage, cachedProfileMatchPath(cached[0]!)))
+          .catch(() => undefined);
+      }
+      for (let index = 0; index < stages.length; index++)
+        await publishCachedFile(stages[index]!, cached[index]!).catch(() => undefined);
+    }
+    for (let index = 0; index < stages.length; index++)
+      await rename(stages[index]!, outputs[index]!);
     await pruneBuildCache(root);
-    return artifact;
+    return profileMatch === null ? artifact : { ...artifact, profileMatch };
   } finally {
     await Promise.all([
-      rm(stage, { force: true }).catch(() => undefined),
+      ...stages.map((stage) => rm(stage, { force: true }).catch(() => undefined)),
       rm(input, { force: true }).catch(() => undefined),
+      rm(matchStage, { force: true }).catch(() => undefined),
     ]);
   }
+}
+
+/** The cache entry beside a cached artifact's first partition that holds the
+ * profile match of the build that produced it. */
+function cachedProfileMatchPath(firstPartition: string): string {
+  return `${firstPartition}.profile-match`;
+}
+
+/** The match in the helper's own JSON form, as parseNativeProfileMatch reads it. */
+function helperProfileMatch(match: NativeProfileMatch): Record<string, number> {
+  return {
+    annotated: match.annotated,
+    mismatched: match.mismatched,
+    missing: match.missing,
+    recovered: match.recovered,
+    unknown_partitions: match.unknownPartitions,
+    ...(match.annotatedCounts === undefined || match.mismatchedCounts === undefined
+      ? {}
+      : { annotated_counts: match.annotatedCounts, mismatched_counts: match.mismatchedCounts }),
+  };
+}
+
+/** The profile match of a cached artifact. Without a valid entry, every
+ * partition's counts are unknown. */
+async function cachedProfileMatch(
+  firstPartition: string,
+  partitions: number,
+): Promise<NativeProfileMatch> {
+  const path = cachedProfileMatchPath(firstPartition);
+  const text = (await validCachedFile(path)) ? await readFile(path, "utf8").catch(() => "") : "";
+  return (
+    parseNativeProfileMatch(text) ?? {
+      annotated: 0,
+      mismatched: 0,
+      missing: 0,
+      recovered: 0,
+      unknownPartitions: partitions,
+    }
+  );
+}
+
+/** Install a cached artifact only when every partition is present and valid. */
+async function installCachedPartitions(
+  cached: readonly (string | null)[],
+  outputs: readonly string[],
+): Promise<boolean> {
+  for (const path of cached) if (path === null || !(await validCachedFile(path))) return false;
+  for (let index = 0; index < outputs.length; index++)
+    if (!(await installVerifiedCache(cached[index]!, outputs[index]!))) return false;
+  return true;
 }

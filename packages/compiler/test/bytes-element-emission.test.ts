@@ -1,7 +1,16 @@
 import { expect, test } from "vitest";
-import { emitCModule } from "../src/backend/c/c-emitter.js";
 import { emitLlvmModule } from "../src/backend/llvm/emitter.js";
-import { BOOL, F64, VOID, bytesOf, type IrBytesElem, type IrExpr, type IrLocal, type IrModule, type IrStmt } from "../src/ir/ir.js";
+import {
+  BOOL,
+  F64,
+  VOID,
+  bytesOf,
+  type IrBytesElem,
+  type IrExpr,
+  type IrLocal,
+  type IrModule,
+  type IrStmt,
+} from "../src/ir/ir.js";
 import { validateModule } from "../src/ir/validate.js";
 
 const loc = { file: "bytes-hot-loop.ts", start: 0, end: 0 };
@@ -66,7 +75,7 @@ function fixture(): IrModule {
   );
 
   return {
-    irVersion: 6,
+    irVersion: 17,
     sourceFile: loc.file,
     entry: "__main",
     functions: [{ name: "__main", params: [], returnType: VOID, locals, body, loc }],
@@ -136,7 +145,7 @@ function receiverReassignmentFixture(): IrModule {
   ];
 
   return {
-    irVersion: 6,
+    irVersion: 17,
     sourceFile: loc.file,
     entry: "__main",
     functions: [{ name: "__main", params: [], returnType: VOID, locals, body, loc }],
@@ -153,18 +162,20 @@ function sideEffectFixture(): IrModule {
     body: [{ kind: "return", value: { kind: "numLit", value: 0, type: F64, loc }, loc }],
     loc,
   });
-  mod.functions.find((fn) => fn.name === "__main")!.body.push({
-    kind: "exprStmt",
-    expr: {
-      kind: "bytesIntrinsic",
-      method: "get",
-      receiver: { kind: "varRef", localId: "b.0", type: bytesOf("u8"), loc },
-      args: [{ kind: "call", callee: "sideIndex", args: [], type: F64, loc }],
-      type: F64,
+  mod.functions
+    .find((fn) => fn.name === "__main")!
+    .body.push({
+      kind: "exprStmt",
+      expr: {
+        kind: "bytesIntrinsic",
+        method: "get",
+        receiver: { kind: "varRef", localId: "b.0", type: bytesOf("u8"), loc },
+        args: [{ kind: "call", callee: "sideIndex", args: [], type: F64, loc }],
+        type: F64,
+        loc,
+      },
       loc,
-    },
-    loc,
-  });
+    });
   return mod;
 }
 
@@ -201,66 +212,66 @@ function integerLoopFixture(mutatesIndex = false): IrModule {
     { kind: "bytesSet", arr: bytesRef(), index: indexRef(), value: ref("sum"), loc },
   );
   return {
-    irVersion: 6,
+    irVersion: 17,
     sourceFile: loc.file,
     entry: "__main",
-    functions: [{
-      name: "__main",
-      params: [],
-      returnType: VOID,
-      locals: [
-        { id: "bytes", name: "bytes", type: bytes, mutable: false },
-        { id: "sum", name: "sum", type: F64, mutable: true },
-        { id: "index", name: "index", type: F64, mutable: true },
-      ],
-      body: [
-        { kind: "varDecl", localId: "bytes", init: { kind: "bytesNew", source: num(4), type: bytes, loc }, loc },
-        { kind: "varDecl", localId: "sum", init: num(0), loc },
-        {
-          kind: "for",
-          init: { kind: "varDecl", localId: "index", init: num(0), loc },
-          cond: {
-            kind: "bin",
-            op: "<",
-            left: indexRef(),
-            right: { kind: "bytesIntrinsic", method: "length", receiver: bytesRef(), args: [], type: F64, loc },
-            type: BOOL,
+    functions: [
+      {
+        name: "__main",
+        params: [],
+        returnType: VOID,
+        locals: [
+          { id: "bytes", name: "bytes", type: bytes, mutable: false },
+          { id: "sum", name: "sum", type: F64, mutable: true },
+          { id: "index", name: "index", type: F64, mutable: true },
+        ],
+        body: [
+          {
+            kind: "varDecl",
+            localId: "bytes",
+            init: { kind: "bytesNew", source: num(4), type: bytes, loc },
             loc,
           },
-          update: {
-            kind: "assign",
-            localId: "index",
-            value: { kind: "bin", op: "+", left: indexRef(), right: num(1), type: F64, loc },
+          { kind: "varDecl", localId: "sum", init: num(0), loc },
+          {
+            kind: "for",
+            init: { kind: "varDecl", localId: "index", init: num(0), loc },
+            cond: {
+              kind: "bin",
+              op: "<",
+              left: indexRef(),
+              right: {
+                kind: "bytesIntrinsic",
+                method: "length",
+                receiver: bytesRef(),
+                args: [],
+                type: F64,
+                loc,
+              },
+              type: BOOL,
+              loc,
+            },
+            update: {
+              kind: "assign",
+              localId: "index",
+              value: { kind: "bin", op: "+", left: indexRef(), right: num(1), type: F64, loc },
+              loc,
+            },
+            body: loopBody,
             loc,
           },
-          body: loopBody,
-          loc,
-        },
-      ],
-      loc,
-    }],
+        ],
+        loc,
+      },
+    ],
   };
 }
-
-test("C emission specializes typed-array element access by static element kind", () => {
-  const mod = fixture();
-  expect(validateModule(mod)).toEqual([]);
-  const c = emitCModule(mod);
-  for (const elem of elems) {
-    expect(c).toContain(`sc_bytes_get_${elem}(`);
-    expect(c).toContain(`sc_bytes_set_${elem}(`);
-  }
-  // The only generic calls are the shared cold invalid-index trap funnel.
-  expect(c.match(/\bscr_bytes_get\(/g)).toHaveLength(2);
-  expect(c).not.toMatch(/\bscr_bytes_set\(/);
-  expect(c).not.toContain("scr_bytes_retain(");
-});
 
 test("LLVM emission performs typed-array element access directly on the valid path", () => {
   const mod = fixture();
   expect(validateModule(mod)).toEqual([]);
   const ll = emitLlvmModule(mod);
-  expect(ll).toContain("%ScrBytes = type { i64, i64, i32, ptr, ptr }");
+  expect(ll).toContain("%ScrBytes = type { i64, i64, i32, ptr, ptr, i8, i8, i8, i8, ptr }");
   expect(ll).toContain("getelementptr inbounds i8");
   expect(ll).toContain("getelementptr inbounds i32");
   expect(ll).toContain("getelementptr inbounds float");
@@ -271,56 +282,88 @@ test("LLVM emission performs typed-array element access directly on the valid pa
   expect(ll).not.toContain("@scr_bytes_retain_v");
 });
 
-test("side-effecting indices retain the receiver snapshot", () => {
+test("stable receivers borrow across index calls", () => {
   const mod = sideEffectFixture();
   expect(validateModule(mod)).toEqual([]);
-  const c = emitCModule(mod);
+
   const ll = emitLlvmModule(mod);
-  expect(c).toContain("scr_bytes_retain(sc_l_b_0)");
-  expect(ll).toContain("call ptr @scr_bytes_retain_v");
-  expect(c.match(/\bscr_bytes_get\(/g)).toHaveLength(2);
+
+  // The call cannot replace this uncaptured local's owning binding.
+  expect(ll).not.toContain("call ptr @scr_bytes_retain_v");
+  // An int32 index result returns through the i32 entry.
+  expect(ll).toMatch(/call (?:double|i32) @sc_f_sideIndex(?:\.i32)?\(/);
+
   expect(ll).toContain("call double @scr_bytes_get");
 });
 
 test("receiver assignments nested in numeric operands retain the receiver snapshot", () => {
   const mod = receiverReassignmentFixture();
   expect(validateModule(mod)).toEqual([]);
-  const c = emitCModule(mod);
+
   const ll = emitLlvmModule(mod);
-  expect(c).toContain("scr_bytes_retain(sc_l_read)");
-  expect(c).toContain("scr_bytes_retain(sc_l_write)");
-  // Two receiver snapshots plus two retains per yielded bytes assignment
-  // (one for the RHS temp and one for the binding's stored reference).
-  expect(ll.match(/call ptr @scr_bytes_retain_v/g)).toHaveLength(6);
+
+  // Two receiver snapshots plus one retain per yielded bytes assignment for
+  // the binding's stored reference. The RHS temp takes over the
+  // replacement's own reference: the assignment is its last use.
+  expect(ll.match(/call ptr @scr_bytes_retain_v/g)).toHaveLength(4);
 });
 
 test("canonical byte loops keep their induction variable and indices integral", () => {
   const mod = integerLoopFixture();
   expect(validateModule(mod)).toEqual([]);
-  const c = emitCModule(mod);
-  const ll = emitLlvmModule(mod);
 
-  expect(c).toContain("uint64_t sc_i");
-  expect(c).toContain("sc_bytes_get_u8_u64(");
-  expect(c).toContain("sc_bytes_set_u8_u64(");
-  expect(c).not.toContain("sc_bytes_index_checked(");
+  const ll = emitLlvmModule(mod);
 
   expect(ll).toContain("alloca i64 ; integer induction index");
   expect(ll).toContain("icmp ult i64");
-  expect(ll).not.toContain("bytes.index.range");
+  // The proven in-bounds index needs no element check at all. Do not assert
+  // on `fptosi double` here: the fixture's inline ToUint32 coercion of the
+  // running sum legitimately uses it.
+  expect(ll).not.toContain("bytes.index");
 });
 
 test("a body mutation keeps the byte loop on the general f64 path", () => {
   const mod = integerLoopFixture(true);
   expect(validateModule(mod)).toEqual([]);
-  const c = emitCModule(mod);
+
   const ll = emitLlvmModule(mod);
 
-  expect(c).not.toContain("integer induction index");
-  expect(c).not.toContain("_u64(");
   expect(ll).not.toContain("integer induction index");
-  expect(ll).toContain("bytes.index.range");
-  expect(ll).toContain("fptoui double");
+  expect(ll).toContain("bytes.index.valid");
+  expect(ll).toContain("fptosi double");
+});
+
+test("worker programs read and write shared views at the checked integer index", () => {
+  const ll = emitLlvmModule({ ...fixture(), workers: true });
+  // The shared path uses the index the inline path checked, as an integer:
+  // each element is one relaxed atomic access of its width, aligned to it.
+  expect(ll).toMatch(/load atomic i8, ptr %\w+ monotonic, align 1/);
+  expect(ll).toMatch(/load atomic i32, ptr %\w+ monotonic, align 4/);
+  expect(ll).toMatch(/load atomic float, ptr %\w+ monotonic, align 4/);
+  expect(ll).toMatch(/store atomic i8 [%\w.]+, ptr %\w+ monotonic, align 1/);
+  expect(ll).toMatch(/store atomic i32 [%\w.]+, ptr %\w+ monotonic, align 4/);
+  expect(ll).toMatch(/store atomic float [%\w.]+, ptr %\w+ monotonic, align 4/);
+  expect(ll).not.toContain("@scr_bytes_shared_get_int");
+  expect(ll).not.toContain("@scr_bytes_shared_get_f64");
+  expect(ll).not.toContain("@scr_bytes_shared_set");
+  expect(ll).not.toContain("@scr_bytes_get_or_nan");
+  expect(ll).not.toContain("@scr_bytes_set(");
+  // Both paths join as one integer, which converts to a number after the join.
+  expect(ll).toMatch(
+    /= phi i32 \[ %\w+, %bytes\.local\.done\d+ \], \[ %\w+, %bytes\.shared\.done\d+ \]/,
+  );
+});
+
+test("worker loops poll for cancellation on the back edge", () => {
+  const mod = integerLoopFixture(true);
+  const ll = emitLlvmModule({ ...mod, workers: true });
+  const blocks = ll.split(/\n(?=[\w.]+:)/);
+  const update = blocks.find((block) => block.startsWith("loop.u"));
+  // The poll budget is decremented in the continue target, after the body;
+  // the condition block is a single exit, so LLVM can rotate the loop.
+  expect(update).toContain("sub i32");
+  const cond = blocks.find((block) => block.startsWith("loop.c"));
+  expect(cond).not.toContain("sub i32");
 });
 
 test("large record clones stay outlined while small clones remain inlineable", () => {
@@ -328,28 +371,32 @@ test("large record clones stay outlined while small clones remain inlineable", (
     const fields = Array.from({ length: count }, (_, i) => ({ name: `f${i}`, type: F64 }));
     const type = { kind: "record", shapeId: id } as const;
     return {
-      irVersion: 6,
+      irVersion: 17,
       sourceFile: "record-clone.ts",
       entry: "__main",
       records: [{ id, fields }],
-      functions: [{
-        name: "__main",
-        params: [],
-        returnType: VOID,
-        locals: [{ id: "source", name: "source", type, mutable: false }],
-        body: [{
-          kind: "exprStmt",
-          expr: {
-            kind: "recordClone",
-            source: { kind: "varRef", localId: "source", type, loc },
-            overrides: [{ name: "f0", value: { kind: "numLit", value: 1, type: F64, loc } }],
-            type,
-            loc,
-          },
+      functions: [
+        {
+          name: "__main",
+          params: [],
+          returnType: VOID,
+          locals: [{ id: "source", name: "source", type, mutable: false }],
+          body: [
+            {
+              kind: "exprStmt",
+              expr: {
+                kind: "recordClone",
+                source: { kind: "varRef", localId: "source", type, loc },
+                overrides: [{ name: "f0", value: { kind: "numLit", value: 1, type: F64, loc } }],
+                type,
+                loc,
+              },
+              loc,
+            },
+          ],
           loc,
-        }],
-        loc,
-      }],
+        },
+      ],
     };
   };
   const small = emitLlvmModule(record("small", 2));
@@ -357,5 +404,47 @@ test("large record clones stay outlined while small clones remain inlineable", (
   expect(small).toContain("define internal ptr @sc_rclone_small(ptr %src) #0");
   expect(small).not.toContain("attributes #2");
   expect(large).toContain("define internal ptr @sc_rclone_large(ptr %src) #2");
-  expect(large).toContain("attributes #2 = { noinline sanitize_address }");
+  expect(large).toContain("attributes #2 = { noinline sanitize_address uwtable }");
+});
+
+test("Uint8ClampedArray stores clamp and round without a runtime call", () => {
+  const type = bytesOf("u8c");
+  const mod: IrModule = {
+    irVersion: 17,
+    sourceFile: loc.file,
+    entry: "__main",
+    functions: [
+      { name: "__main", params: [], returnType: VOID, locals: [], body: [], loc },
+      {
+        name: "store",
+        params: [
+          { localId: "px", name: "px", type },
+          { localId: "v", name: "v", type: F64 },
+        ],
+        returnType: VOID,
+        locals: [
+          { id: "px", name: "px", type, mutable: false },
+          { id: "v", name: "v", type: F64, mutable: false },
+        ],
+        body: [
+          {
+            kind: "bytesSet",
+            arr: { kind: "varRef", localId: "px", type, loc },
+            index: { kind: "numLit", value: 0, type: F64, loc },
+            value: { kind: "varRef", localId: "v", type: F64, loc },
+            loc,
+          },
+        ],
+        loc,
+      },
+    ],
+  };
+  expect(validateModule(mod)).toEqual([]);
+  const body = /^define internal [^\n]*@sc_bf_store[^]*?^}/m.exec(emitLlvmModule(mod))![0];
+  expect(body).not.toContain("scr_bytes_to_u8_clamp");
+  expect(body).toMatch(/fcmp ogt double %\S+, 0\.0/);
+  expect(body).toMatch(/fcmp oge double %\S+, 255\.0/);
+  expect(body).toMatch(/fadd double %\S+, 0x4330000000000000/);
+  expect(body).toMatch(/fsub double %\S+, 0x4330000000000000/);
+  expect(body).toMatch(/store i8 [^\n]*, align 1/);
 });

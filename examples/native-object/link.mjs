@@ -1,7 +1,8 @@
 #!/usr/bin/env node
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 const [mode, infoArg, outputArg] = process.argv.slice(2);
 if ((mode !== "cc" && mode !== "ld") || !infoArg || !outputArg) {
@@ -43,28 +44,17 @@ if ((mode !== "cc" && mode !== "ld") || !infoArg || !outputArg) {
   mkdirSync(buildDir, { recursive: true });
   const runtimeObjects = [];
   const vendorArchives = [];
-  for (const set of info.runtime_pack.source_sets) {
-    const setDir = join(buildDir, set.name);
-    mkdirSync(setDir, { recursive: true });
-    const objects = [];
-    for (const source of set.sources) {
-      const object = join(setDir, `${source.replace(/[^A-Za-z0-9]+/g, "_")}.o`);
-      run("clang", [
-        ...set.c_flags,
-        ...set.defines.map((define) => `-D${define}`),
-        ...set.include_directories.flatMap((path) => [
-          "-I", join(info.runtime_pack.root, path),
-        ]),
-        "-c", join(info.runtime_pack.root, source), "-o", object,
-      ]);
-      objects.push(object);
-    }
-    if (set.output === "objects") {
-      runtimeObjects.push(...objects);
-    } else {
-      const archive = join(buildDir, basename(set.suggested_output));
-      run("ar", ["rcs", archive, ...objects]);
-      vendorArchives.push(archive);
+  for (const [kind, artifacts] of [["objects", info.runtime_pack.objects], ["archives", info.runtime_pack.archives]]) {
+    for (const artifact of artifacts) {
+      if (artifact.path.startsWith("/") || artifact.path.split(/[\\/]/).includes("..")) throw new Error("invalid runtime artifact path");
+      const bytes = readFileSync(join(info.runtime_pack.root, artifact.path));
+      if (bytes.length !== artifact.size || createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) {
+        throw new Error(`runtime pack hash mismatch: ${artifact.path}`);
+      }
+      const destination = join(buildDir, artifact.path);
+      mkdirSync(dirname(destination), { recursive: true });
+      writeFileSync(destination, bytes, { mode: 0o400 });
+      (kind === "objects" ? runtimeObjects : vendorArchives).push(destination);
     }
   }
 

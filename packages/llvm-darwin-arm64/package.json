@@ -1,6 +1,6 @@
 {
   "name": "@scriptc/llvm-darwin-arm64",
-  "version": "0.0.36",
+  "version": "0.4.8",
   "description": "Pinned LLVM code-generation helper for scriptc on macOS arm64",
   "license": "Apache-2.0 WITH LLVM-exception",
   "homepage": "https://scriptc.dev",
@@ -25,7 +25,7 @@
     "THIRD_PARTY_NOTICES"
   ],
   "scripts": {
-    "build": "true",
+    "build": "node scripts/preflight.mjs",
     "build:native": "node scripts/build.mjs",
     "prepack": "test -x bin/scriptc-llvm-codegen"
   },

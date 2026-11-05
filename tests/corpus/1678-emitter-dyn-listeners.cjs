@@ -54,3 +54,42 @@ for (const bad of [5, null, 'oops', true]) {
   }
 }
 console.log('done');
+
+// One literal event name can carry different JS tuples, even on unrelated
+// emitter instances. Keep actual argc, default arguments, and identities.
+const variable = new EventEmitter();
+const other = new EventEmitter();
+/** @returns {*} */
+function defaultValue() { console.log('default effect'); return 'default'; }
+function varying(first, second = defaultValue()) {
+  console.log('varying', first, second);
+}
+function countArguments() { console.log('argc', arguments.length); }
+variable.on('resize', varying);
+variable.on('resize', countArguments);
+variable.prependOnceListener('resize', () => console.log('resize once'));
+other.on('resize', (value) => console.log('other', value));
+console.log('identity', variable.listenerCount('resize', varying));
+console.log('emitted', variable.emit('resize'));
+variable.emit('resize', 4, 5);
+other.emit('resize', 'text');
+variable.emit('resize', null, undefined);
+variable.off('resize', varying);
+variable.off('resize', countArguments);
+console.log('removed', variable.listenerCount('resize'), variable.emit('resize', true));
+
+// An implicit generic method's payload cannot be pinned by the syntactic
+// prepass. Its instantiated body still supplies native checked values.
+class Sized extends EventEmitter {
+  resize(width, height) { this.emit('resized', { width, height }); }
+}
+const sized = new Sized();
+sized.on('resized', (size) => console.log('size', size.width, size.height));
+sized.on('resized', () => console.log('size ignored'));
+sized.resize(3, 7);
+
+function effect(value) { console.log('effect', value); return value; }
+const effects = new EventEmitter();
+effects.on('arguments', (first, second) => console.log('arguments', first, second));
+effects.emit('arguments', effect('first'), effect('second'));
+effects.emit('arguments', effect('only'));

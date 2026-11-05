@@ -32,40 +32,18 @@
 struct ScrFileHandle {
   size_t rc;
   int fd;
+  /* Node's kRefs: the handle itself counts 1, every stream over it one
+   * more. close() resolves once the count reaches zero. */
+  size_t refs;
+  ScrFileHandleHook *hooks; /* 'close' listeners (the streams' close()) */
+  ScrPromise *close_wait;   /* close() waiting for the streams, or NULL */
 };
 
-/* ScrStats is opaque at the public runtime boundary. FileHandle's fstat
- * snapshot completes the same layout privately in this translation unit. */
-struct ScrStats {
-  size_t rc;
-  bool is_file;
-  bool is_dir;
-  bool is_symlink;
-  double size;
-  double blocks;
-  double nlink;
-  double atime_ms;
-  double mtime_ms;
+struct ScrFileHandleHook {
+  void (*fn)(void *ctx);
+  void *ctx;
+  ScrFileHandleHook *next;
 };
-
-#ifdef _WIN32
-/* Keep the FILETIME conversion byte-for-byte with scr_lib.c's path-stat arm:
- * libuv splits the 100ns count into Unix seconds and nanoseconds before Node
- * combines it into the public millisecond value. */
-static double scr_file_handle_filetime_ms(FILETIME ft) {
-  ULARGE_INTEGER raw;
-  raw.LowPart = ft.dwLowDateTime;
-  raw.HighPart = ft.dwHighDateTime;
-  int64_t ticks = (int64_t)raw.QuadPart - INT64_C(116444736000000000);
-  int64_t sec = ticks / INT64_C(10000000);
-  int64_t rem = ticks % INT64_C(10000000);
-  if (rem < 0) {
-    sec--;
-    rem += INT64_C(10000000);
-  }
-  return (double)sec * 1000.0 + (double)rem / 10000.0;
-}
-#endif
 
 typedef struct {
   char *data;
@@ -251,6 +229,16 @@ static bool scr_file_handle_mode_valid(double mode) {
   return true;
 }
 
+static ScrFileHandle *scr_file_handle_from_fd(int fd) {
+  scr_file_handle_dyn_install();
+  ScrFileHandle *h = calloc(1, sizeof(ScrFileHandle));
+  if (!h) scr_trap("scriptc: out of memory\n");
+  h->rc = 1;
+  h->fd = fd;
+  h->refs = 1;
+  return h;
+}
+
 ScrFileHandle *scr_file_handle_open(ScrStr *path, ScrStr *flags, double mode) {
   if (!scr_file_handle_path_valid(path)) return NULL;
   int of = scr_file_handle_open_flags(flags);
@@ -261,11 +249,7 @@ ScrFileHandle *scr_file_handle_open(ScrStr *path, ScrStr *flags, double mode) {
     scr_fs_throw(errno, "open", path);
     return NULL;
   }
-  ScrFileHandle *h = malloc(sizeof(ScrFileHandle));
-  if (!h) scr_trap("scriptc: out of memory\n");
-  h->rc = 1;
-  h->fd = fd;
-  return h;
+  return scr_file_handle_from_fd(fd);
 }
 
 ScrFileHandle *scr_file_handle_retain(ScrFileHandle *h) {
@@ -277,6 +261,12 @@ void scr_file_handle_release(ScrFileHandle *h) {
   if (!h || h->rc == SIZE_MAX) return;
   if (--h->rc != 0) return;
   if (h->fd >= 0) (void)close(h->fd);
+  while (h->hooks) {
+    ScrFileHandleHook *next = h->hooks->next;
+    free(h->hooks);
+    h->hooks = next;
+  }
+  if (h->close_wait) scr_promise_release(h->close_wait);
   free(h);
 }
 
@@ -297,6 +287,81 @@ void scr_file_handle_close(ScrFileHandle *h) {
   int fd = h->fd;
   h->fd = -1;
   scr_fs_close((double)fd);
+}
+
+/* FileHandle.close() with Node's reference count: the last reference
+ * closes the descriptor; while streams hold the handle the promise waits
+ * for them. Either way 'close' runs the streams' close(). */
+static ScrPromise *scr_file_handle_close_refs(ScrFileHandle *h, int *detached) {
+  if (h->fd < 0) return scr_promise_settled_void();
+  if (h->close_wait) return scr_promise_retain(h->close_wait);
+  ScrPromise *out;
+  if (h->refs > 0) h->refs--;
+  if (h->refs == 0) {
+    if (detached) {
+      *detached = h->fd; /* the stream closes it on the worker pool */
+      h->fd = -1;
+    } else {
+      scr_file_handle_close(h);
+      if (scr_exc_pending()) return NULL;
+    }
+    out = scr_promise_settled_void();
+  } else {
+    h->close_wait = scr_promise_new();
+    out = scr_promise_retain(h->close_wait);
+  }
+  scr_file_handle_retain(h);
+  for (ScrFileHandleHook *k = h->hooks; k && !scr_exc_pending();) {
+    ScrFileHandleHook *next = k->next;
+    k->fn(k->ctx);
+    k = next;
+  }
+  scr_file_handle_release(h);
+  return out;
+}
+
+void scr_file_handle_ref(ScrFileHandle *h) { h->refs++; }
+
+/* kUnref then close() for a stream over the handle: answers the
+ * descriptor the caller closes, or -1 while other references remain. */
+int scr_file_handle_stream_unref(ScrFileHandle *h) {
+  if (h->fd < 0) return -1;
+  if (h->refs > 0) h->refs--;
+  if (h->refs == 0) {
+    int fd = h->fd;
+    h->fd = -1;
+    if (h->close_wait) {
+      ScrPromise *w = h->close_wait;
+      h->close_wait = NULL;
+      scr_promise_fulfill_void(w);
+      scr_promise_release(w);
+    }
+    return fd;
+  }
+  int fd = -1;
+  ScrPromise *p = scr_file_handle_close_refs(h, &fd);
+  if (p) scr_promise_release(p);
+  return fd;
+}
+
+ScrFileHandleHook *scr_file_handle_on_close(ScrFileHandle *h, void (*fn)(void *ctx), void *ctx) {
+  ScrFileHandleHook *k = malloc(sizeof *k);
+  if (!k) scr_trap("scriptc: out of memory\n");
+  k->fn = fn;
+  k->ctx = ctx;
+  k->next = h->hooks;
+  h->hooks = k;
+  return k;
+}
+
+void scr_file_handle_off_close(ScrFileHandle *h, ScrFileHandleHook *hook) {
+  for (ScrFileHandleHook **p = &h->hooks; *p; p = &(*p)->next) {
+    if (*p == hook) {
+      *p = hook->next;
+      free(hook);
+      return;
+    }
+  }
 }
 
 double scr_file_handle_read(ScrFileHandle *h, ScrBytes *buf, double offset,
@@ -361,7 +426,7 @@ ScrBytes *scr_file_handle_read_file_bytes(ScrFileHandle *h) {
 static void scr_file_handle_write_all(ScrFileHandle *h, const void *data,
                                       size_t length) {
   if (!scr_file_handle_require_open(h)) return;
-  ScrBytes bytes = {SIZE_MAX, length, SCR_BYTES_U8, (uint8_t *)data, NULL};
+  ScrBytes bytes = {.rc = SIZE_MAX, .len = length, .elem = SCR_BYTES_U8, .data = (uint8_t *)data};
   size_t at = 0;
   while (at < length) {
     double count = scr_fs_write_sync((double)h->fd, &bytes, (double)at,
@@ -377,19 +442,23 @@ static void scr_file_handle_write_all(ScrFileHandle *h, const void *data,
 }
 
 void scr_file_handle_write_file(ScrFileHandle *h, ScrStr *data) {
-  scr_file_handle_write_all(h, data->data, data->len);
+  char *owned;
+  const char *bytes = scr_str_utf8(data, &owned);
+  scr_file_handle_write_all(h, bytes, data->len);
+  scr_str_utf8_end(owned);
 }
 
 void scr_file_handle_write_file_bytes(ScrFileHandle *h, ScrBytes *data) {
+  SCR_BYTES_SNAPSHOT(data);
   scr_file_handle_write_all(h, data->data,
                             data->len * scr_bytes_elem_size(data->elem));
 }
 
 ScrStats *scr_file_handle_stat(ScrFileHandle *h) {
   if (!scr_file_handle_require_open(h)) return NULL;
-  struct stat st;
-  if (fstat(h->fd, &st) != 0) {
-    int err = errno;
+  int err = 0;
+  ScrStats *out = scr_stats_of_fd(h->fd, &err);
+  if (!out) {
     const char *name = err == EBADF ? "EBADF" : err == EIO ? "EIO" : "EUNKNOWN";
     const char *text = err == EBADF ? "bad file descriptor" :
                        err == EIO ? "i/o error" : strerror(err);
@@ -398,48 +467,6 @@ ScrStats *scr_file_handle_stat(ScrFileHandle *h) {
     scr_throw_error_msg_code(SCR_ERR_ERROR, msg, (size_t)len, name);
     return NULL;
   }
-  ScrStats *out = malloc(sizeof(ScrStats));
-  if (!out) scr_trap("scriptc: out of memory\n");
-  out->rc = 1;
-  out->is_file = S_ISREG(st.st_mode);
-  out->is_dir = S_ISDIR(st.st_mode);
-  out->is_symlink = false; /* fstat follows the open descriptor. */
-  out->size = (double)st.st_size;
-#if defined(_WIN32)
-  out->blocks = st.st_size <= 0 ? 0.0 : (double)(((uint64_t)st.st_size + 511) >> 9);
-  out->nlink = (double)st.st_nlink;
-  out->atime_ms = (double)st.st_atime * 1000.0;
-  out->mtime_ms = (double)st.st_mtime * 1000.0;
-  HANDLE os_handle = (HANDLE)_get_osfhandle(h->fd);
-  if (os_handle != INVALID_HANDLE_VALUE) {
-    BY_HANDLE_FILE_INFORMATION basic;
-    if (GetFileInformationByHandle(os_handle, &basic)) {
-      out->nlink = (double)basic.nNumberOfLinks;
-      out->atime_ms = scr_file_handle_filetime_ms(basic.ftLastAccessTime);
-      out->mtime_ms = scr_file_handle_filetime_ms(basic.ftLastWriteTime);
-    }
-    FILE_STANDARD_INFO standard;
-    if (GetFileInformationByHandleEx(
-          os_handle, FileStandardInfo, &standard, sizeof standard)) {
-      out->blocks = (double)((uint64_t)standard.AllocationSize.QuadPart >> 9);
-      out->nlink = (double)standard.NumberOfLinks;
-    }
-  }
-#elif defined(__APPLE__)
-  out->blocks = (double)st.st_blocks;
-  out->nlink = (double)st.st_nlink;
-  out->atime_ms = (double)st.st_atimespec.tv_sec * 1000.0 +
-                  (double)st.st_atimespec.tv_nsec / 1e6;
-  out->mtime_ms = (double)st.st_mtimespec.tv_sec * 1000.0 +
-                  (double)st.st_mtimespec.tv_nsec / 1e6;
-#else
-  out->blocks = (double)st.st_blocks;
-  out->nlink = (double)st.st_nlink;
-  out->atime_ms = (double)st.st_atim.tv_sec * 1000.0 +
-                  (double)st.st_atim.tv_nsec / 1e6;
-  out->mtime_ms = (double)st.st_mtim.tv_sec * 1000.0 +
-                  (double)st.st_mtim.tv_nsec / 1e6;
-#endif
   return out;
 }
 
@@ -449,9 +476,58 @@ ScrPromise *scr_fsp_open(ScrStr *path, ScrStr *flags, double mode) {
                                  &scr_file_handle_release_v, NULL);
 }
 
+ScrPromise *scr_fsp_open_flags(ScrStr *path, double flags, double mode) {
+  double fd = scr_fs_open_numeric(path, flags, mode);
+  ScrFileHandle *h = scr_exc_pending() ? NULL : scr_file_handle_from_fd((int)fd);
+  return scr_promise_settled_ref(h, &scr_file_handle_retain_v,
+                                 &scr_file_handle_release_v, NULL);
+}
+
 ScrPromise *scr_file_handle_close_promise(ScrFileHandle *h) {
-  scr_file_handle_close(h);
+  ScrPromise *p = scr_file_handle_close_refs(h, NULL);
+  return p ? p : scr_promise_settled_void();
+}
+
+ScrPromise *scr_file_handle_sync_promise(ScrFileHandle *h) {
+  if (scr_file_handle_require_open(h)) scr_fs_fsync((double)h->fd);
   return scr_promise_settled_void();
+}
+
+ScrPromise *scr_file_handle_datasync_promise(ScrFileHandle *h) {
+  if (scr_file_handle_require_open(h)) scr_fs_fdatasync((double)h->fd);
+  return scr_promise_settled_void();
+}
+
+ScrPromise *scr_file_handle_truncate_promise(ScrFileHandle *h, double length) {
+  if (scr_file_handle_require_open(h)) scr_fs_ftruncate((double)h->fd, length);
+  return scr_promise_settled_void();
+}
+
+ScrPromise *scr_file_handle_chmod_promise(ScrFileHandle *h, double mode) {
+  if (scr_file_handle_require_open(h) && scr_file_handle_mode_valid(mode))
+    scr_fs_fchmod((double)h->fd, mode);
+  return scr_promise_settled_void();
+}
+
+ScrPromise *scr_file_handle_utimes_promise(ScrFileHandle *h, const ScrDyn *atime, const ScrDyn *mtime) {
+  if (scr_file_handle_require_open(h)) {
+    double access = scr_fs_timestamp_value(atime, "atime");
+    if (!scr_exc_pending()) {
+      double modified = scr_fs_timestamp_value(mtime, "mtime");
+      if (!scr_exc_pending()) scr_fs_futimes((double)h->fd, access, modified);
+    }
+  }
+  return scr_promise_settled_void();
+}
+
+double scr_file_handle_readv(ScrFileHandle *h, ScrArr *buffers, double position) {
+  if (!scr_file_handle_require_open(h)) return 0;
+  return scr_fs_readv_sync((double)h->fd, buffers, position);
+}
+
+double scr_file_handle_writev(ScrFileHandle *h, ScrArr *buffers, double position) {
+  if (!scr_file_handle_require_open(h)) return 0;
+  return scr_fs_writev_sync((double)h->fd, buffers, position);
 }
 
 ScrPromise *scr_file_handle_read_file_promise(ScrFileHandle *h,
@@ -488,4 +564,55 @@ ScrPromise *scr_file_handle_stat_promise(ScrFileHandle *h) {
   ScrStats *st = scr_file_handle_stat(h);
   return scr_promise_settled_ref(st, &scr_stats_retain_v,
                                  &scr_stats_release_v, NULL);
+}
+
+/* The checked boundary retains the shared descriptor slot. Statically
+ * typed uses unwrap it before invoking the existing FileHandle surface. */
+static ScrDyn *scr_file_handle_dyn_invoke(
+    void *h, ScrDyn *self, const char *method,
+    ScrDyn *const *args, size_t argc, const char *what) {
+  (void)self;
+  (void)args;
+  (void)argc;
+  (void)what;
+  if (strcmp(method, "close") == 0) {
+    ScrPromise *closing = scr_file_handle_close_refs(h, NULL);
+    if (closing == NULL) return NULL;
+    ScrPromise *p = scr_promise_settled_ref(
+        scr_dyn_retain(scr_dyn_undefined()), &scr_dyn_retain_v,
+        &scr_dyn_release_v, NULL);
+    scr_promise_release(closing);
+    ScrDyn *out = scr_dyn_new_promise(p);
+    scr_promise_release(p);
+    return out;
+  }
+  static const char msg[] =
+      "FileHandle method calls through an 'unknown' value are not supported yet — narrow the value to FileHandle first";
+  scr_throw_error_msg(SCR_ERR_ERROR, msg, sizeof msg - 1);
+  return NULL;
+}
+
+static ScrDyn *scr_file_handle_dyn_get(void *h, const char *key, size_t len) {
+  if (len == 2 && memcmp(key, "fd", 2) == 0) {
+    return scr_dyn_new_num(scr_file_handle_fd(h));
+  }
+  return NULL;
+}
+
+static bool scr_file_handle_dyn_set(
+    void *h, const char *key, size_t len, const ScrDyn *value) {
+  (void)h;
+  (void)key;
+  (void)len;
+  (void)value;
+  return false;
+}
+
+void scr_file_handle_dyn_install(void) {
+  static const ScrDynHandleOps ops = {
+    "FileHandle", &scr_file_handle_retain_v, &scr_file_handle_release_v,
+    &scr_file_handle_dyn_invoke, &scr_file_handle_dyn_get,
+    &scr_file_handle_dyn_set, NULL,
+  };
+  scr_dyn_handle_install(SCR_DYNH_FILE_HANDLE, &ops);
 }

@@ -1,0 +1,13 @@
+const values = new Array<number>(3);
+values[0] = 1;
+values[2] = 3;
+const boxed: unknown = values;
+const checked = boxed as number[];
+console.log(checked.length, 0 in checked, 1 in checked, 2 in checked, checked.join(","));
+console.log(Object.keys(boxed as object).join(","), JSON.stringify(boxed));
+checked[1] = 2;
+console.log(values.join(","), (boxed as number[]).join(","));
+checked.length = 5;
+console.log(3 in values, Object.keys(boxed as object).join(","));
+const copied = structuredClone(boxed) as number[];
+console.log(copied.length, 3 in copied, copied.join(","));

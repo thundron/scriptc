@@ -1,0 +1,1 @@
+import * as Effect from "effect/Effect";let cleaned=false;const p=Effect.gen(function*(){yield* Effect.forkChild(Effect.never.pipe(Effect.onInterrupt(()=>Effect.sync(()=>{cleaned=true}))),{startImmediately:true});return 42});Effect.runPromise(p).then((n:number)=>console.log(n,cleaned))

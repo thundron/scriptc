@@ -1,16 +1,8 @@
-// The DataView fences: `.buffer` escaping the one composed position that
-// consumes it, the bigint getters outside Number(...), and a constructor
-// over something that isn't a typed array's `.buffer`.
-
-const buf = new Uint8Array(8);
-const view = new DataView(buf.buffer);
-
-// '.buffer' only compiles inside new DataView(x.buffer, ...).
-const escaped = buf.buffer;
-
-// bigint values have no representation — only Number(view.getBigUint64(...)).
-const big = view.getBigUint64(0);
-
-// The constructor wants a typed array's own '.buffer'.
-const ab = new ArrayBuffer(8);
-const direct = new DataView(ab);
+// Stored ArrayBuffers and DataViews lower, Float16 accessors included;
+// detached accessor methods remain unsupported.
+const buffer = new ArrayBuffer(16);
+const view = new DataView(buffer);
+view.setFloat16(0, 1.5);
+console.log(view.getFloat16(0));
+const getter = view.getFloat16;
+// End of the diagnostic fixture.

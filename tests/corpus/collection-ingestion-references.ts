@@ -1,0 +1,36 @@
+const key = { id: 1 };
+const value = { count: 2 };
+const unknownCopy = new Set<unknown>(new Set([value]));
+console.log("checked copy", unknownCopy.has(value));
+const map = new Map([[key, value]]);
+const copy = new Map(map.entries());
+const stored = map.entries();
+const cursorCopy = new Map(stored);
+console.log("map identity", copy.has(key), copy.get(key) === value, cursorCopy.get(key) === value);
+const entries = Array.from(map.entries());
+const direct = Array.from(map);
+console.log("pairs", entries[0] !== direct[0], entries[0]![0] === key, entries[0]![1] === value);
+console.log("mapped", Array.from(map, entry => entry[1])[0] === value);
+const mappedCursor = map.entries();
+console.log("mapped cursor", Array.from(mappedCursor, entry => entry[0])[0] === key);
+const pair = Array.from(new Set([value]).entries())[0]!;
+console.log("set pair", pair[0] === value, pair[0] === pair[1]);
+
+const array = [1, 2];
+class Box { count = 3; }
+const box = new Box();
+const mixed = new Set<number[] | typeof key | Box>([array, key, box]);
+const mixedCursor = mixed.values();
+const mixedCopy = Array.from(mixedCursor, item => item);
+console.log("union", mixedCopy[0] === array, mixedCopy[1] === key, mixedCopy[2] === box);
+const arrays = new Map([["array", array]]);
+const arrayCopy = new Map(arrays.entries());
+arrayCopy.get("array")!.push(4);
+const boxes = new Map([["box", box]]);
+const boxCursor = boxes.entries();
+new Map(boxCursor).get("box")!.count++;
+console.log("shared mutation", array.join(","), box.count);
+map.clear();
+arrays.clear();
+boxes.clear();
+console.log("retained", copy.get(key) === value, entries[0]![1] === value, arrayCopy.get("array") === array);

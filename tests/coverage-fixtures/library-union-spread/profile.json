@@ -1,0 +1,1 @@
+{"profile_format":1,"name":"coverage_union","entry":"main.ts","emission":"llvm","abi":{"prefix":"c_","init_symbol":"c_init","sink_register_symbol":"c_sink"},"callbacks":[],"exports":[{"export":"run","symbol":"c_run","params":[],"returns":"f64"}]}

@@ -27,11 +27,13 @@ show(() => sock.send('hello', 3, 4, 12345, host));
 show(() => sock.send(new Uint8Array([1, 2, 3, 4, 5]).subarray(0, 5), 6, 0, 12345, host));
 show(() => sock.send(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).subarray(2, 7), 0, 6, 12345, host));
 show(() => sock.send(new DataView(new ArrayBuffer(7), 1, 5), 3, 4, 12345, host));
-sock.connect(12345, () => {
+const peer = dgram.createSocket('udp4');
+peer.bind(0, host, () => sock.connect(peer.address().port, host, () => {
   show(() => sock.send(buf, 1, 1, -1, host));
   show(() => sock.send(buf, 1234, '127.0.0.1', () => {}));
   show(() => sock.send('hello', 6, 0));
   show(() => sock.send('hello', 0, 6));
   show(() => sock.send(23, 12345, host));
   sock.close();
-});
+  peer.close();
+}));

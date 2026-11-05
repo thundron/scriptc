@@ -1,0 +1,40 @@
+collection-views.ts:7:23 - error SC2002: record shapes must match exactly or width-coerce: expected 'Set<string>', got '{ has: (string) => boolean; size: number }'
+
+  6 | const mock = { has(value: string): boolean { return value === "word"; }, size: 1 };
+  7 | const fake: WordSet = mock as unknown as WordSet;
+    |                       ^~~~~~~~~~~~~~~~~~~~~~~~~~
+  8 | console.log(fake.has("word"));
+
+  hint: width subtyping compiles as a copy (each expected field copied off the source; extra fields drop) — this pair is outside the copy's rules; build a literal with exactly the expected fields instead
+
+collection-views.ts:9:14 - error SC2002: record shapes must match exactly or width-coerce: expected 'Set<string>', got '{ has: (string) => boolean; size: number }'
+
+   8 | console.log(fake.has("word"));
+   9 | console.log((mock as unknown as WordSet).has("word"));
+     |              ^~~~~~~~~~~~~~~~~~~~~~~~~~
+  10 | console.log((mock as unknown as WordSet).size);
+
+  hint: width subtyping compiles as a copy (each expected field copied off the source; extra fields drop) — this pair is outside the copy's rules; build a literal with exactly the expected fields instead
+
+collection-views.ts:10:14 - error SC2002: record shapes must match exactly or width-coerce: expected 'Set<string>', got '{ has: (string) => boolean; size: number }'
+
+   9 | console.log((mock as unknown as WordSet).has("word"));
+  10 | console.log((mock as unknown as WordSet).size);
+     |              ^~~~~~~~~~~~~~~~~~~~~~~~~~
+  11 | console.log((new Set<number>([1]) as unknown as WordSet).has("word"));
+
+  hint: width subtyping compiles as a copy (each expected field copied off the source; extra fields drop) — this pair is outside the copy's rules; build a literal with exactly the expected fields instead
+
+collection-views.ts:11:14 - error SC1090: 'Set<number>' values where 'Set<string>' is expected is not supported yet
+
+  10 | console.log((mock as unknown as WordSet).size);
+  11 | console.log((new Set<number>([1]) as unknown as WordSet).has("word"));
+     |              ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  12 | 
+
+collection-views.ts:16:14 - error SC1090: 'Map<number, number>' values where 'Map<string, number>' is expected is not supported yet
+
+  15 | }
+  16 | console.log((new Map<number, number>([[1, 2]]) as unknown as WordMap).has("word"));
+     |              ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  17 | 

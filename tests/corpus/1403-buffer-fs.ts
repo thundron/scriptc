@@ -1,7 +1,7 @@
 // The Buffer forms of fs: readFileSync(path) with no encoding → Buffer,
 // writeFileSync(path, buffer) byte-exact (a NUL and non-utf8 sequences
 // survive), and THE chain real code uses: new Uint8Array(await readFile(p)).
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 
 function tail(path: string): string {
@@ -35,6 +35,13 @@ async function viaPromises(): Promise<void> {
 }
 async function main(): Promise<void> {
   await viaPromises();
+  // Appending keeps the old contents, including NULs and invalid UTF-8.
+  appendFileSync(path, blob);
+  const view = new Uint8Array([99, 0, 255, 88]).subarray(1, 3);
+  appendFileSync(path, view);
+  appendFileSync(path, Buffer.alloc(0));
+  console.log("append", readFileSync(path).toString("hex"));
+  console.log("source", view[0], view[1]);
   try {
     readFileSync("no-such-file-1403.bin");
     console.log("no-throw");
@@ -42,6 +49,21 @@ async function main(): Promise<void> {
     if (e instanceof Error) {
       console.log("err", e.message);
     }
+  }
+  rmSync(path);
+  // Empty appends create a missing file too; later writes still truncate.
+  appendFileSync(path, Buffer.alloc(0));
+  console.log("empty append", readFileSync(path).length);
+  appendFileSync(path, new Uint8Array([128, 0, 255]));
+  appendFileSync(path, "\n");
+  console.log("created", readFileSync(path).toString("hex"));
+  writeFileSync(path, Buffer.from("reset"));
+  console.log("truncated", readFileSync(path).toString("utf8"));
+  try {
+    appendFileSync(path + ".missing/child", blob);
+    console.log("no append error");
+  } catch (e) {
+    if (e instanceof Error) console.log("append error", e.name, e.message.includes("ENOENT"));
   }
   rmSync(path);
   console.log("done");

@@ -1,0 +1,33 @@
+{
+  "name": "@scriptc/cli-darwin-arm64",
+  "version": "0.4.8",
+  "description": "Native scriptc compiler for darwin-arm64",
+  "license": "Apache-2.0",
+  "homepage": "https://scriptc.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vercel-labs/scriptc.git",
+    "directory": "packages/cli-darwin-arm64"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@scriptc/llvm-darwin-arm64": "workspace:*",
+    "@scriptc/runtime-darwin-arm64": "workspace:*"
+  },
+  "scripts": {
+    "build": "node -e \"\"",
+    "build:native": "node --max-old-space-size=8192 --import tsx ../../scripts/build-native-cli.mts dist --platform-packages",
+    "prepack": "node ../../scripts/verify-native-cli.mjs ."
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

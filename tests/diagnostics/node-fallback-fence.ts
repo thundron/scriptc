@@ -13,7 +13,7 @@ process.stdin.destroy();
 process.on("SIGINT", () => {});
 process.once("exit", () => {});
 process.off("exit", () => {});
-process.stdin.setEncoding("utf8"); // stays fenced: chunks are bytes
+process.stdin.setEncoding("utf8"); // terminal streams accept a text encoding
 const buf = Buffer.from("x", "utf8").reverse(); // from and fill lower; reverse fences
 const enc = new TextEncoder().encode("x");
 const dec = new TextDecoder().decode(enc);
@@ -23,11 +23,16 @@ const tty = process.stdout.isTTY;
 const errTty = process.stderr.isTTY;
 
 import { accessSync, constants, mkdtempSync, readFileSync } from "node:fs";
+import { setInterval as promiseInterval, setTimeout as promiseSleep } from "node:timers/promises";
 accessSync("/bin/sh", constants.X_OK);
 const tmp = mkdtempSync("/tmp/scr-");
 const raw = readFileSync("/etc/hosts").toString(tty ? "hex" : "latin1"); // runtime BufferEncoding selection lowers too
-// The computed encoding is now part of the static Buffer surface.
-import { deflateSync, gzipSync } from "node:zlib";
-const packed = deflateSync("data"); // string data: the wrap-it-first hint
-const zipped = gzipSync("data"); // beyond the lowered pair: fenced
+const intervalWithSignal = promiseInterval(1, "tick", {}); // AbortSignal options stay fenced
+const sleepWithSignal = promiseSleep(1, "tick", { signal: AbortSignal.timeout(5) }); // resolve values and AbortSignal options lower
+// The computed encoding is now part of the static Buffer surface. The
+// one-shot zlib/raw/gzip and Brotli codecs take Node's options, validated
+// at run time.
+import { brotliCompressSync, deflateSync } from "node:zlib";
+const packed = deflateSync("data", { level: 9, strategy: 1 }); // options lower
+const brotli = brotliCompressSync(Buffer.from("data")); // Brotli lowers too
 // The remaining imports continue the declared-but-not-lowered surface.

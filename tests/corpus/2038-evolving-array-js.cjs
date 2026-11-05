@@ -52,3 +52,27 @@ function viaTernary(win) {
 }
 viaTernary(false);
 viaTernary(true);
+
+// Public array signatures can be backed by checked storage in JS methods.
+// Concatenation validates the returned array before spreading its elements.
+class Lines {
+  /** @returns {string[]} */
+  values() {
+    return JSON.parse('["second","third"]');
+  }
+  render() {
+    const before = ['first'];
+    const after = before.concat(this.values());
+    console.log('concat:', before.join('|'), after.join('|'));
+  }
+}
+new Lines().render();
+
+// Array predicates use ToBoolean on checked results, including objects.
+const candidates = ['null', 'false', '0', '""', '{}'];
+console.log('find:', candidates.find((value) => JSON.parse(value)));
+console.log('find-index:', candidates.findIndex((value) => JSON.parse(value)));
+console.log('find-last:', candidates.findLast((value) => JSON.parse(value)));
+console.log('find-last-index:', candidates.findLastIndex((value) => JSON.parse(value)));
+console.log('some:', candidates.some((value) => JSON.parse(value)));
+console.log('every:', candidates.every((value) => JSON.parse(value)));

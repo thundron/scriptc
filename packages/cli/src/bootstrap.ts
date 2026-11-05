@@ -6,7 +6,6 @@ import { enableCompileCache } from "node:module";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { LEGACY_C_EXECUTABLE_WARNING, shouldWarnLegacyCExecutable } from "./legacy-c-warning.js";
 import { CLI_OPTIONS, USAGE } from "./usage.js";
 
 // Node 24 can persist V8's compiled module bytecode. scriptc's CLI imports
@@ -23,7 +22,10 @@ try {
 function packageVersion(): string {
   const here = dirname(fileURLToPath(import.meta.url));
   try {
-    return (JSON.parse(requireText(join(here, "..", "package.json"))) as { version?: string }).version ?? "unknown";
+    return (
+      (JSON.parse(requireText(join(here, "..", "package.json"))) as { version?: string }).version ??
+      "unknown"
+    );
   } catch {
     return "unknown";
   }
@@ -37,7 +39,9 @@ function requireText(path: string): string {
 }
 
 async function tryFastPath(): Promise<number | null> {
-  let parsed: ReturnType<typeof parseArgs<{ options: typeof CLI_OPTIONS; allowPositionals: true; allowNegative: true }>>;
+  let parsed: ReturnType<
+    typeof parseArgs<{ options: typeof CLI_OPTIONS; allowPositionals: true; allowNegative: true }>
+  >;
   try {
     parsed = parseArgs({ options: CLI_OPTIONS, allowPositionals: true, allowNegative: true });
   } catch {
@@ -53,18 +57,56 @@ async function tryFastPath(): Promise<number | null> {
     return values.help ? 0 : 1;
   }
   const [command, inputArg] = positionals;
+  if (command === "coverage") return coverageFastPath(values, inputArg, positionals.length);
+  // Computed-access sites emit different code by default; an explicit value
+  // other than "1" is an opt-out or one the full compiler validates
+  // (backend/llvm/js-ic.ts).
+  const indexFastpath = process.env["SCRIPTC_DYN_INDEX_FASTPATH"];
   if (
-    (command !== "build" && command !== "run") || inputArg === undefined ||
+    (command !== "build" && command !== "run") ||
+    inputArg === undefined ||
     (values.emit !== undefined && values.emit !== "exe") ||
     values.print !== undefined ||
     values["emit-ir"] ||
-    values.lib || values["from-c"] || values["provenance-sources"] ||
-    (values["external-types"] ?? []).length > 0
-  ) return null;
+    values.lib ||
+    values["provenance-sources"] ||
+    // The full compiler keys these builds by the profile's bytes.
+    values["profile-generate"] !== undefined ||
+    values["profile-use"] !== undefined ||
+    values.sparse ||
+    // A --libnode=beside build places the pack and the island modules next
+    // to the executable, which a routed hit does not do.
+    values.libnode === "beside" ||
+    // The full compiler resolves `native` against the build host.
+    values["target-cpu"] !== undefined ||
+    // The experimental stdout policy changes the program object, which the
+    // routed cache key would need to carry; the full compiler owns it.
+    values["stdout-buffering"] ||
+    // The full CLI validates the value.
+    values.exceptions !== undefined ||
+    (values["external-types"] ?? []).length > 0 ||
+    // The full CLI validates the Node island policy flags.
+    hasNodeIslandFlags(values) ||
+    // The full compiler writes the representation report and keys the heap
+    // census build (backend/llvm/repr-report.ts, heap-census.ts).
+    (process.env["SCRIPTC_REPR_REPORT"] ?? "") !== "" ||
+    (process.env["SCRIPTC_HEAP_CENSUS"] ?? "") !== "" ||
+    // An attribution build emits a different way count, and the full compiler
+    // keys the build by it (backend/llvm/js-ic.ts).
+    (process.env["SCRIPTC_DEBUG_JS_IC_WAYS"] ?? "") !== "" ||
+    (indexFastpath !== undefined && indexFastpath !== "" && indexFastpath !== "1")
+  )
+    return null;
   const backend = values.backend;
-  if (backend !== undefined && backend !== "c" && backend !== "llvm") return null;
+  if (backend !== undefined && backend !== "llvm") return null;
   const optimization = values.optimization;
-  if (optimization !== undefined && optimization !== "release" && optimization !== "dev") return null;
+  if (
+    optimization !== undefined &&
+    optimization !== "release" &&
+    optimization !== "dev" &&
+    optimization !== "speed"
+  )
+    return null;
   const npmRaw = (values["npm-static"] ?? [])
     .flatMap((value) => value.split(","))
     .map((value) => value.trim())
@@ -89,11 +131,8 @@ async function tryFastPath(): Promise<number | null> {
   const input = resolve(inputArg);
   const outDir = values.out ? dirname(resolve(values.out)) : join(dirname(input), ".scriptc");
   const stem = basename(input).replace(/\.(ts|mts|cts|js|mjs|cjs|c|ll)$/, "");
-  const defaultName = buildPlatform === "win32"
-    ? `${stem}.exe`
-    : buildPlatform === "wasi"
-      ? `${stem}.wasm`
-      : stem;
+  const defaultName =
+    buildPlatform === "win32" ? `${stem}.exe` : buildPlatform === "wasi" ? `${stem}.wasm` : stem;
   const outPath = values.out ? resolve(values.out) : join(outDir, defaultName);
   const ffiPath = values.ffi === undefined ? null : resolve(values.ffi);
   const ffiBytes = ffiPath === null ? null : await readFile(ffiPath).catch(() => null);
@@ -103,60 +142,69 @@ async function tryFastPath(): Promise<number | null> {
   // full compiler. Otherwise a valid helper/runtime-pack cache entry has a
   // different target/compiler identity and bootstrap must unnecessarily load
   // the whole compiler graph to rediscover it.
-  const helperRuntimePackTarget = backend !== "c" && !values.sanitize
-    ? startup.precompiledRuntimePackTarget()
-    : null;
+  const helperRuntimePackTarget = !values.sanitize ? startup.precompiledRuntimePackTarget() : null;
   const helperObjectRoute = helperRuntimePackTarget !== null;
-  let nativeEnvironment: string | null;
+  // The full compiler reports a checker it cannot find.
+  let checker: string | undefined;
   try {
-    nativeEnvironment = helperObjectRoute
-      ? await startup.executableLinkerEnvironmentFingerprint(
-        process.env,
-        helperRuntimePackTarget.defaultLinker,
-      )
-      : await startup.executableNativeEnvironmentFingerprint();
+    checker = startup.checkerCacheIdentity();
   } catch {
-    nativeEnvironment = null;
+    return null;
   }
-  if (nativeEnvironment === null) return null;
   const hit = await startup.readRoutedExecutableCache(root, {
     entryPath: input,
     outDir,
     outPath,
     emitIr: values["emit-ir"],
     sanitize: values.sanitize,
-    dynamic: values.dynamic,
-    backend: backend ?? "auto",
-    ...(optimization === "dev" ? { optimization: "dev" as const } : {}),
+    backend: "llvm",
+    ...(optimization === "dev" || optimization === "speed" ? { optimization } : {}),
+    ...(values.strip ? { strip: true as const } : {}),
+    ...(values.static ? { staticLink: true as const } : {}),
+    ...(values["detached-exit"] ? { detachedExit: true as const } : {}),
+    ...(values["large-pages"] ? { largePages: true as const } : {}),
+    ...(values["cpu-dispatch"] === true ? { cpuDispatch: true as const } : {}),
+    ...(checker === undefined ? {} : { checker }),
     npmStatic,
+    // Only builds with the computed-access shape reach this route, and the
+    // full compiler keys those builds by it (backend/llvm/js-ic.ts).
+    dynIndexFastpath: true as const,
+    // Mirrors the full compiler's key: shape inference's overlay is opt-in
+    // (SCRIPTC_SHAPE_OVERLAY=1) and --no-shape-overlay turns it off.
+    ...(process.env["SCRIPTC_SHAPE_OVERLAY"] === "1" && values["shape-overlay"] !== false
+      ? { shapeOverlay: true as const }
+      : {}),
     ffiProfile: ffiPath === null ? null : { path: ffiPath, bytes: ffiBytes! },
     target: `${process.env["SCRIPTC_TARGET"] ?? "native"}:${buildPlatform}:${process.arch}:${
       helperObjectRoute ? "runtime-pack" : "driver-tu"
     }`,
-    compiler: [helperObjectRoute
-      ? startup.resolvePlatformLinker(process.env, helperRuntimePackTarget.defaultLinker)
-      : (process.env["SCRIPTC_CC"] ?? "clang")],
-    nativeEnvironment,
+    compiler: [
+      helperObjectRoute
+        ? startup.resolvePlatformLinker(process.env, helperRuntimePackTarget.defaultLinker)
+        : (process.env["SCRIPTC_CC"] ?? "clang"),
+    ],
+    nativeEnvironment: () =>
+      helperObjectRoute
+        ? startup.executableLinkerEnvironmentFingerprint(
+            process.env,
+            helperRuntimePackTarget.defaultLinker,
+          )
+        : startup.executableNativeEnvironmentFingerprint(),
     nodeVersion: process.version,
+    // An entry of a program that calls into Node.js serves only the same pack.
+    libnodeIdentity: () => startup.libnodeCacheKey(values.libnode, process.env, dirname(input)),
   });
   if (hit === null) return null;
-  if (shouldWarnLegacyCExecutable({
-    executable: true,
-    fromC: false,
-    backend,
-    sanitize: values.sanitize,
-  })) {
-    process.stderr.write(LEGACY_C_EXECUTABLE_WARNING);
-  }
-  if (hit.native.llvmRefusal !== undefined) {
-    process.stderr.write(`scriptc: backend c (llvm refused: ${hit.native.llvmRefusal})\n`);
-  }
-  // Source-primary invocations can replace a previously cached executable.
-  // A routed hit restores that executable without loading the full compiler,
-  // so mirror its output-kind cleanup before returning from the fast path.
-  await rm(join(outDir, `${stem}.ir.json`), { force: true });
-  if (!values["keep-c"]) await rm(hit.cPath, { force: true });
+  // A restored executable links nothing, so the ICU data file its Intl
+  // program reads at run time was not installed beside it; the full compiler
+  // restores the same executable and installs that file.
+  if (hit.native.intl === true) return null;
+  if (!values["keep-llvm"]) await rm(hit.llvmPath, { force: true });
   if (command === "build") {
+    // A cached build repeats its performance warning (SC6101).
+    const performance = hit.performance ?? [];
+    if (performance.length > 0 && values["dynamic-tier-warning"] !== false)
+      process.stderr.write(startup.renderPerformanceWarnings(performance) + "\n");
     process.stdout.write(`${outPath}\n`);
     return 0;
   }
@@ -171,6 +219,88 @@ async function tryFastPath(): Promise<number | null> {
       }
     });
   });
+}
+
+function hasNodeIslandFlags(
+  values: ReturnType<
+    typeof parseArgs<{ options: typeof CLI_OPTIONS; allowPositionals: true; allowNegative: true }>
+  >["values"],
+): boolean {
+  return (
+    values["node-islands"] !== undefined ||
+    (values["node-island"] ?? []).length > 0 ||
+    (values.native ?? []).length > 0 ||
+    values.node !== undefined ||
+    values["explain-island"] !== undefined ||
+    values["strict-user-js"]
+  );
+}
+
+/** An unchanged program's coverage verdict replays from the verdict cache
+ * without loading the compiler graph. Anything else (a miss, a comment-only
+ * edit, options the replay does not cover) defers to the full CLI. */
+async function coverageFastPath(
+  values: ReturnType<
+    typeof parseArgs<{ options: typeof CLI_OPTIONS; allowPositionals: true; allowNegative: true }>
+  >["values"],
+  inputArg: string | undefined,
+  positionalCount: number,
+): Promise<number | null> {
+  const print = values.print;
+  const failOn = values["fail-on"];
+  if (
+    inputArg === undefined ||
+    positionalCount !== 2 ||
+    (print !== undefined && print !== "diagnostics") ||
+    (failOn !== undefined && failOn !== "blockers" && failOn !== "divergences") ||
+    values.emit !== undefined ||
+    values.strip ||
+    values.static ||
+    values["detached-exit"] ||
+    values["large-pages"] ||
+    values["stdout-buffering"] ||
+    values.exceptions !== undefined ||
+    values["target-cpu"] !== undefined ||
+    values["cpu-dispatch"] !== undefined ||
+    values.lib ||
+    values.profile !== undefined ||
+    values.ffi !== undefined ||
+    values.backend !== undefined ||
+    values.optimization !== undefined ||
+    values["windows-subsystem"] !== undefined ||
+    values["provenance-sources"] ||
+    values["emit-ir"] ||
+    (values["npm-static"] ?? []).length > 0 ||
+    values["shape-overlay"] === false ||
+    (values["external-types"] ?? []).length > 0 ||
+    // The replay covers the default Node island policy only.
+    hasNodeIslandFlags(values)
+  )
+    return null;
+  let startup: typeof import("@scriptc/compiler/startup-cache");
+  try {
+    startup = await import("@scriptc/compiler/startup-cache");
+  } catch {
+    return null;
+  }
+  const hit = await startup.readCoverageVerdict(resolve(inputArg), {}).catch(() => null);
+  if (hit === null) return null;
+  const { coverage, sourceTexts } = hit;
+  if (values["dynamic-tier-warning"] === false) delete coverage.performance;
+  if (print === "diagnostics") {
+    const envelope = startup.coverageEnvelope(coverage, {
+      compilerVersion: packageVersion(),
+      sourceTexts,
+      ...(failOn === undefined ? {} : { failOn }),
+    });
+    process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
+  } else {
+    const color = process.stdout.isTTY ?? false;
+    process.stdout.write(
+      startup.renderCoverage(coverage, { color, sourceTexts, root: process.cwd() }) + "\n",
+    );
+  }
+  return startup.coveragePasses(coverage, failOn) ? 0 : 1;
 }
 
 const fastExit = await tryFastPath();

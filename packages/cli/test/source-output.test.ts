@@ -35,17 +35,39 @@ function cli(args: string[], env: NodeJS.ProcessEnv = process.env) {
 
 test("default and explicit paths identify each source primary artifact", async () => {
   const { dir, entry } = await fixture();
-  const expected = { ir: "hello.ir.json", c: "hello.c", llvm: "hello.ll" } as const;
-  for (const kind of ["ir", "c", "llvm"] as const) {
+  const expected = { ir: "hello.ir.json", llvm: "hello.ll" } as const;
+  const artifacts: string[] = [];
+  for (const kind of ["ir", "llvm"] as const) {
     const result = await cli(["build", entry, `--emit=${kind}`]);
     const path = join(dir, ".scriptc", expected[kind]);
+    artifacts.push(expected[kind]);
     expect(result.stdout).toBe(`${path}\n`);
-    expect(await readdir(join(dir, ".scriptc"))).toEqual([expected[kind]]);
+    expect((await readdir(join(dir, ".scriptc"))).sort()).toEqual([...artifacts].sort());
   }
   const exact = join(dir, "artifact.with-custom-suffix");
   const result = await cli(["build", entry, "--emit=llvm", "-o", exact]);
   expect(result.stdout).toBe(`${exact}\n`);
   expect(await readFile(exact, "utf8")).toContain("define i32 @main");
+});
+
+test("a default source output preserves previously generated sibling artifacts", async () => {
+  const { dir, entry } = await fixture();
+  const outDir = join(dir, ".scriptc");
+  await mkdir(outDir);
+  const siblings = [
+    "hello",
+    "hello.exe",
+    "hello.wasm",
+    "hello.c",
+    "hello.ll",
+    "hello.s",
+    "hello.o",
+  ];
+  await Promise.all(siblings.map((name) => writeFile(join(outDir, name), `saved ${name}\n`)));
+  await cli(["build", entry, "--emit=ir"]);
+  for (const name of siblings) {
+    await expect(readFile(join(outDir, name), "utf8")).resolves.toBe(`saved ${name}\n`);
+  }
 });
 
 test("IR CLI output round-trips through the public parser and validator", async () => {
@@ -70,7 +92,15 @@ test("module-flavored TypeScript extensions retain the plain entry stem", async 
 
 test("an explicit default-shaped output path preserves caller-owned siblings", async () => {
   const { dir, entry } = await fixture();
-  const siblings = ["hello", "hello.exe", "hello.wasm", "hello.c", "hello.ll", "hello.s", "hello.o"];
+  const siblings = [
+    "hello",
+    "hello.exe",
+    "hello.wasm",
+    "hello.c",
+    "hello.ll",
+    "hello.s",
+    "hello.o",
+  ];
   await Promise.all(siblings.map((name) => writeFile(join(dir, name), `caller-owned ${name}\n`)));
   const path = join(dir, "hello.ir.json");
   await cli(["build", entry, "--emit=ir", "-o", path]);
@@ -86,7 +116,10 @@ test("source outputs never execute compiler, archiver, or linker traps", async (
   await mkdir(traps);
   for (const tool of ["clang", "cc", "gcc", "zig", "ar", "ld", "link", "link.exe", "xcrun"]) {
     const path = join(traps, tool);
-    await writeFile(path, `#!/bin/sh\nprintf '${tool}\\n' >> '${trapLog}'\nprintf '${tool} trap executed\\n' >&2\nexit 97\n`);
+    await writeFile(
+      path,
+      `#!/bin/sh\nprintf '${tool}\\n' >> '${trapLog}'\nprintf '${tool} trap executed\\n' >&2\nexit 97\n`,
+    );
     await chmod(path, 0o755);
   }
   const env = {
@@ -96,7 +129,7 @@ test("source outputs never execute compiler, archiver, or linker traps", async (
     SCRIPTC_TARGET: "aarch64-apple-ios",
     SCRIPTC_CACHE_DIR: join(dir, "cache-must-not-exist"),
   };
-  for (const kind of ["ir", "c", "llvm"] as const) {
+  for (const kind of ["ir", "llvm"] as const) {
     const path = join(dir, `hello.${kind}`);
     await expect(cli(["build", entry, `--emit=${kind}`, "-o", path], env)).resolves.toMatchObject({
       stderr: "",
@@ -110,11 +143,13 @@ test("source outputs never execute compiler, archiver, or linker traps", async (
 test("source outputs reject unsupported target spellings", async () => {
   const { dir, entry } = await fixture();
   const out = join(dir, "main.ll");
-  await expect(cli(["build", entry, "--emit=llvm", "-o", out], {
-    ...process.env,
-    SCRIPTC_CC: "trap-compiler",
-    SCRIPTC_TARGET: "wasm64-wasi",
-  })).rejects.toMatchObject({
+  await expect(
+    cli(["build", entry, "--emit=llvm", "-o", out], {
+      ...process.env,
+      SCRIPTC_CC: "trap-compiler",
+      SCRIPTC_TARGET: "wasm64-wasi",
+    }),
+  ).rejects.toMatchObject({
     code: 1,
     stderr: expect.stringContaining("unsupported WASI target 'wasm64-wasi'"),
   });
@@ -131,7 +166,7 @@ test("--emit-ir remains additive but reports its deprecation", async () => {
 
 test("run and incompatible compatibility flags reject non-executable outputs", async () => {
   const { entry } = await fixture();
-  await expect(cli(["run", entry, "--emit=c"])).rejects.toMatchObject({
+  await expect(cli(["run", entry, "--emit=llvm"])).rejects.toMatchObject({
     code: 1,
     stderr: expect.stringContaining("scriptc run requires --emit=exe"),
   });

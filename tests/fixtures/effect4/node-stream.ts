@@ -1,0 +1,1 @@
+import * as Effect from "effect/Effect";import * as Stream from "effect/Stream";import * as NodeStream from "@effect/platform-node/NodeStream";import {Readable} from "node:stream";Effect.runPromise((NodeStream.fromReadable({evaluate:()=>Readable.from(["a","b"]),onError:String}).pipe(Stream.runCollect)).pipe(Effect.tap(value=>Effect.sync(()=>console.log(JSON.stringify(value))))))

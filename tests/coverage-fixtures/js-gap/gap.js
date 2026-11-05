@@ -1,8 +1,6 @@
-// The JS INFERENCE-GAP fixture: noImplicitAny is off (this directory's
-// tsconfig), so the untyped parameter types `any` — landing exactly where
-// `any` lands in TS: SC2011 (runs with --dynamic) in a static analysis,
-// compiled-dynamically under --dynamic. JSDoc-typed code right next to it
-// stays fully static.
+// noImplicitAny is off in this directory. Inferred JavaScript and the
+// neighboring JSDoc-typed function both compile as native code, including
+// when the optional island engine is enabled.
 'use strict';
 
 function untyped(x) {

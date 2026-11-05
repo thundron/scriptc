@@ -1,0 +1,1 @@
+import * as Entity from "effect/cluster/Entity";import * as Rpc from "effect/rpc/Rpc";import * as Schema from "effect/Schema";const C=Entity.make("C",[Rpc.make("Inc",{success:Schema.Int})]);console.log(C.type)

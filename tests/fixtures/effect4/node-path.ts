@@ -1,0 +1,1 @@
+import * as Effect from "effect/Effect";import * as Path from "effect/Path";import * as NodePath from "@effect/platform-node/NodePath";Effect.runPromise((Effect.gen(function*(){const path=yield* Path.Path;return path.join("a","b","c")}).pipe(Effect.provide(NodePath.layer))).pipe(Effect.tap(value=>Effect.sync(()=>console.log(JSON.stringify(value))))))

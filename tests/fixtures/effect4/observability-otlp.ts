@@ -1,0 +1,10 @@
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as OtlpTracer from "effect/observability/OtlpTracer";
+import * as OtlpSerialization from "effect/observability/OtlpSerialization";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+const urls:string[]=[];
+const client=HttpClient.make(request=>Effect.sync(()=>{urls.push(request.url);return HttpClientResponse.fromWeb(request,new Response("",{status:200}))}));
+const layer=OtlpTracer.layer({url:"http://local/v1/traces",resource:{serviceName:"test"}}).pipe(Layer.provide(OtlpSerialization.layerJson),Layer.provide(Layer.succeed(HttpClient.HttpClient,client)));
+Effect.runPromise(Effect.void.pipe(Effect.withSpan("hello"),Effect.provide(layer))).then(()=>console.log(JSON.stringify(urls)));

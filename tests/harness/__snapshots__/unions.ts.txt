@@ -1,4 +1,4 @@
-unions.ts:18:10 - error SC2003: union types must match exactly: expected 'number | { n: number } | { m: string }', got 'number | { m: string; n: number }' (a union re-tags into another union only when every arm of the source has an identical arm in the destination, or is a record/array that width-coerces into exactly one destination arm)
+unions.ts:18:10 - error SC2003: union conversion has no unambiguous layout mapping: expected 'number | { n: number } | { m: string }', got 'number | { m: string; n: number }' (each source arm needs an identical destination arm, a unique compatible record/array layout, or a shared literal discriminant selecting compatible layouts)
 
   17 | function ambiguousArm(x: WideArm | number): { n: number } | { m: string } | number {
   18 |   return x;
@@ -7,27 +7,6 @@ unions.ts:18:10 - error SC2003: union types must match exactly: expected 'number
 
   hint: narrow the value to a SINGLE arm first (a discriminant check, or '!== undefined'/'!== null' for unit arms); a plain arm value widens into any union that contains it, and a whole union widens into any union whose arms include the source's
 
-unions.ts:36:9 - error SC1090: switch on union-typed values that aren't plain reads (the tests re-read the discriminant — bind it to a const first, or switch on a discriminant field) are not supported yet
-
-  35 | // a COMPUTED discriminant rides every desugared test and stays fenced.
-  36 | switch (mk()) {
-     |         ^~~~
-  37 |   case 1:
-
-unions.ts:47:13 - error SC1090: '.indexOf()' on union-element arrays (union values have no stable identity — loop and compare the narrowed values instead) are not supported yet
-
-  46 | const items: (number | string)[] = [1, "two"];
-  47 | console.log(items.indexOf(1));
-     |             ^~~~~~~~~~~~~~~~
-  48 | console.log(items.includes("two"));
-
-unions.ts:48:13 - error SC1090: '.includes()' on union-element arrays (union values have no stable identity — loop and compare the narrowed values instead) are not supported yet
-
-  47 | console.log(items.indexOf(1));
-  48 | console.log(items.includes("two"));
-     |             ^~~~~~~~~~~~~~~~~~~~~
-  49 | // Unions may contain function arms beside data arms now (typeof narrows,
-
 unions.ts:61:22 - error SC1090: string conversions of unions with object arms (narrow first: check a discriminant field, or compare with '!== undefined'/'!== null' for unit arms) are not supported yet
 
   60 | // honest text (JS prints "[object Object]") and stays fenced.
@@ -35,23 +14,9 @@ unions.ts:61:22 - error SC1090: string conversions of unions with object arms (n
      |                      ^~~~~~
   62 | 
 
-unions.ts:69:19 - error SC1090: '== null' / '!= null' on a 'null | string | undefined' value that isn't a plain read (both unit arms need the operand twice — bind it to a const first) is not supported yet
+unions.ts:92:10 - error SC1090: reading 'valueOf' on a union-typed value (every arm must be an object/record with a same-typed field 'valueOf'; narrow first: check a discriminant field, or compare with '!== undefined'/'!== null' for unit arms) is not supported yet
 
-  68 | }
-  69 | const looseCall = mkNullish() == null;
-     |                   ^~~~~~~~~~~~~~~~~~~
-  70 | 
-
-unions.ts:96:1 - error SC1090: '??=' on non-variable targets (write it out: if (o.f === undefined) o.f = v) are not supported yet
-
-  95 | const holder: { slot?: string } = {};
-  96 | holder.slot ??= "v";
-     | ^~~~~~~~~~~
-  97 | 
-
-unions.ts:100:10 - error SC1090: '?.' on 'number | string | undefined' (the guarded receiver is a sub-union; check a discriminant field first) is not supported yet
-
-   99 | function chainSubUnion(x: number | string | undefined): number {
-  100 |   return x?.valueOf === undefined ? 0 : 1;
-      |          ^~~~~~~~~~
-  101 | }
+  91 | function chainSubUnion(x: number | string | undefined): number {
+  92 |   return x?.valueOf === undefined ? 0 : 1;
+     |          ^~~~~~~~~~
+  93 | }

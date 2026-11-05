@@ -2,7 +2,7 @@
   "profile_format": 1,
   "name": "cache-reset",
   "entry": "missing.ts",
-  "emission": "c",
+  "emission": "llvm",
   "abi": {
     "prefix": "cr_",
     "init_symbol": "cr_init",

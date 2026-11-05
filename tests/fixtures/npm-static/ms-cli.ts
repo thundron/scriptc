@@ -4,10 +4,6 @@
 // and the string direction (parse), the latter unblocked by aliased-typeof
 // narrowing (`var type = typeof val` — the checker only narrows const
 // aliases), static regex exec, parseFloat, isFinite, and Math.abs/round.
-// The one remaining fence is parse()'s bare `return;` against its JSDoc
-// `@return {Number}` claim — the garbage-input path, where Node answers
-// undefined: a representation the declared type cannot hold, fenced
-// honestly (ms("not a duration") traps instead of answering undefined).
 import ms from "ms";
 
 // The string direction (parse).

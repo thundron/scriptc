@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/tuple-runtime-index-writes.ts"
+ ],
+ "diags": []
+}

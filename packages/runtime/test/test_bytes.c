@@ -5,7 +5,6 @@
  *   <scratch-dir>       run all assertions; prints "N/N cases passed"
  *   --crash-get-oob     element read past the end   → RangeError + abort()
  *   --crash-get-frac    fractional element index    → RangeError + abort()
- *   --crash-set-oob     element write past the end  → RangeError + abort()
  *
  * The coercion matrix mirrors Node exactly (verified by hand and by the
  * differential corpus): ToUint8/ToUint32 modular truncation on writes,
@@ -25,6 +24,9 @@ long scr_bytes_live_count(void);
 #endif
 
 static long total = 0, failed = 0;
+
+void scr_bytes_test_bulk_storage(void);
+void scr_bytes_test_buffer_pool(void);
 
 static void check(bool ok, const char *what) {
   total++;
@@ -59,6 +61,17 @@ static void test_construction(void) {
   check_f64(scr_bytes_len(b), 3, "new(3) length");
   check_f64(scr_bytes_byte_len(b), 3, "u8 byteLength == length");
   check_f64(scr_bytes_get(b, 0), 0, "zero-filled");
+  scr_bytes_release(b);
+
+  b = scr_bytes_new(SCR_BYTES_U8, 1);
+  scr_bytes_set(b, 0, 3);
+  const double invalid_indices[] = { -1, 0.5, 1, NAN, INFINITY, -INFINITY };
+  for (size_t i = 0; i < sizeof invalid_indices / sizeof invalid_indices[0]; i++) {
+    scr_bytes_set(b, invalid_indices[i], 7);
+    check_f64(scr_bytes_get(b, 0), 3, "invalid writes preserve existing elements");
+    check_f64(scr_bytes_len(b), 1, "invalid writes do not grow typed arrays");
+    check(!scr_exc_pending(), "invalid writes do not throw");
+  }
   scr_bytes_release(b);
 
   /* ToIndex: 3.5 truncates to 3, NaN is 0 — no throw (Node-exact). */
@@ -145,6 +158,7 @@ static void test_slice_set_copy(void) {
 }
 
 static void test_encodings(void) {
+  check_str(scr_str_from_utf8_lossy(NULL, 0), "", "empty native UTF-8 span");
   /* utf8 round-trip, astral included (U+1F4A9 + U+00E9). */
   ScrStr *utf8 = S("utf8");
   ScrStr *hex = S("hex");
@@ -200,6 +214,135 @@ static void test_encodings(void) {
   scr_str_release(utf8);
   scr_str_release(hex);
   scr_str_release(b64);
+}
+
+/* The length of the well-formed WTF-8 sequence at in[i], or 0. */
+static size_t ref_seq_len(const uint8_t *in, size_t n, size_t i) {
+  uint8_t b = in[i];
+  if (b < 0x80) return 1;
+  size_t len;
+  uint8_t lo = 0x80, hi = 0xbf;
+  if (b >= 0xc2 && b <= 0xdf) len = 2;
+  else if (b >= 0xe0 && b <= 0xef) len = 3;
+  else if (b >= 0xf0 && b <= 0xf4) len = 4;
+  else return 0;
+  if (b == 0xe0) lo = 0xa0;
+  if (b == 0xf0) lo = 0x90;
+  if (b == 0xf4) hi = 0x8f;
+  if (n - i < len || in[i + 1] < lo || in[i + 1] > hi) return 0;
+  for (size_t k = 2; k < len; k++)
+    if ((in[i + k] & 0xc0) != 0x80) return 0;
+  return len;
+}
+
+/* The UTF-16 units of string storage, one at a time: a well-formed
+ * sequence gives its code point's units and any other byte stands for
+ * U+0000..U+00FF (a raw HTTP header byte). */
+static size_t ref_units(const uint8_t *in, size_t n, uint16_t *out) {
+  size_t k = 0;
+  for (size_t i = 0; i < n;) {
+    size_t len = ref_seq_len(in, n, i);
+    if (len == 0) {
+      out[k++] = in[i++];
+      continue;
+    }
+    uint32_t cp = len == 1 ? in[i] : (uint32_t)(in[i] & (0x7f >> len));
+    for (size_t j = 1; j < len; j++) cp = (cp << 6) | (in[i + j] & 0x3f);
+    i += len;
+    if (cp > 0xffff) {
+      out[k++] = (uint16_t)(0xd800 + ((cp - 0x10000) >> 10));
+      out[k++] = (uint16_t)(0xdc00 + ((cp - 0x10000) & 0x3ff));
+    } else {
+      out[k++] = (uint16_t)cp;
+    }
+  }
+  return k;
+}
+
+/* Encodes storage that is not well-formed (raw header bytes become string
+ * storage unchecked) and compares latin1, ascii and utf16le with the
+ * reference; hex and base64 decode the latin1 bytes. ASan checks that no
+ * path reads or writes outside either buffer. */
+/* encs: latin1, ascii, utf16le, hex, base64. */
+static void check_raw_encodings(ScrStr *const *encs, const uint8_t *in, size_t n, const char *what) {
+  ScrStr *latin1 = encs[0], *ascii = encs[1], *utf16le = encs[2], *hex = encs[3], *b64 = encs[4];
+  ScrStr *s = scr_str_new((const char *)in, n);
+  uint16_t units[64];
+  size_t k = ref_units(in, n, units);
+  ScrStr *narrow[] = {latin1, ascii};
+  for (size_t e = 0; e < 2; e++) {
+    ScrBytes *b = scr_bytes_from_str(s, narrow[e]);
+    bool ok = b->len == k;
+    for (size_t j = 0; ok && j < k; j++) ok = b->data[j] == (uint8_t)units[j];
+    check(ok, what);
+    scr_bytes_release(b);
+  }
+  ScrBytes *wide = scr_bytes_from_str(s, utf16le);
+  bool ok = wide->len == 2 * k;
+  for (size_t j = 0; ok && j < k; j++)
+    ok = wide->data[2 * j] == (uint8_t)units[j] && wide->data[2 * j + 1] == units[j] >> 8;
+  check(ok, what);
+  scr_bytes_release(wide);
+  scr_bytes_release(scr_bytes_from_str(s, hex));
+  scr_bytes_release(scr_bytes_from_str(s, b64));
+  scr_str_release(s);
+}
+
+static void test_raw_storage_encodings(void) {
+  /* Each pattern at every offset in an eight-byte word, alone and followed
+   * by ASCII, two-byte characters or more of the pattern. */
+  static const struct { const char *bytes; size_t n; } patterns[] = {
+      {"\x80", 1}, {"\x80\x81\xbf\x90", 4}, {"\xc3", 1}, {"\xc3\xa9", 2},
+      {"\xc3\xa9\xc3", 3}, {"\xc0\x80\xc1\xbf", 4}, {"\xe9\x41\xe9", 3},
+      {"\xf0\x9f\x41", 3}, {"\xe2\x82", 2}, {"\xe2\x82\xac", 3},
+      {"\xf0\x9f\x98\x80", 4}, {"\xed\xa0\x80", 3}, {"\xff\xfe\xf5", 3},
+      {"\xdf\xbf\x80\x80", 4}, {"\xc2\x80\xc2", 3}, {"x\xe9y\x80\x80z\xdf", 7},
+  };
+  static const struct { const char *bytes; size_t n; } tails[] = {
+      {"", 0}, {"bcdefghij", 9}, {"\xc3\xa9\xc3\xa9\xc3\xa9\xc3\xa9", 8}, {"\x80\xc3\xa9", 3},
+  };
+  ScrStr *encs[] = {S("latin1"), S("ascii"), S("utf16le"), S("hex"), S("base64")};
+  uint8_t buf[64];
+  char what[96];
+  for (size_t p = 0; p < sizeof patterns / sizeof patterns[0]; p++) {
+    for (size_t offset = 0; offset < 17; offset++) {
+      for (size_t t = 0; t < sizeof tails / sizeof tails[0]; t++) {
+        for (size_t lead = 0; lead < 2; lead++) {
+          /* lead: the offset is two-byte characters instead of ASCII. */
+          size_t n = 0;
+          for (size_t j = 0; j < offset; j++) {
+            if (lead && j + 1 < offset) {
+              buf[n++] = 0xc3;
+              buf[n++] = 0xa9;
+              j++;
+            } else {
+              buf[n++] = 'a';
+            }
+          }
+          memcpy(buf + n, patterns[p].bytes, patterns[p].n);
+          n += patterns[p].n;
+          memcpy(buf + n, tails[t].bytes, tails[t].n);
+          n += tails[t].n;
+          snprintf(what, sizeof what, "raw storage encodings: pattern %zu offset %zu tail %zu lead %zu",
+                   p, offset, t, lead);
+          check_raw_encodings(encs, buf, n, what);
+        }
+      }
+    }
+  }
+  /* Random bytes, mostly high, of every length up to 40. */
+  uint32_t seed = 12345;
+  for (int round = 0; round < 4000; round++) {
+    size_t n = (size_t)round % 41;
+    for (size_t j = 0; j < n; j++) {
+      seed = seed * 1103515245u + 12345u;
+      uint8_t r = (uint8_t)(seed >> 16);
+      buf[j] = (seed >> 27) & 1 ? (uint8_t)(0x80 | r) : (uint8_t)(r & 0x7f);
+    }
+    snprintf(what, sizeof what, "raw storage encodings: random round %d", round);
+    check_raw_encodings(encs, buf, n, what);
+  }
+  for (size_t e = 0; e < sizeof encs / sizeof encs[0]; e++) scr_str_release(encs[e]);
 }
 
 static void test_concat_and_u32be(void) {
@@ -333,6 +476,43 @@ static void test_fs_roundtrip(const char *scratch) {
   check(back->len == data->len && memcmp(back->data, data->data, data->len) == 0,
         "fs round-trip is byte-exact");
   scr_bytes_release(back);
+
+  /* The UTF-8 read decodes in place: each maximal malformed subpart (ff,
+   * 80, ed, a0, bd) becomes U+FFFD. */
+  ScrStr *utf8 = S("utf8");
+  ScrStr *upper = S("UTF-8");
+  static const char repaired[] =
+      "\0\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\n";
+  ScrStr *forms[2] = { scr_fs_read_file_encoded(path, utf8), scr_fs_read_file(path) };
+  for (int i = 0; i < 2; i++) {
+    check(forms[i]->len == sizeof repaired - 1 && memcmp(forms[i]->data, repaired, sizeof repaired - 1) == 0,
+          i == 0 ? "utf8 file read replaces malformed bytes"
+                 : "promise-form utf8 read replaces malformed bytes");
+    scr_str_release(forms[i]);
+  }
+  ScrStr *latin = S("caf\xc3\xa9 \xef\xbb\xbf");
+  scr_fs_write_file(path, latin);
+  ScrStr *read_back = scr_fs_read_file_encoded(path, upper);
+  check(read_back->len == latin->len && memcmp(read_back->data, latin->data, latin->len) == 0 &&
+            !scr_str_known_ascii(read_back),
+        "well-formed utf8 file reads back unchanged");
+  scr_str_release(read_back);
+  ScrStr *plain = S("plain ascii text that spans more than one thirty-two byte chunk");
+  scr_fs_write_file(path, plain);
+  read_back = scr_fs_read_file_encoded(path, utf8);
+  check(read_back->len == plain->len && memcmp(read_back->data, plain->data, plain->len) == 0 &&
+            scr_str_known_ascii(read_back),
+        "ascii file read records the ASCII fact");
+  scr_str_release(read_back);
+  ScrStr *empty = S("");
+  scr_fs_write_file(path, empty);
+  check_str(scr_fs_read_file_encoded(path, utf8), "", "empty utf8 file read");
+  scr_str_release(empty);
+  scr_str_release(plain);
+  scr_str_release(latin);
+  scr_str_release(upper);
+  scr_str_release(utf8);
+
   scr_bytes_release(data);
   scr_str_release(blob);
   scr_str_release(hex);
@@ -376,8 +556,6 @@ int main(int argc, char **argv) {
       scr_bytes_get(b, 1);
     } else if (strcmp(argv[1], "--crash-get-frac") == 0) {
       scr_bytes_get(b, 0.5);
-    } else if (strcmp(argv[1], "--crash-set-oob") == 0) {
-      scr_bytes_set(b, 1, 7); /* JS ignores; we trap (no appends either) */
     } else {
       fprintf(stderr, "unknown mode %s\n", argv[1]);
       return 2;
@@ -393,7 +571,10 @@ int main(int argc, char **argv) {
   test_construction();
   test_coercion_matrix();
   test_slice_set_copy();
+  scr_bytes_test_bulk_storage();
+  scr_bytes_test_buffer_pool();
   test_encodings();
+  test_raw_storage_encodings();
   test_concat_and_u32be();
   test_from_arr_and_random();
   test_zlib_roundtrip();

@@ -1,6 +1,6 @@
 // Uint8Array/Buffer values crossing into `unknown`: the checked-dynamic tree's bytes kind —
-// conversion on the way in (a copy, the boundary stance), checked-cast
-// extraction on the way out (another copy), Node-exact String() (elements
+// retention on the way in, checked-cast extraction sharing the view on
+// the way out, Node-exact String() (elements
 // joined) and JSON.stringify (the index-keyed object form). The stdin
 // toBytes(chunk: unknown) pattern.
 
@@ -26,16 +26,11 @@ scratch.buf = new Uint8Array([1, 2, 3]);
 console.log(String(scratch.buf), (scratch.buf as Uint8Array).length);
 console.log(JSON.stringify(scratch));
 
-// Extraction is a fresh value each time (both directions copy — the
-// documented aliasing divergence is asserted in the dyncheck harness, not
-// against Node); the BYTES are value-exact.
+// Repeated extraction preserves the view and its byte contents.
 const again = scratch.buf as Uint8Array;
 console.log(again[0] + again[1] + again[2]);
 
-// Buffer is bytes<u8> too. (String() of an unknown holding a BUFFER joins
-// the elements like a Uint8Array — Node decodes UTF-8 there; the checked-dynamic tree
-// cannot tell the two apart. SEMANTICS.md documents it; not asserted here
-// where Node is the oracle.)
+// Buffer shares bytes<u8> storage while preserving its runtime brand.
 const buf = Buffer.from("hi");
 const ub: unknown = buf;
 console.log((ub as Uint8Array).length, (ub as Uint8Array)[0]);

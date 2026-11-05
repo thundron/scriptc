@@ -1,0 +1,16 @@
+const stored = { unsafe: console };
+stored.unsafe.log("stored", 42, true, null, undefined, -0);
+stored.unsafe.info({ name: "world" }, [1, 2]);
+stored.unsafe.debug("debug");
+stored.unsafe.error("error");
+stored.unsafe.warn("warn");
+const log = console.log;
+log("detached");
+log.call(undefined, "receiver ignored");
+log.apply(null, ["applied", 7]);
+console.log(console === globalThis.console, log === stored.unsafe.log);
+console.log(typeof log, log.name, log.length, log === console.info);
+const globalObject = globalThis;
+globalObject.console.log("global value");
+const noArguments = log();
+console.log(noArguments === undefined);

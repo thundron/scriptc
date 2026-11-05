@@ -53,3 +53,15 @@ function adderFactory(a: number): (b: number) => (c: number) => number {
 console.log(adderFactory(1)(2)(3));
 const add10 = adderFactory(4)(6);
 console.log(add10(5), add10(90));
+
+class BoundArrow {
+  value = 4;
+  read = ((increment: number) => this.value + increment).bind({ value: 100 });
+}
+const holder = new BoundArrow();
+const read = holder.read;
+console.log(read(2), read === holder.read);
+holder.value = 9;
+console.log(read(3));
+const boundDefault = ((value = 12) => value * 2).bind(null);
+console.log(boundDefault(), boundDefault(8));

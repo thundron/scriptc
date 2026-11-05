@@ -15,39 +15,63 @@
 
 /* ── a tiny growable byte buffer (scr_url.c's, redeclared locally) ───── */
 
+/* Serialization buffers are short (a query string), so the builder keeps
+ * its first bytes in its own storage and reaches for the heap only when
+ * they do not fit. */
+#define UB_INLINE 96
+
 typedef struct {
   char *data;
   size_t len;
   size_t cap;
+  char inline_data[UB_INLINE];
 } UrlBuf;
 
 static void ub_init(UrlBuf *b) {
-  b->cap = 64;
+  b->data = b->inline_data;
+  b->cap = UB_INLINE;
   b->len = 0;
-  b->data = malloc(b->cap);
-  if (!b->data) {
-    scr_trap("scriptc: out of memory\n");
-  }
 }
 
 static void ub_append(UrlBuf *b, const char *bytes, size_t n) {
   if (b->len + n > b->cap) {
     while (b->len + n > b->cap) b->cap *= 2;
-    char *grown = realloc(b->data, b->cap);
-    if (!grown) {
-      scr_trap("scriptc: out of memory\n");
+    if (b->data == b->inline_data) {
+      char *grown = malloc(b->cap);
+      if (!grown) {
+        scr_trap("scriptc: out of memory\n");
+      }
+      memcpy(grown, b->data, b->len);
+      b->data = grown;
+    } else {
+      char *grown = realloc(b->data, b->cap);
+      if (!grown) {
+        scr_trap("scriptc: out of memory\n");
+      }
+      b->data = grown;
     }
-    b->data = grown;
   }
   memcpy(b->data + b->len, bytes, n);
   b->len += n;
 }
 
+/* Drop a builder's storage without answering a string. */
+static void ub_free(UrlBuf *b) {
+  if (b->data != b->inline_data) free(b->data);
+  b->data = b->inline_data;
+  b->len = 0;
+  b->cap = UB_INLINE;
+}
+
 static void ub_push(UrlBuf *b, char c) { ub_append(b, &c, 1); }
 
 static ScrStr *ub_take(UrlBuf *b) {
+  if (b->len == 0) {
+    if (b->data != b->inline_data) free(b->data);
+    return scr_str_empty_value();
+  }
   ScrStr *s = scr_str_new(b->data, b->len);
-  free(b->data);
+  if (b->data != b->inline_data) free(b->data);
   return s;
 }
 
@@ -132,7 +156,18 @@ void *scr_sp_retain_v(void *p) { return scr_sp_retain(p); }
 void scr_sp_release_v(void *p) { scr_sp_release(p); }
 
 /* Takes ownership of both strings. */
+/* Names and values are USVStrings: a lone surrogate is stored as U+FFFD.
+ * Consumes s; returns the stored +1 reference. */
+static ScrStr *sp_usv(ScrStr *s) {
+  if (!scr_str_has_surrogate(s)) return s;
+  ScrStr *usv = scr_str_to_well_formed(s);
+  scr_str_release(s);
+  return usv;
+}
+
 static void sp_push(ScrSearchParams *sp, ScrStr *name, ScrStr *value) {
+  name = sp_usv(name);
+  value = sp_usv(value);
   if (sp->len == sp->cap) {
     sp->cap *= 2;
     ScrStr **gn = realloc(sp->names, sp->cap * sizeof(ScrStr *));
@@ -225,6 +260,17 @@ static ScrStr *sp_scrub_utf8(const char *in_c, size_t n) {
 /* One urlencoded piece → decoded string: '+' is space, %XX decodes
  * (malformed escapes pass through verbatim), then the UTF-8 scrub. */
 static ScrStr *sp_decode_piece(const char *s, size_t len) {
+  /* The overwhelmingly common piece decodes to itself: no '+', no '%', and
+   * ASCII (which the UTF-8 scrub would leave alone). */
+  bool plain = true;
+  for (size_t i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (c == '+' || c == '%' || c >= 0x80) {
+      plain = false;
+      break;
+    }
+  }
+  if (plain) return scr_str_intern_span(s, len);
   UrlBuf b;
   ub_init(&b);
   for (size_t i = 0; i < len; i++) {
@@ -239,7 +285,7 @@ static ScrStr *sp_decode_piece(const char *s, size_t len) {
     }
   }
   ScrStr *out = sp_scrub_utf8(b.data, b.len);
-  free(b.data);
+  ub_free(&b);
   return out;
 }
 
@@ -275,7 +321,8 @@ static void sp_parse_into(ScrSearchParams *sp, const char *s, size_t len) {
         }
       }
       ScrStr *name = sp_decode_piece(s + start, eq - start);
-      ScrStr *value = eq < i ? sp_decode_piece(s + eq + 1, i - eq - 1) : scr_str_new("", 0);
+      ScrStr *value =
+          eq < i ? sp_decode_piece(s + eq + 1, i - eq - 1) : scr_str_empty_value();
       sp_push(sp, name, value);
     }
     start = i + 1;
@@ -301,7 +348,7 @@ static void sp_sync_owner(ScrSearchParams *sp) {
   if (!sp->owner) return;
   scr_str_release(sp->owner->query);
   if (sp->len == 0) {
-    sp->owner->query = scr_str_new("", 0);
+    sp->owner->query = scr_str_empty_value();
     return;
   }
   UrlBuf b;
@@ -320,13 +367,15 @@ ScrSearchParams *scr_sp_new(void) { return sp_alloc(); }
 
 ScrSearchParams *scr_sp_parse(ScrStr *init) {
   ScrSearchParams *sp = sp_alloc();
-  const char *s = init->data;
+  char *owned;
+  const char *s = scr_str_utf8(init, &owned);
   size_t len = init->len;
   if (len > 0 && s[0] == '?') {
     s++;
     len--;
   }
   sp_parse_into(sp, s, len);
+  scr_str_utf8_end(owned);
   return sp;
 }
 
@@ -371,12 +420,22 @@ ScrSearchParams *scr_sp_with(ScrSearchParams *sp, ScrStr *name, ScrStr *value) {
   return scr_sp_retain(sp);
 }
 
+static void sp_reload(ScrSearchParams *sp, ScrStr *query) {
+  for (size_t i = 0; i < sp->len; i++) {
+    scr_str_release(sp->names[i]);
+    scr_str_release(sp->vals[i]);
+  }
+  sp->len = 0;
+  if (query->len > 1) sp_parse_into(sp, query->data + 1, query->len - 1);
+}
+
 ScrSearchParams *scr_url_search_params(ScrUrl *u) {
   if (u->sp_cache) return scr_sp_retain(u->sp_cache);
   ScrSearchParams *sp = sp_alloc();
   if (u->query->len > 1) sp_parse_into(sp, u->query->data + 1, u->query->len - 1);
   sp->owner = scr_url_retain(u);
   u->sp_cache = sp;
+  u->sp_reload = sp_reload;
   return sp;
 }
 
@@ -385,8 +444,17 @@ void scr_sp_append(ScrSearchParams *sp, ScrStr *name, ScrStr *value) {
   sp_sync_owner(sp);
 }
 
-static bool sp_str_eq(const ScrStr *a, const ScrStr *b) {
-  return a->len == b->len && memcmp(a->data, b->data, a->len) == 0;
+/* A stored USV string against an argument, which is compared as its USV
+ * conversion (same length: U+FFFD replaces each lone surrogate). */
+static bool sp_str_eq(const ScrStr *stored, const ScrStr *arg) {
+  if (stored->len != arg->len) return false;
+  if (memcmp(stored->data, arg->data, arg->len) == 0) return true;
+  if (!scr_str_has_surrogate(arg)) return false;
+  char *owned;
+  const char *usv = scr_str_utf8(arg, &owned);
+  bool equal = memcmp(stored->data, usv, arg->len) == 0;
+  scr_str_utf8_end(owned);
+  return equal;
 }
 
 void scr_sp_set(ScrSearchParams *sp, ScrStr *name, ScrStr *value) {
@@ -397,7 +465,7 @@ void scr_sp_set(ScrSearchParams *sp, ScrStr *name, ScrStr *value) {
       if (!replaced) {
         replaced = true;
         scr_str_release(sp->vals[i]);
-        sp->vals[i] = scr_str_retain(value);
+        sp->vals[i] = sp_usv(scr_str_retain(value));
         sp->names[w] = sp->names[i];
         sp->vals[w] = sp->vals[i];
         w++;
@@ -467,20 +535,42 @@ bool scr_sp_has_value(ScrSearchParams *sp, ScrStr *name, ScrStr *value) {
   return false;
 }
 
-/* Stable insertion sort by name (lists are small; equal names keep their
- * relative order — the spec's stability requirement). */
+/* Stable merge sort by name. The temporary arrays borrow the list's string
+ * references; each merge only moves pointers, so ownership is unchanged.
+ * Taking the left pair on equality preserves the URL Standard's stable order,
+ * while the ordered-boundary check keeps an already-sorted list linear. */
+static void sp_sort_range(ScrSearchParams *sp, ScrStr **tmp_names,
+                          ScrStr **tmp_vals, size_t lo, size_t hi) {
+  if (hi - lo < 2) return;
+  size_t mid = lo + (hi - lo) / 2;
+  sp_sort_range(sp, tmp_names, tmp_vals, lo, mid);
+  sp_sort_range(sp, tmp_names, tmp_vals, mid, hi);
+  if (scr_str_cmp_u16(sp->names[mid - 1], sp->names[mid]) <= 0) return;
+
+  size_t left = lo, right = mid;
+  for (size_t out = lo; out < hi; out++) {
+    bool take_left = right == hi ||
+                     (left < mid && scr_str_cmp_u16(sp->names[left], sp->names[right]) <= 0);
+    size_t from = take_left ? left++ : right++;
+    tmp_names[out] = sp->names[from];
+    tmp_vals[out] = sp->vals[from];
+  }
+  memcpy(sp->names + lo, tmp_names + lo, (hi - lo) * sizeof(ScrStr *));
+  memcpy(sp->vals + lo, tmp_vals + lo, (hi - lo) * sizeof(ScrStr *));
+}
+
 void scr_sp_sort(ScrSearchParams *sp) {
-  for (size_t i = 1; i < sp->len; i++) {
-    ScrStr *n = sp->names[i];
-    ScrStr *v = sp->vals[i];
-    size_t j = i;
-    while (j > 0 && scr_str_cmp_u16(sp->names[j - 1], n) > 0) {
-      sp->names[j] = sp->names[j - 1];
-      sp->vals[j] = sp->vals[j - 1];
-      j--;
+  if (sp->len > 1) {
+    ScrStr **tmp_names = malloc(sp->len * sizeof(ScrStr *));
+    ScrStr **tmp_vals = malloc(sp->len * sizeof(ScrStr *));
+    if (!tmp_names || !tmp_vals) {
+      free(tmp_names);
+      free(tmp_vals);
+      scr_trap("scriptc: out of memory\n");
     }
-    sp->names[j] = n;
-    sp->vals[j] = v;
+    sp_sort_range(sp, tmp_names, tmp_vals, 0, sp->len);
+    free(tmp_names);
+    free(tmp_vals);
   }
   sp_sync_owner(sp);
 }
@@ -493,12 +583,12 @@ double scr_sp_size(ScrSearchParams *sp) { return (double)sp->len; }
  * by the loop condition; out-of-range reads answer "" defensively. */
 ScrStr *scr_sp_key_at(ScrSearchParams *sp, double i) {
   size_t idx = (size_t)i;
-  if (idx >= sp->len) return scr_str_new("", 0);
+  if (idx >= sp->len) return scr_str_empty_value();
   return scr_str_retain(sp->names[idx]);
 }
 
 ScrStr *scr_sp_val_at(ScrSearchParams *sp, double i) {
   size_t idx = (size_t)i;
-  if (idx >= sp->len) return scr_str_new("", 0);
+  if (idx >= sp->len) return scr_str_empty_value();
   return scr_str_retain(sp->vals[idx]);
 }

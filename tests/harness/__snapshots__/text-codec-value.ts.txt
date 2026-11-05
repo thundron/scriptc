@@ -1,35 +1,29 @@
-text-codec-value.ts:2:13 - error SC2020: 'TextEncoder instance stored in encoder' is part of the standard library types but has no scriptc lowering yet
+text-codec-value.ts:16:5 - error SC2020: 'uninitialized lexical codec bindings' is part of the standard library types but has no scriptc lowering yet
 
-  1 | const encoder = new TextEncoder();
-  2 | console.log(encoder);
-    |             ^~~~~~~
-  3 | 
+  15 | var varEncoder = new TextEncoder();
+  16 | let uninitializedDecoder: TextDecoder;
+     |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  17 | function earlyVarCapture(): Uint8Array {
 
-  hint: encoder.encode(s) compiles through this const; the codec object itself has no representation (the composed new TextEncoder().encode(s) form also compiles)
+  hint: initialize let or const TextEncoder/TextDecoder bindings at their declaration
 
-text-codec-value.ts:5:10 - error SC2020: 'TextEncoder.encode' is part of the standard library types but has no scriptc lowering yet
+text-codec-value.ts:18:21 - error SC1030: the reference to 'localEncoder' above its 'var' declaration (a read there would be 'undefined', which the binding's type cannot hold — annotate it '| undefined' or move the declaration up) is not supported yet
 
-  4 | function encodeCaptured(s: string): Uint8Array {
-  5 |   return sharedEncoder.encode(s);
-    |          ^~~~~~~~~~~~~~~~~~~~
-  6 | }
+  17 | function earlyVarCapture(): Uint8Array {
+  18 |   const use = () => localEncoder.encode("x");
+     |                     ^~~~~~~~~~~~
+  19 |   const bytes = use();
 
-  hint: the inline new TextEncoder().encode(s) form and same-scope const store-then-call (const encoder = new TextEncoder(); encoder.encode(s)) compile; captured/imported instances and other members need a runtime object representation
+text-codec-value.ts:32:15 - error SC1090: the reference to 'caseEncoder' (a binding form with no lowering) is not supported yet
 
-text-codec-value.ts:17:15 - error SC2020: 'TextEncoder.encode' is part of the standard library types but has no scriptc lowering yet
+  31 |     const Encoded = class {
+  32 |       bytes = caseEncoder.encode("should fence");
+     |               ^~~~~~~~~~~
+  33 |     };
 
-  16 |     const Encoded = class {
-  17 |       bytes = caseEncoder.encode("should fence");
-     |               ^~~~~~~~~~~~~~~~~~
-  18 |     };
+text-codec-value.ts:38:17 - error SC1090: codec bindings read from another switch clause before initialization is proven is not supported yet
 
-  hint: the inline new TextEncoder().encode(s) form and same-scope const store-then-call (const encoder = new TextEncoder(); encoder.encode(s)) compile; captured/imported instances and other members need a runtime object representation
-
-text-codec-value.ts:23:17 - error SC2020: 'TextEncoder.encode' is part of the standard library types but has no scriptc lowering yet
-
-  22 |     // @ts-expect-error -- dispatch can enter here while caseEncoder is in its TDZ
-  23 |     console.log(caseEncoder.encode("should fence directly").length);
-     |                 ^~~~~~~~~~~~~~~~~~
-  24 |     break;
-
-  hint: the inline new TextEncoder().encode(s) form and same-scope const store-then-call (const encoder = new TextEncoder(); encoder.encode(s)) compile; captured/imported instances and other members need a runtime object representation
+  37 |     // @ts-expect-error -- dispatch can enter here while caseEncoder is in its TDZ
+  38 |     console.log(caseEncoder.encode("should fence directly").length);
+     |                 ^~~~~~~~~~~
+  39 |     break;

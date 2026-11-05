@@ -1,0 +1,10 @@
+const Constructor = Float32Array;
+const values = new Constructor([1, 2, 3]);
+console.log(values.length, values[1], typeof Constructor, values.constructor === Constructor);
+const alias = values.subarray(1);
+const unknown: unknown = alias;
+console.log(unknown === alias);
+const buffer = new ArrayBuffer(16);
+const view = new Constructor(buffer, 4, 2);
+view[0] = 7;
+console.log(new Float32Array(buffer)[1], view.byteOffset, view.buffer === buffer);

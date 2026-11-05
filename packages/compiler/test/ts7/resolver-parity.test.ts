@@ -17,14 +17,22 @@ import {
   projectDtsRuntimeSibling,
   resolveBareModule,
   resolveProjectImport,
+  resolveProjectModule,
   resolveRelativeModule,
   resolveTypeDirective,
+  setProjectPathMappings,
 } from "../../src/frontend/resolve.js";
+import { packageShimFor } from "../../src/frontend/package-shims.js";
 import { isRelativeSpecifier } from "../../src/frontend/workspace-registry.js";
 import { options5 } from "./harness.js";
 
 const repoRoot = join(import.meta.dirname, "../../../..");
 const OPTS = options5();
+
+function belongsToProjectSweep(file: string): boolean {
+  const portable = file.replaceAll("\\", "/");
+  return !portable.includes("/node_modules/") && !portable.includes("/store/");
+}
 
 /** Every source file under tests/ that scriptc's preflight could scan —
  * node_modules excluded (preflight never collects edges inside packages;
@@ -40,15 +48,23 @@ function sweepFiles(): string[] {
   const files: string[] = [];
   for (const root of roots) {
     for (const ext of ["ts", "tsx", "js", "mjs", "cjs", "jsx"]) {
-      files.push(
-        ...globSync(join(repoRoot, root, `**/*.${ext}`)).filter(
-          (f) => !f.includes("/node_modules/") && !f.includes("/store/"),
-        ),
-      );
+      files.push(...globSync(join(repoRoot, root, `**/*.${ext}`)).filter(belongsToProjectSweep));
     }
   }
   return files.sort();
 }
+
+test("the project sweep excludes package runtime trees on every path separator", () => {
+  expect(belongsToProjectSweep("/repo/tests/fixtures/npm/node_modules/pkg/index.js")).toBe(false);
+  expect(belongsToProjectSweep("D:\\repo\\tests\\fixtures\\npm\\node_modules\\pkg\\index.js")).toBe(
+    false,
+  );
+  expect(belongsToProjectSweep("/repo/tests/fixtures/provenance/store/pkg/index.js")).toBe(false);
+  expect(belongsToProjectSweep("D:\\repo\\tests\\fixtures\\provenance\\store\\pkg\\index.js")).toBe(
+    false,
+  );
+  expect(belongsToProjectSweep("D:\\repo\\tests\\fixtures\\npm\\cases\\main.ts")).toBe(true);
+});
 
 /** All module specifiers of one file: import/export declarations, dynamic
  * import("lit"), require("lit") — the same shapes preflight edges. The walk
@@ -73,7 +89,9 @@ function specifiersOf(file: string): string[] {
       const arg = n.arguments[0];
       const isImport = n.expression.kind === ts5.SyntaxKind.ImportKeyword;
       const isRequire =
-        ts5.isIdentifier(n.expression) && n.expression.text === "require" && n.arguments.length === 1;
+        ts5.isIdentifier(n.expression) &&
+        n.expression.text === "require" &&
+        n.arguments.length === 1;
       if ((isImport || isRequire) && arg !== undefined && ts5.isStringLiteralLike(arg)) {
         out.add(arg.text);
       }
@@ -107,7 +125,8 @@ test("relative and bare specifiers across the whole test tree resolve identicall
         // JS; resolve.ts's projectDtsRuntimeSibling) where 5.9.3 answers
         // the .d.ts — parity holds over the sibling-mapped answer.
         const theirsRaw = reference?.resolvedFileName ?? null;
-        const theirs = theirsRaw !== null ? (projectDtsRuntimeSibling(theirsRaw) ?? theirsRaw) : null;
+        const theirs =
+          theirsRaw !== null ? (projectDtsRuntimeSibling(theirsRaw) ?? theirsRaw) : null;
         if (ours !== theirs) {
           failures.push(`${file} '${spec}': ours=${ours} ts5=${theirs}`);
         }
@@ -120,14 +139,21 @@ test("relative and bare specifiers across the whole test tree resolve identicall
       // the resolver follows Node — corpus 2124 pins the behavior
       // differentially, so parity has nothing to check here.
       if (spec.startsWith("#/")) continue;
+      // A package scriptc implements itself (package-shims.ts) resolves
+      // to its built-in module by design; 5.9.3 answers the installed
+      // package.
+      if (packageShimFor(file, spec) !== null) continue;
       bare++;
       // PROJECT imports (#alias / self-name): ts5's NON-external answers
       // for bare specifiers are exactly the package.json-mediated
       // resolutions inside the project — resolveProjectImport must agree.
+      // A package scriptc implements itself (package-shims.ts) answers its
+      // shim module where 5.9.3 answers the installed package, so only the
+      // external-library answer below is compared for it.
       const oursProj = resolveProjectImport(file, spec);
       const theirsProj =
         reference && !reference.isExternalLibraryImport ? reference.resolvedFileName : null;
-      if (oursProj !== theirsProj) {
+      if (oursProj !== theirsProj && packageShimFor(file, spec) === null) {
         failures.push(`${file} '${spec}' (project): ours=${oursProj} ts5=${theirsProj}`);
       }
       const ours = resolveBareModule(file, spec);
@@ -174,7 +200,7 @@ test("synthetic edge shapes: extension substitution, directories, exports maps, 
   write("src/mj.mjs");
   write("src/c.cts");
   write("src/cj.cjs");
-  write("src/data.json", "{\"k\":1}\n");
+  write("src/data.json", '{"k":1}\n');
   write("src/typedjson.d.json.ts");
   write("src/typedjson.json", "{}\n");
   write("src/dir/index.ts");
@@ -188,39 +214,63 @@ test("synthetic edge shapes: extension substitution, directories, exports maps, 
   // node_modules shapes: main-substitution, exports conditions, subpaths,
   // patterns, @types fallback (plain and scoped), versionless packages.
   const nm = "src/node_modules";
-  write(`${nm}/plain/package.json`, JSON.stringify({ name: "plain", version: "1.2.3", main: "index.js" }));
+  write(
+    `${nm}/plain/package.json`,
+    JSON.stringify({ name: "plain", version: "1.2.3", main: "index.js" }),
+  );
   write(`${nm}/plain/index.d.ts`);
   write(`${nm}/plain/index.js`);
   write(`${nm}/plain/sub.d.ts`);
-  write(`${nm}/exportsy/package.json`, JSON.stringify({
-    name: "exportsy",
-    version: "2.0.0",
-    exports: {
-      ".": { types: "./dist/root.d.ts", import: "./dist/root.mjs", require: "./dist/root.cjs" },
-      "./deep/*": { types: "./dist/deep/*.d.ts" },
-      "./onlyjs": "./dist/onlyjs.js",
-    },
-  }));
+  write(
+    `${nm}/exportsy/package.json`,
+    JSON.stringify({
+      name: "exportsy",
+      version: "2.0.0",
+      exports: {
+        ".": { types: "./dist/root.d.ts", import: "./dist/root.mjs", require: "./dist/root.cjs" },
+        "./deep/*": { types: "./dist/deep/*.d.ts" },
+        "./onlyjs": "./dist/onlyjs.js",
+      },
+    }),
+  );
   write(`${nm}/exportsy/dist/root.d.ts`);
   write(`${nm}/exportsy/dist/deep/thing.d.ts`);
   write(`${nm}/exportsy/dist/onlyjs.js`);
   write(`${nm}/exportsy/dist/onlyjs.d.ts`);
-  write(`${nm}/untyped/package.json`, JSON.stringify({ name: "untyped", version: "0.1.0", main: "index.js" }));
+  write(
+    `${nm}/untyped/package.json`,
+    JSON.stringify({ name: "untyped", version: "0.1.0", main: "index.js" }),
+  );
   write(`${nm}/untyped/index.js`);
-  write(`${nm}/@types/untyped/package.json`, JSON.stringify({ name: "@types/untyped", version: "0.1.9", types: "index.d.ts" }));
+  write(
+    `${nm}/@types/untyped/package.json`,
+    JSON.stringify({ name: "@types/untyped", version: "0.1.9", types: "index.d.ts" }),
+  );
   write(`${nm}/@types/untyped/index.d.ts`);
-  write(`${nm}/@scoped/thing/package.json`, JSON.stringify({ name: "@scoped/thing", version: "3.0.0", main: "./x.js" }));
+  write(
+    `${nm}/@scoped/thing/package.json`,
+    JSON.stringify({ name: "@scoped/thing", version: "3.0.0", main: "./x.js" }),
+  );
   write(`${nm}/@scoped/thing/x.js`);
-  write(`${nm}/@types/scoped__thing/package.json`, JSON.stringify({ name: "@types/scoped__thing", version: "3.0.1", types: "main.d.ts" }));
+  write(
+    `${nm}/@types/scoped__thing/package.json`,
+    JSON.stringify({ name: "@types/scoped__thing", version: "3.0.1", types: "main.d.ts" }),
+  );
   write(`${nm}/@types/scoped__thing/main.d.ts`);
   write(`${nm}/noversion/package.json`, JSON.stringify({ name: "noversion", types: "index.d.ts" }));
   write(`${nm}/noversion/index.d.ts`);
   // Nested package.json subpaths (the @restart/hooks/useMergedRefs shape):
   // a subdirectory redirecting through its OWN package.json's types/main.
-  write(`${nm}/nested/package.json`, JSON.stringify({ name: "nested", version: "1.0.0", main: "index.js" }));
+  write(
+    `${nm}/nested/package.json`,
+    JSON.stringify({ name: "nested", version: "1.0.0", main: "index.js" }),
+  );
   write(`${nm}/nested/index.d.ts`);
   write(`${nm}/nested/index.js`);
-  write(`${nm}/nested/sub/package.json`, JSON.stringify({ main: "../lib/s.js", module: "../esm/s.js", types: "../esm/s.d.ts" }));
+  write(
+    `${nm}/nested/sub/package.json`,
+    JSON.stringify({ main: "../lib/s.js", module: "../esm/s.js", types: "../esm/s.d.ts" }),
+  );
   write(`${nm}/nested/lib/s.js`);
   write(`${nm}/nested/esm/s.d.ts`);
   write(`${nm}/nested/esm/s.js`);
@@ -229,14 +279,50 @@ test("synthetic edge shapes: extension substitution, directories, exports maps, 
 
   const from = join(dir, "src/from.ts");
   const specs = [
-    "./a", "./a.js", "./a.ts", "./b", "./b.js", "./both", "./both.js", "./both.ts",
-    "./decl", "./decl.js", "./m", "./m.mjs", "./mj.mjs", "./mj", "./c.cjs", "./cj.cjs", "./cj",
-    "./data.json", "./typedjson.json", "./dir", "./jsdir", "./pkgdir", "./typesdir",
-    "./missing", "./missing.js", "./missing.json", "./a.jsx", "./a.tsx",
-    "plain", "plain/sub", "plain/sub.js", "plain/missing",
-    "exportsy", "exportsy/deep/thing", "exportsy/onlyjs", "exportsy/nope",
-    "untyped", "@scoped/thing", "@scoped/thing/x", "noversion", "ghost-package",
-    "nested/sub", "nested/jsub", "nested/none",
+    "./a",
+    "./a.js",
+    "./a.ts",
+    "./b",
+    "./b.js",
+    "./both",
+    "./both.js",
+    "./both.ts",
+    "./decl",
+    "./decl.js",
+    "./m",
+    "./m.mjs",
+    "./mj.mjs",
+    "./mj",
+    "./c.cjs",
+    "./cj.cjs",
+    "./cj",
+    "./data.json",
+    "./typedjson.json",
+    "./dir",
+    "./jsdir",
+    "./pkgdir",
+    "./typesdir",
+    "./missing",
+    "./missing.js",
+    "./missing.json",
+    "./a.jsx",
+    "./a.tsx",
+    "plain",
+    "plain/sub",
+    "plain/sub.js",
+    "plain/missing",
+    "exportsy",
+    "exportsy/deep/thing",
+    "exportsy/onlyjs",
+    "exportsy/nope",
+    "untyped",
+    "@scoped/thing",
+    "@scoped/thing/x",
+    "noversion",
+    "ghost-package",
+    "nested/sub",
+    "nested/jsub",
+    "nested/none",
   ];
   const failures: string[] = [];
   clearResolveCaches();
@@ -251,13 +337,19 @@ test("synthetic edge shapes: extension substitution, directories, exports maps, 
     const ours = resolveBareModule(from, spec);
     const theirs = reference && reference.isExternalLibraryImport ? reference : null;
     if ((ours?.typesFile ?? null) !== (theirs?.resolvedFileName ?? null)) {
-      failures.push(`'${spec}': ours=${ours?.typesFile ?? null} ts5=${theirs?.resolvedFileName ?? null}`);
+      failures.push(
+        `'${spec}': ours=${ours?.typesFile ?? null} ts5=${theirs?.resolvedFileName ?? null}`,
+      );
       continue;
     }
     if (ours && theirs) {
-      const wantName = theirs.packageId?.name ?? (spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]!);
-      if (ours.packageName !== wantName) failures.push(`'${spec}': packageName ours=${ours.packageName} ts5=${wantName}`);
-      if (ours.version !== theirs.packageId?.version) failures.push(`'${spec}': version ours=${ours.version} ts5=${theirs.packageId?.version}`);
+      const wantName =
+        theirs.packageId?.name ??
+        (spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]!);
+      if (ours.packageName !== wantName)
+        failures.push(`'${spec}': packageName ours=${ours.packageName} ts5=${wantName}`);
+      if (ours.version !== theirs.packageId?.version)
+        failures.push(`'${spec}': version ours=${ours.version} ts5=${theirs.packageId?.version}`);
     }
   }
   rmSync(dir, { recursive: true, force: true });
@@ -307,11 +399,25 @@ test("synthetic project imports: the imports field and self-name exports", () =>
     // imports field: exact keys with extension substitution, direct .ts
     // targets, wildcards, condition objects, dead targets, and the Node
     // validity rule ("#" and "#/" never resolve).
-    "#cjs", "#mjs", "#type", "#direct", "#wild/foo.js", "#wild/foo.ts", "#cond", "#dead",
-    "#missing", "#", "#/foo.js",
+    "#cjs",
+    "#mjs",
+    "#type",
+    "#direct",
+    "#wild/foo.js",
+    "#wild/foo.ts",
+    "#cond",
+    "#dead",
+    "#missing",
+    "#",
+    "#/foo.js",
     // self-name through exports: root, subpaths, wildcards, misses, and a
     // name that is NOT the package's ("other" walks node_modules instead).
-    "pkg", "pkg/cjs", "pkg/sub/foo.js", "pkg/srcmap/foo.ts", "pkg/nope", "other",
+    "pkg",
+    "pkg/cjs",
+    "pkg/sub/foo.js",
+    "pkg/srcmap/foo.ts",
+    "pkg/nope",
+    "other",
   ];
   const failures: string[] = [];
   clearResolveCaches();
@@ -327,6 +433,46 @@ test("synthetic project imports: the imports field and self-name exports", () =>
   rmSync(dir, { recursive: true, force: true });
   clearResolveCaches();
   expect(failures, failures.join("\n")).toEqual([]);
+});
+
+test("synthetic project paths use TypeScript's exact and best-pattern resolution", () => {
+  const dir = mkdtempSync(join(tmpdir(), "scriptc-resolve-paths-"));
+  const write = (rel: string, text = "export const x = 1;\n"): void => {
+    mkdirSync(dirname(join(dir, rel)), { recursive: true });
+    writeFileSync(join(dir, rel), text);
+  };
+  write("main.ts");
+  write("src/exact.ts");
+  write("src/general/value.ts");
+  write("src/special/value.ts");
+  const configured = {
+    exact: ["src/exact.ts"],
+    "@app/*": ["missing/*", "src/general/*"],
+    "@app/special/*": ["src/special/*"],
+  };
+  setProjectPathMappings(
+    Object.fromEntries(
+      Object.entries(configured).map(([key, targets]) => [
+        key,
+        targets.map((target) => join(dir, target)),
+      ]),
+    ),
+  );
+  const from = join(dir, "main.ts");
+  expect(resolveProjectModule(from, join(dir, "src/exact.ts"))).toBe(
+    join(dir, "src/exact.ts").replaceAll("\\", "/"),
+  );
+  for (const spec of ["exact", "@app/value", "@app/special/value", "@app/missing"]) {
+    const reference = ts5.resolveModuleName(
+      spec,
+      from,
+      { ...OPTS, baseUrl: dir, paths: configured },
+      ts5.sys,
+    ).resolvedModule;
+    expect(resolveProjectImport(from, spec), spec).toBe(reference?.resolvedFileName ?? null);
+  }
+  clearResolveCaches();
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test("the 'node' type directive resolves identically from every fixture anchor", () => {

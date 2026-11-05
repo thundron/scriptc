@@ -1,23 +1,95 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, link, mkdir, mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { availableParallelism, tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { cacheDigestPath, publishCachedFile, validCachedFile } from "./build-cache.js";
-import type { CcDriver } from "./native-toolchain.js";
+import {
+  stageCachedFile,
+  cacheDigestPath,
+  publishCachedFile,
+  validCachedFile,
+} from "./build-cache.js";
+import type { CcDriver } from "./native/driver.js";
+import { NativeCodegenError } from "./native-codegen-core.js";
 
 const execFileAsync = promisify(execFile);
 
-/** The pinned QuickJS, mbedTLS, and zlib inputs used by native recipes. */
-export const QJS_COMMIT = "3c8f3d68953955950074c41c6e4d999562ae82a7";
-export const MBEDTLS_VERSION = "3.6.7";
-export const ZLIB_VERSION = "1.3.1";
-/** Exact translation-unit membership shared by cache builds and external
- * source-pack recipes. */
-export const QJS_ENGINE_SOURCES = ["dtoa.c", "libregexp.c", "libunicode.c", "quickjs.c"] as const;
-export const LRE_SOURCES = ["libregexp.c", "libunicode.c"] as const;
-export const ZLIB_SOURCES = ["adler32.c", "compress.c", "crc32.c", "deflate.c", "infback.c", "inffast.c", "inflate.c", "inftrees.c", "trees.c", "uncompr.c", "zutil.c"] as const;
+/** One C++ translation unit of the ICU archive: the source, the archive member
+ * name it compiles to, and the flags of its group. */
+interface IcuUnit {
+  path: string;
+  member: string;
+  flags: string[];
+  define?: string;
+}
+
+/** Zig's library directory, which carries the libc++/libc++abi sources the
+ * ICU archive merges: `ZIG_LIB_DIR` when the caller pins one, else the pinned
+ * toolchain's own answer. */
+async function zigLibDir(): Promise<string> {
+  const pinned = process.env["ZIG_LIB_DIR"];
+  if (pinned !== undefined && pinned !== "") return pinned;
+  const { stdout } = await execFileAsync("zig", ["env"]);
+  const match = /\.lib_dir\s*=\s*"([^"]+)"/.exec(stdout);
+  if (match === null)
+    throw new Error("Intl needs Zig 0.16.0's C++ toolchain: `zig env` named no lib_dir");
+  return match[1]!;
+}
+
+/** The section flags the libregexp/libunicode objects build with (the
+ * runtime pack's executable_section_elimination flags). */
+const LRE_SECTION_FLAGS = ["-ffunction-sections", "-fdata-sections"];
+
+/** A vendored source's object file name: sources in subdirectories
+ * (zlib's contrib/optimizations/inflate.c) flatten to one directory. */
+function vendorObjectName(source: string): string {
+  return source.replaceAll("/", "-").replace(/\.c$/, ".o");
+}
+
+/** The sha256 of a buffer, as lowercase hex. */
+function sha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** Whether `path` is a non-empty file. */
+async function presentFile(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).size > 0;
+  } catch {
+    return false;
+  }
+}
+
+import {
+  QJS_COMMIT,
+  MBEDTLS_VERSION,
+  ZLIB_VERSION,
+  BROTLI_VERSION,
+  ZSTD_VERSION,
+  ICU_VERSION,
+  ICU_SOURCE_URL,
+  ICU_SOURCE_SHA256,
+  ICU_SOURCE_SIZE,
+  ICU_CXX_TARGET,
+  LRE_SOURCES,
+  ZLIB_SOURCES,
+  ZSTD_SOURCES,
+  icuSourceList,
+  zlibInputs,
+  zstdInputs,
+} from "./vendor-inputs.js";
+export {
+  QJS_COMMIT,
+  MBEDTLS_VERSION,
+  ZLIB_VERSION,
+  BROTLI_VERSION,
+  ZSTD_VERSION,
+  ICU_VERSION,
+  LRE_SOURCES,
+  ZLIB_SOURCES,
+  ZSTD_SOURCES,
+} from "./vendor-inputs.js";
 
 export interface VendorArchiveContext {
   runtimeSrcDir(): string;
@@ -28,19 +100,13 @@ export interface VendorArchiveContext {
 }
 
 export function createVendorArchives(context: VendorArchiveContext) {
-  const {
-    runtimeSrcDir,
-    targetPlatform,
-    isZigDriver,
-    resolvedToolIdentity,
-    runtimeFingerprint,
-  } = context;
+  const { runtimeSrcDir, isZigDriver, resolvedToolIdentity, runtimeFingerprint } = context;
   const validVendorArtifact = validCachedFile;
 
   function vendorEngineDir(): string {
     return join(runtimeSrcDir(), "..", "vendor", "quickjs-ng");
   }
-  
+
   /** Vendor prerequisites follow the per-user build root when persistent cache
    * validation succeeds. Keeping generated objects out of node_modules makes
    * npm installations, read-only package stores, and explicit cache warming all
@@ -54,7 +120,7 @@ export function createVendorArchives(context: VendorArchiveContext) {
       ? join(runtimeSrcDir(), "..", "vendor", ".cache")
       : join(buildRoot, "vendor");
   }
-  
+
   /** Cross targets already carry their architecture in the explicit triple.
    * Host-native prerequisites need the same separation: a checkout/package can
    * be used by both arm64 Node and Rosetta/x64 Node on macOS. */
@@ -65,7 +131,7 @@ export function createVendorArchives(context: VendorArchiveContext) {
   ): string {
     return driver.target === null ? `native-${hostPlatform}-${hostArch}` : driver.target;
   }
-  
+
   /** Vendor prerequisites live outside the content-addressed build root, so
    * their directory name must carry the environment, resolved compiler, owned
    * source bytes, and build-recipe identity of the artifacts that consume them.
@@ -86,9 +152,9 @@ export function createVendorArchives(context: VendorArchiveContext) {
       .digest("hex")
       .slice(0, 20);
   }
-  
+
   const vendorCompilerIdentityFallbacks = new Map<string, string>();
-  
+
   async function currentVendorCacheBuildIdentity(
     driver: Pick<CcDriver, "argv" | "target">,
     environmentFingerprint: string,
@@ -116,18 +182,7 @@ export function createVendorArchives(context: VendorArchiveContext) {
       await runtimeFingerprint(runtimeSrcDir()),
     );
   }
-  
-  function engineArchivePath(
-    sanitize: boolean,
-    driver: CcDriver,
-    buildIdentity: string,
-    cacheRoot: string = vendorBuildCacheRoot(),
-  ): string {
-    const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
-    return join(cacheRoot, `${QJS_COMMIT.slice(0, 12)}-${flavor}`, "libqjs.a");
-  }
-  
-  
+
   /** Publish one finished vendor prerequisite from disposable build scratch.
    * The shared data and digest use the ordinary atomic cache publisher.
    * Concurrent builders produce equivalent bytes; on platforms where rename
@@ -156,7 +211,7 @@ export function createVendorArchives(context: VendorArchiveContext) {
     }
     throw new Error(`vendor cache publication failed integrity validation: ${destination}`);
   }
-  
+
   /** Pin cache-backed vendor inputs under an invocation-private directory before
    * linking/archiving. The shared LRU may unlink their cache names at any time;
    * hard links (or copies where links are unavailable) keep active inputs alive.
@@ -172,117 +227,20 @@ export function createVendorArchives(context: VendorArchiveContext) {
       const sources = await materialize();
       try {
         const now = new Date();
-        return await Promise.all(sources.map(async (source) => {
-          const destination = join(stageDir, basename(source));
-          try {
-            await link(source, destination);
-          } catch {
-            await copyFile(source, destination);
-          }
-          // Vendor prerequisites share the cache root's mtime-based LRU. A
-          // successful stage is a cache read, so promote the shared source name
-          // best-effort (it may have raced an eviction after the hard link).
-          await utimes(source, now, now).catch(() => undefined);
-          return destination;
-        }));
+        return await Promise.all(
+          sources.map(async (source) => {
+            const destination = join(stageDir, basename(source));
+            await stageCachedFile(source, destination, now);
+            return destination;
+          }),
+        );
       } catch (error) {
         lastError = error;
       }
     }
     throw lastError;
   }
-  
-  /** The engine archive for one flavor, built lazily on the first --dynamic
-   * compile and cached under <build-cache>/vendor/<commit>-<flavor>-<target>-<toolchain>/ — unlike
-   * the runtime's own sources (recompiled every build, ~100ms), the engine is
-   * far too big to rebuild per compile. The plain flavor is ALWAYS MinSizeRel
-   * regardless of the program's optimization level: measured binary delta is
-   * ~620KB vs ~900KB at -O2, and eval-in-an-island workloads don't earn the
-   * difference. The asan flavor (Debug + QJS_ENABLE_ASAN) exists so the
-   * sanitized test lane checks engine interop under instrumentation.
-   *
-   * Concurrency: parallel first builds (e.g. test workers) each build in a
-   * private temp dir and publish with an atomic rename — first one wins,
-   * losers discard their work and use the winner's archive.
-   *
-   * The qjs library target is just four TUs (QJS_ENGINE_SOURCES), so host-clang,
-   * targetless Zig, and cross builds use the same direct per-TU recipe. This removes CMake from
-   * the runtime dependency set and lets cache warming compile exactly the
-   * archive a later program consumes. The default host-clang driver uses bare
-   * clang + ar; every Zig driver uses the selected zig cc + zig ar. */
-  async function ensureEngineArchive(
-    sanitize: boolean,
-    driver: CcDriver,
-    buildIdentity: string,
-    cacheRoot: string = vendorBuildCacheRoot(),
-  ): Promise<string> {
-    const archive = engineArchivePath(sanitize, driver, buildIdentity, cacheRoot);
-    const cacheDir = dirname(archive);
-    if (await validVendorArtifact(archive)) return archive;
-    return buildEngineArchiveDirect(sanitize, driver, cacheRoot, cacheDir);
-  }
-  
-  /** The qjs library target's source list (CMakeLists.txt `qjs_sources` with
-   * QJS_BUILD_LIBC off — cutils is header-only): the cross-build recipe
-   * compiles exactly these. */
-  
-  /** The engine archive for one target, per-TU compiler invocations plus ar.
-   * The flags mirror what the former CMake
-   * configurations apply to the qjs library target: gnu11 (CMAKE_C_EXTENSIONS
-   * ON), hidden visibility, -funsigned-char, -DQUICKJS_NG_BUILD and
-   * -D_GNU_SOURCE (qjs_defines; linux targetArgs already carry the latter),
-   * then MinSizeRel (-Os -DNDEBUG) for plain or Debug+QJS_ENABLE_ASAN
-   * (-O0 -ggdb -fno-omit-frame-pointer -fsanitize=address
-   * -fno-sanitize-recover=all) for asan. Same atomic-rename publish as every
-   * vendor cache. */
-  async function buildEngineArchiveDirect(sanitize: boolean, driver: CcDriver, cacheRoot: string, cacheDir: string): Promise<string> {
-    const vendor = vendorEngineDir();
-    const archive = join(cacheDir, "libqjs.a");
-    const compileArgv = isZigDriver(driver) ? driver.argv : ["clang"];
-    const arArgv = isZigDriver(driver) ? [...driver.argv.slice(0, 1), "ar"] : ["ar"];
-    const cflags = [
-      "-std=gnu11",
-      ...driver.targetArgs,
-      "-fvisibility=hidden",
-      "-funsigned-char",
-      "-DQUICKJS_NG_BUILD",
-      "-D_GNU_SOURCE",
-      // CMake's qjs_defines on WIN32 (quickjs.c's own _WIN32 arms cover the
-      // rest — timezoneapi, intrin, cutils.h's _msize usable-size probe).
-      ...(targetPlatform(driver) === "win32" ? ["-DWIN32_LEAN_AND_MEAN", "-D_WIN32_WINNT=0x0601"] : []),
-      ...(sanitize
-        ? ["-O0", "-ggdb", "-fno-omit-frame-pointer", "-fsanitize=address", "-fno-sanitize-recover=all", "-DQJS_ENABLE_ASAN"]
-        : ["-Os", "-DNDEBUG"]),
-      "-I", vendor,
-    ];
-    await mkdir(cacheRoot, { recursive: true });
-    const buildDir = await mkdtemp(join(tmpdir(), `scriptc-vendor-qjs-${driver.target ?? "host"}-`));
-    try {
-      const width = Math.min(QJS_ENGINE_SOURCES.length, availableParallelism());
-      for (let i = 0; i < QJS_ENGINE_SOURCES.length; i += width) {
-        await Promise.all(
-          QJS_ENGINE_SOURCES.slice(i, i + width).map((src) =>
-            execFileAsync(
-              compileArgv[0] ?? "clang",
-              [...compileArgv.slice(1), ...cflags, "-c", join(vendor, src), "-o", join(buildDir, `${basename(src, ".c")}.o`)],
-              { cwd: buildDir },
-            ),
-          ),
-        );
-      }
-      await execFileAsync(arArgv[0] ?? "ar", [...arArgv.slice(1), "rcs", join(buildDir, "libqjs.a"), ...QJS_ENGINE_SOURCES.map((s) => join(buildDir, `${basename(s, ".c")}.o`))]);
-      await publishVendorArtifact(join(buildDir, "libqjs.a"), archive);
-    } finally {
-      await rm(buildDir, { recursive: true, force: true });
-    }
-    return archive;
-  }
-  
-  /** The vendor sources behind static-build regex support: quickjs-ng's
-   * libregexp and its unicode tables (cutils is header-only). Deliberately
-   * NOT the engine — a regex-using static binary links ~110KB of matcher,
-   * never the ~620KB island. */
-  
+
   function lreObjectPaths(
     sanitize: boolean,
     driver: CcDriver,
@@ -293,16 +251,15 @@ export function createVendorArchives(context: VendorArchiveContext) {
       (sanitize ? "asan" : "plain") +
       (driver.argv.length === 1 && driver.argv[0] === "clang" ? "" : "-zigcc") +
       `-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
-    const cacheDir = join(cacheRoot, `${QJS_COMMIT.slice(0, 12)}-lre-${flavor}`);
+    const cacheDir = join(cacheRoot, `${QJS_COMMIT.slice(0, 12)}-lre-sections-${flavor}`);
     return LRE_SOURCES.map((f) => join(cacheDir, f.replace(/\.c$/, ".o")));
   }
-  
+
   /** The libregexp objects for one flavor, compiled lazily on the first
-   * regex-using static build (~1s) and cached like the engine archive —
-   * <build-cache>/vendor/<commit>-lre-<flavor>-<target>-<toolchain>/*.o — with the same atomic-rename
+   * regex-using build (~1s) and cached under
+   * <build-cache>/vendor/<commit>-lre-sections-<flavor>-<target>-<toolchain>/*.o — with the same atomic-rename
    * publish (parallel first builds race safely; losers discard their work).
-   * Plain is -Os (size class matters: the regex fence pins regex-using
-   * binaries well under the engine class); asan matches the final link so
+   * Plain is -Os to keep regex-using binaries small; asan matches the final link so
    * the sanitized lane instruments the matcher too. Cross targets get their
    * own flavor directory, compiled with the SCRIPTC_CC driver and its target
    * args — libregexp/libunicode are plain C11, so the cross story is exactly
@@ -331,19 +288,30 @@ export function createVendorArchives(context: VendorArchiveContext) {
       vendor: vendorEngineDir(),
       sources: LRE_SOURCES,
       objects: lreObjectPaths(sanitize, driver, buildIdentity, cacheRoot),
+      // Section elimination keeps only the libunicode tables a program
+      // reaches: the URL host parser's NFC links the normalization tables
+      // without the regex property ones.
+      flags: LRE_SECTION_FLAGS,
     });
   }
-  
+
   function vendorZlibDir(): string {
     return join(runtimeSrcDir(), "..", "vendor", "zlib");
   }
-  
-  /** The vendored zlib TUs behind Zig zlib support: every root *.c
-   * except the gzFile file-I/O units (gz*.c — nothing in scr_zlib.c
-   * references the gzFile API, and those TUs alone want unistd/io headers).
-   * The default host-clang build links the system libz; Zig builds use this
-   * list so targetless and explicit-target Zig inputs stay on one toolchain. */
-  
+
+  /** The vendored zlib TUs every C-lane build links (zlibInputs picks them
+   * per target; the gzFile file-I/O units are never compiled, nothing in
+   * scr_zlib.c references the gzFile API). */
+
+  /** The triple zlibInputs and zstdInputs read for a driver: its explicit
+   * target, else the host. */
+  function vendorTriple(driver: Pick<CcDriver, "target">): string {
+    if (driver.target !== null) return driver.target;
+    const cpu =
+      process.arch === "x64" ? "x86_64" : process.arch === "arm64" ? "aarch64" : process.arch;
+    return `${cpu}-${process.platform === "win32" ? "windows" : process.platform}`;
+  }
+
   function zlibObjectPaths(
     sanitize: boolean,
     driver: CcDriver,
@@ -355,15 +323,15 @@ export function createVendorArchives(context: VendorArchiveContext) {
       (driver.argv.length === 1 && driver.argv[0] === "clang" ? "" : "-zigcc") +
       `-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
     const cacheDir = join(cacheRoot, `zlib-${ZLIB_VERSION}-${flavor}`);
-    return ZLIB_SOURCES.map((f) => join(cacheDir, f.replace(/\.c$/, ".o")));
+    return zlibInputs(vendorTriple(driver)).sources.map((f) => join(cacheDir, vendorObjectName(f)));
   }
-  
+
   /** The zlib objects for one flavor, compiled lazily on the first zlib-using
-   * Zig build (~1s) and cached like the lre objects —
+   * C-lane build (~1s) and cached like the lre objects —
    * <build-cache>/vendor/zlib-<version>-<flavor>-<target>-<toolchain>/*.o — with the same atomic-rename
    * publish (parallel first builds race safely; losers discard their work).
-   * Plain is -Os, asan matches the final link so the sanitized lane
-   * instruments the codec too. The flavor keys the driver and target exactly
+   * Plain is -O3, as Node builds zlib; asan matches the final link so the
+   * sanitized lane instruments the codec too. The flavor keys the driver and target exactly
    * like the lre flavor: the keying
    * must never hand a zig-built object set to a clang link off a shared
    * directory. */
@@ -377,6 +345,7 @@ export function createVendorArchives(context: VendorArchiveContext) {
       (sanitize ? "asan" : "plain") +
       (driver.argv.length === 1 && driver.argv[0] === "clang" ? "" : "-zigcc") +
       `-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
+    const inputs = zlibInputs(vendorTriple(driver));
     return ensureVendorObjects({
       sanitize,
       driver,
@@ -384,11 +353,67 @@ export function createVendorArchives(context: VendorArchiveContext) {
       flavor,
       name: "zlib",
       vendor: vendorZlibDir(),
-      sources: ZLIB_SOURCES,
+      sources: inputs.sources,
       objects: zlibObjectPaths(sanitize, driver, buildIdentity, cacheRoot),
+      flags: [...(sanitize ? [] : ["-O3"]), ...inputs.defines.map((define) => `-D${define}`)],
     });
   }
-  
+
+  function vendorZstdDir(): string {
+    return join(runtimeSrcDir(), "..", "vendor", "zstd");
+  }
+
+  function zstdObjectPaths(
+    sanitize: boolean,
+    driver: CcDriver,
+    buildIdentity: string,
+    cacheRoot: string = vendorBuildCacheRoot(),
+  ): string[] {
+    const flavor =
+      (sanitize ? "asan" : "plain") +
+      (driver.argv.length === 1 && driver.argv[0] === "clang" ? "" : "-zigcc") +
+      `-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
+    const cacheDir = join(cacheRoot, `zstd-${ZSTD_VERSION}-${flavor}`);
+    return zstdInputs(vendorTriple(driver)).sources.map((f) => join(cacheDir, vendorObjectName(f)));
+  }
+
+  /** The zstd objects for one flavor, compiled lazily on the first
+   * zstd-using C-lane build and cached beside the zlib objects —
+   * <build-cache>/vendor/zstd-<version>-<flavor>-<target>-<toolchain>/*.o —
+   * with the same atomic-rename publish. zstd compresses whole frames in one
+   * pass, so the archive is larger than zlib's and takes a few seconds the
+   * first time. Plain is -O3 and multi-threaded exactly as Node builds it;
+   * asan matches the final link so the sanitized lane instruments the codec
+   * too. */
+  async function ensureZstdObjects(
+    sanitize: boolean,
+    driver: CcDriver,
+    buildIdentity: string,
+    cacheRoot: string = vendorBuildCacheRoot(),
+  ): Promise<string[]> {
+    const flavor =
+      (sanitize ? "asan" : "plain") +
+      (driver.argv.length === 1 && driver.argv[0] === "clang" ? "" : "-zigcc") +
+      `-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
+    const inputs = zstdInputs(vendorTriple(driver));
+    return ensureVendorObjects({
+      sanitize,
+      driver,
+      cacheRoot,
+      flavor,
+      name: "zstd",
+      // The sources are relative to lib/, and zstd.h sits beside them.
+      vendor: join(vendorZstdDir(), "lib"),
+      sources: inputs.sources,
+      objects: zstdObjectPaths(sanitize, driver, buildIdentity, cacheRoot),
+      flags: [
+        ...(sanitize ? [] : ["-O3"]),
+        ...inputs.compileFlags,
+        ...inputs.defines.map((define) => `-D${define}`),
+      ],
+    });
+  }
+
   /** Compile and atomically publish one cached set of vendored C objects. */
   async function ensureVendorObjects(options: {
     sanitize: boolean;
@@ -399,10 +424,11 @@ export function createVendorArchives(context: VendorArchiveContext) {
     vendor: string;
     sources: readonly string[];
     objects: string[];
+    flags?: readonly string[];
   }): Promise<string[]> {
     const { sanitize, driver, cacheRoot, flavor, name, vendor, sources, objects } = options;
     if ((await Promise.all(objects.map(validVendorArtifact))).every(Boolean)) return objects;
-  
+
     await mkdir(cacheRoot, { recursive: true });
     const buildDir = await mkdtemp(join(tmpdir(), `scriptc-vendor-${name}-${flavor}-`));
     try {
@@ -415,91 +441,32 @@ export function createVendorArchives(context: VendorArchiveContext) {
             "-std=c11",
             ...driver.targetArgs,
             ...(sanitize ? ["-O1", "-fsanitize=address"] : ["-Os"]),
-            "-I", vendor,
-            "-c", join(vendor, f),
-            "-o", join(buildDir, f.replace(/\.c$/, ".o")),
+            ...(options.flags ?? []),
+            "-I",
+            vendor,
+            "-c",
+            join(vendor, f),
+            "-o",
+            join(buildDir, vendorObjectName(f)),
           ],
           { cwd: buildDir },
         );
       }
-      await Promise.all(objects.map((destination) =>
-        publishVendorArtifact(join(buildDir, basename(destination)), destination)
-      ));
+      await Promise.all(
+        objects.map((destination) =>
+          publishVendorArtifact(join(buildDir, basename(destination)), destination),
+        ),
+      );
     } finally {
       await rm(buildDir, { recursive: true, force: true });
     }
     return objects;
   }
-  
-  function vendorCurlDir(): string {
-    return join(runtimeSrcDir(), "..", "vendor", "curl");
-  }
-  
-  /** Every libcurl function scr_fetch_curl.c references — the generated import
-   * stub defines exactly these. A new curl call in scr_fetch_curl.c that is
-   * missing here fails the CROSS link immediately with the symbol's name
-   * (host builds resolve it from the real system libcurl and never look). */
-  const CURL_STUB_SYMBOLS = [
-    "curl_easy_cleanup", "curl_easy_getinfo", "curl_easy_init", "curl_easy_setopt", "curl_easy_strerror",
-    "curl_free", "curl_global_cleanup", "curl_global_init",
-    "curl_multi_add_handle", "curl_multi_cleanup", "curl_multi_info_read", "curl_multi_init",
-    "curl_multi_perform", "curl_multi_poll", "curl_multi_remove_handle",
-    "curl_slist_append", "curl_slist_free_all",
-    "curl_url", "curl_url_cleanup", "curl_url_get", "curl_url_set",
-  ];
-  
-  function curlStubDirPath(
-    driver: CcDriver,
-    buildIdentity: string,
-    cacheRoot: string = vendorBuildCacheRoot(),
-  ): string {
-    return join(cacheRoot, `curl-stub-${driver.target}-${buildIdentity}`);
-  }
-  
-  /** The libcurl import stub for one CROSS target, generated lazily on the
-   * first fetch-using cross build and cached like the zlib objects —
-   * <build-cache>/vendor/curl-stub-<target>-<toolchain>/libcurl.so, atomic-rename publish. The
-   * stub is empty definitions of CURL_STUB_SYMBOLS compiled `-shared` with
-   * `-soname libcurl.so.4`: linking against it satisfies scr_fetch_curl.c's
-   * references and records a plain `DT_NEEDED libcurl.so.4`, which the
-   * TARGET system's real libcurl satisfies at load time (curl's unversioned
-   * exports make the classic import-stub technique sound here — nothing
-   * from the stub's bodies ever ships in the binary). One stub per target,
-   * no sanitize flavor: the stub's code is never executed or instrumented,
-   * and asan links against plain shared libraries freely. */
-  async function ensureCurlStub(
-    driver: CcDriver,
-    buildIdentity: string,
-    cacheRoot: string = vendorBuildCacheRoot(),
-  ): Promise<string> {
-    const cacheDir = curlStubDirPath(driver, buildIdentity, cacheRoot);
-    const lib = join(cacheDir, "libcurl.so");
-    if (await validVendorArtifact(lib)) return cacheDir;
-  
-    await mkdir(cacheRoot, { recursive: true });
-    const buildDir = await mkdtemp(join(tmpdir(), "scriptc-vendor-curl-stub-"));
-    try {
-      const src = join(buildDir, "stub.c");
-      await writeFile(src, CURL_STUB_SYMBOLS.map((s) => `void ${s}(void) {}\n`).join(""));
-      await execFileAsync(driver.argv[0] ?? "clang", [
-        ...driver.argv.slice(1),
-        ...driver.targetArgs,
-        "-shared", "-fPIC",
-        "-Wl,-soname,libcurl.so.4",
-        src,
-        "-o", join(buildDir, "libcurl.so"),
-      ]);
-      await publishVendorArtifact(join(buildDir, "libcurl.so"), lib);
-    } finally {
-      await rm(buildDir, { recursive: true, force: true });
-    }
-    return cacheDir;
-  }
-  
+
   function vendorTlsDir(): string {
     return join(runtimeSrcDir(), "..", "vendor", "mbedtls");
   }
-  
+
   function tlsArchivePath(
     sanitize: boolean,
     driver: CcDriver,
@@ -509,10 +476,10 @@ export function createVendorArchives(context: VendorArchiveContext) {
     const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
     return join(cacheRoot, `mbedtls-${MBEDTLS_VERSION}-${flavor}`, "libmbedtls.a");
   }
-  
+
   /** The mbedTLS archive for one flavor, compiled lazily on the first
-   * TLS-using build (~15s over ~110 TUs, parallelized) and cached like the
-   * engine archive — <build-cache>/vendor/mbedtls-<version>-<flavor>-<target>-<toolchain>/libmbedtls.a —
+   * TLS-using build (~15s over ~110 TUs, parallelized) and cached under
+   * <build-cache>/vendor/mbedtls-<version>-<flavor>-<target>-<toolchain>/libmbedtls.a
    * with the same atomic-rename publish (parallel first builds race safely;
    * losers discard their work). Plain is -Os (the TLS stack is link-gated
    * but still wants its size class small); asan matches the final link so
@@ -537,7 +504,7 @@ export function createVendorArchives(context: VendorArchiveContext) {
     const vendor = vendorTlsDir();
     const archive = tlsArchivePath(sanitize, driver, buildIdentity, cacheRoot);
     if (await validVendorArtifact(archive)) return archive;
-  
+
     await mkdir(cacheRoot, { recursive: true });
     const buildDir = await mkdtemp(join(tmpdir(), `scriptc-vendor-mbedtls-${flavor}-`));
     try {
@@ -548,50 +515,412 @@ export function createVendorArchives(context: VendorArchiveContext) {
         "-std=c11",
         ...driver.targetArgs,
         ...(sanitize ? ["-O1", "-fsanitize=address"] : ["-Os"]),
-        "-I", join(vendor, "include"),
-        "-I", join(vendor, "library"),
+        "-I",
+        join(vendor, "include"),
+        "-I",
+        join(vendor, "library"),
       ];
       const width = availableParallelism();
       for (let i = 0; i < sources.length; i += width) {
         await Promise.all(
-          sources.slice(i, i + width).map((src) =>
-            execFileAsync(
-              compileArgv[0] ?? "clang",
-              [...compileArgv.slice(1), ...cflags, "-c", join(vendor, "library", src), "-o", join(buildDir, `${basename(src, ".c")}.o`)],
+          sources
+            .slice(i, i + width)
+            .map((src) =>
+              execFileAsync(compileArgv[0] ?? "clang", [
+                ...compileArgv.slice(1),
+                ...cflags,
+                "-c",
+                join(vendor, "library", src),
+                "-o",
+                join(buildDir, `${basename(src, ".c")}.o`),
+              ]),
             ),
-          ),
         );
       }
-      await execFileAsync(arArgv[0] ?? "ar", [...arArgv.slice(1), "rcs", join(buildDir, "libmbedtls.a"), ...sources.map((s) => join(buildDir, `${basename(s, ".c")}.o`))]);
+      await execFileAsync(arArgv[0] ?? "ar", [
+        ...arArgv.slice(1),
+        "rcs",
+        join(buildDir, "libmbedtls.a"),
+        ...sources.map((s) => join(buildDir, `${basename(s, ".c")}.o`)),
+      ]);
       await publishVendorArtifact(join(buildDir, "libmbedtls.a"), archive);
     } finally {
       await rm(buildDir, { recursive: true, force: true });
     }
     return archive;
   }
-  
+
+  function vendorBrotliDir(): string {
+    return join(runtimeSrcDir(), "..", "vendor", "brotli", "c");
+  }
+
+  function brotliArchivePath(
+    sanitize: boolean,
+    driver: CcDriver,
+    buildIdentity: string,
+    cacheRoot: string = vendorBuildCacheRoot(),
+  ): string {
+    const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
+    return join(cacheRoot, `brotli-${BROTLI_VERSION}-${flavor}`, "libbrotli.a");
+  }
+
+  /** The brotli archive for one flavor, compiled lazily on the first
+   * Brotli-using build and cached under
+   * <build-cache>/vendor/brotli-<version>-<flavor>-<target>-<toolchain>/libbrotli.a,
+   * with the mbedTLS archive's recipe: per-TU compiles of c/common, c/dec
+   * and c/enc against c/include, then one `ar rcs`. dec/ and enc/ share
+   * file names, so each object is named after its path (dec-static_init.o). */
+  async function ensureBrotliArchive(
+    sanitize: boolean,
+    driver: CcDriver,
+    buildIdentity: string,
+    cacheRoot: string = vendorBuildCacheRoot(),
+  ): Promise<string> {
+    const flavor = `${sanitize ? "asan" : "plain"}-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
+    const compileArgv = isZigDriver(driver) ? driver.argv : ["clang"];
+    const arArgv = isZigDriver(driver) ? [...driver.argv.slice(0, 1), "ar"] : ["ar"];
+    const vendor = vendorBrotliDir();
+    const archive = brotliArchivePath(sanitize, driver, buildIdentity, cacheRoot);
+    if (await validVendorArtifact(archive)) return archive;
+
+    await mkdir(cacheRoot, { recursive: true });
+    const buildDir = await mkdtemp(join(tmpdir(), `scriptc-vendor-brotli-${flavor}-`));
+    try {
+      const sources = (
+        await Promise.all(
+          ["common", "dec", "enc"].map(async (dir) =>
+            (await readdir(join(vendor, dir)))
+              .filter((name) => !name.startsWith(".") && name.endsWith(".c"))
+              .map((name) => `${dir}/${name}`),
+          ),
+        )
+      )
+        .flat()
+        .sort();
+      const object = (src: string): string =>
+        join(buildDir, `${src.replaceAll("/", "-").replace(/\.c$/, "")}.o`);
+      const cflags = [
+        "-std=c11",
+        ...driver.targetArgs,
+        ...(sanitize ? ["-O1", "-fsanitize=address"] : ["-Os"]),
+        "-I",
+        join(vendor, "include"),
+      ];
+      const width = availableParallelism();
+      for (let i = 0; i < sources.length; i += width) {
+        await Promise.all(
+          sources
+            .slice(i, i + width)
+            .map((src) =>
+              execFileAsync(compileArgv[0] ?? "clang", [
+                ...compileArgv.slice(1),
+                ...cflags,
+                "-c",
+                join(vendor, src),
+                "-o",
+                object(src),
+              ]),
+            ),
+        );
+      }
+      await execFileAsync(arArgv[0] ?? "ar", [
+        ...arArgv.slice(1),
+        "rcs",
+        join(buildDir, "libbrotli.a"),
+        ...sources.map(object),
+      ]);
+      await publishVendorArtifact(join(buildDir, "libbrotli.a"), archive);
+    } finally {
+      await rm(buildDir, { recursive: true, force: true });
+    }
+    return archive;
+  }
+
+  /** The fetched ICU release root (`icu/`, holding `source/` and LICENSE),
+   * downloaded once per cache root and reused after that. ICU is not
+   * vendored: the release's own source tarball is pinned by version and
+   * sha256 in vendor-inputs.ts, verified on every use, and extracted by the
+   * system `tar` as the libnode build does. An existing extracted tree is
+   * enough, so an offline build works from a pre-populated cache. */
+  const icuSourcesByCacheRoot = new Map<string, Promise<string>>();
+  function ensureIcuSources(cacheRoot: string = vendorBuildCacheRoot()): Promise<string> {
+    const pending = icuSourcesByCacheRoot.get(cacheRoot);
+    if (pending !== undefined) return pending;
+    const pendingFetch = (async (): Promise<string> => {
+      const tree = join(cacheRoot, `icu4c-${ICU_VERSION}-source`);
+      if (await presentFile(join(tree, "source", "common", "sources.txt"))) return tree;
+      const tarball = join(cacheRoot, `icu4c-${ICU_VERSION}-sources.tgz`);
+      let archive: Buffer;
+      try {
+        archive = await readFile(tarball);
+        if (archive.length !== ICU_SOURCE_SIZE || sha256(archive) !== ICU_SOURCE_SHA256)
+          throw new Error("cached ICU source tarball does not match its pin");
+      } catch {
+        let response: Response;
+        try {
+          response = await fetch(ICU_SOURCE_URL);
+        } catch (cause) {
+          throw new Error(
+            `could not download ICU's sources (${ICU_SOURCE_URL}); ` +
+              `populate ${tarball} or allow network access`,
+            { cause },
+          );
+        }
+        if (!response.ok)
+          throw new Error(
+            `could not download ICU's sources (${ICU_SOURCE_URL}): ` +
+              `${response.status} ${response.statusText}`,
+          );
+        archive = Buffer.from(await response.arrayBuffer());
+        if (archive.length !== ICU_SOURCE_SIZE || sha256(archive) !== ICU_SOURCE_SHA256)
+          throw new Error(
+            `ICU source tarball from ${ICU_SOURCE_URL} is ${archive.length} bytes with sha256 ` +
+              `${sha256(archive)}, expected ${ICU_SOURCE_SIZE} bytes with sha256 ` +
+              `${ICU_SOURCE_SHA256}`,
+          );
+        await mkdir(cacheRoot, { recursive: true });
+        await writeFile(tarball, archive);
+      }
+      await mkdir(cacheRoot, { recursive: true });
+      const stage = await mkdtemp(join(cacheRoot, ".icu-sources-"));
+      try {
+        await execFileAsync("tar", ["-xzf", tarball, "-C", stage]);
+        if (!(await presentFile(join(stage, "icu", "source", "common", "sources.txt"))))
+          throw new Error(`ICU source tarball ${ICU_SOURCE_URL} does not hold icu/source`);
+        await rm(tree, { recursive: true, force: true });
+        await rename(join(stage, "icu"), tree);
+      } finally {
+        await rm(stage, { recursive: true, force: true });
+      }
+      return tree;
+    })();
+    icuSourcesByCacheRoot.set(cacheRoot, pendingFetch);
+    pendingFetch.catch(() => icuSourcesByCacheRoot.delete(cacheRoot));
+    return pendingFetch;
+  }
+
+  /** The archive is the same for sanitized and plain builds: it is never
+   * instrumented (see ensureIcuArchive), so neither the path nor the build
+   * carries a sanitizer flavor. */
+  function icuArchivePath(
+    driver: CcDriver,
+    buildIdentity: string,
+    cacheRoot: string = vendorBuildCacheRoot(),
+  ): string {
+    const flavor = `plain-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
+    return join(cacheRoot, `icu-${ICU_VERSION}-${flavor}`, "libicu.a");
+  }
+
+  /** The ICU archive for one flavor, compiled lazily on the first
+   * Intl-using build (~470 C++ TUs, parallelized) and cached under
+   * <build-cache>/vendor/icu-<version>-<flavor>-<target>-<toolchain>/
+   * libicu.a with the mbedTLS archive's atomic-rename publish.
+   *
+   * Three things make this archive different from every other vendored one:
+   *
+   *  - It is C++, so the pack's C driver cannot compile it: the TUs (and the
+   *    standard library they use) build with Zig's C++ driver for the glibc
+   *    target the runtime packs pin. That target is the point. In C++ mode,
+   *    glibc 2.38+ headers redirect strtol/strtoul to the C23 __isoc23_*
+   *    names, and a host libstdc++ binds those names too, so a host-compiled
+   *    C++ archive would raise the glibc floor above the packs'. Zig's
+   *    bundled libc++ and libc++abi compile from the toolchain's own sources
+   *    for the target and bind the target's names only.
+   *  - ICU requires RTTI (`typeid` in unifiedcache.h and ustrenum.cpp,
+   *    `dynamic_cast` in uniset_props.cpp), so the design note's
+   *    `-fno-rtti` is not available; `-fno-exceptions` is, and ICU, libc++,
+   *    and libc++abi all build so. libc++abi's Itanium personality routine
+   *    (cxa_personality.cpp) is the one unit that needs exceptions, so it is
+   *    left out: nothing can throw into it.
+   *  - Both the standard library and the C++ runtime it needs are merged INTO
+   *    the archive, so the final link stays C-only: a plain `clang`/`zig` C
+   *    link with the runtime pack's `-lm` resolves every undefined symbol.
+   *    Members are prefixed by source (`cxx-libcxx-`, `cxx-libcxxabi-`) so
+   *    their names stay unique.
+   *
+   * ICU builds with symbol renaming on (version suffixes `_78`), which is
+   * what lets the zero-cost gate assert that only Intl programs link ICU
+   * symbols.
+   *
+   * Sanitized builds link this same uninstrumented archive. AddressSanitizer
+   * cannot instrument it: Zig's bundled libc++ compiles with
+   * `-fsanitize=address` only against a `sanitizer/asan_interface.h` its
+   * tree does not ship, and compiling ~600 C++ TUs again for the sanitizer
+   * lane would add minutes to the first Intl program of every sanitized
+   * build. The runtime's own ICU code (scr_intl.c) still compiles with the
+   * sanitizer, and AddressSanitizer's interceptors cover ICU's allocations,
+   * so a sanitized Intl program reports heap errors from ICU data as it
+   * does everywhere else — the ICU code itself is simply not instrumented. */
+  async function ensureIcuArchive(
+    driver: CcDriver,
+    buildIdentity: string,
+    cacheRoot: string = vendorBuildCacheRoot(),
+  ): Promise<string> {
+    // The archive is host-targeted ELF for the packs' glibc floor; a cross
+    // target would need a Zig C++ link recipe this slice has not validated.
+    // Both refusals are compile diagnostics (SC3002), not internal errors:
+    // an Intl program on any other host or target is a documented "not
+    // here yet", the same answer the missing runtime pack gives.
+    if (driver.target !== null)
+      throw new NativeCodegenError(
+        "SC3002",
+        `Intl needs ICU, which scriptc builds for the host's linux-x64 gnu target only: ` +
+          `the ${driver.target} target is not supported yet`,
+      );
+    if (process.platform !== "linux" || process.arch !== "x64")
+      throw new NativeCodegenError(
+        "SC3002",
+        "Intl needs ICU, which this compiler builds for linux-x64 only: " +
+          `the ${process.platform}-${process.arch} host is not supported yet`,
+      );
+    const flavor = `plain-${vendorCacheTargetFlavor(driver)}-${buildIdentity}`;
+    const archive = icuArchivePath(driver, buildIdentity, cacheRoot);
+    if (await validVendorArtifact(archive)) return archive;
+
+    await mkdir(cacheRoot, { recursive: true });
+    const buildDir = await mkdtemp(join(tmpdir(), `scriptc-vendor-icu-${flavor}-`));
+    // The tarball extracts to `icu/source/...` with ICU's LICENSE beside it.
+    const vendor = join(await ensureIcuSources(cacheRoot), "source");
+    const libDir = await zigLibDir();
+    const cxx = ["zig", "c++", "-target", ICU_CXX_TARGET];
+    const optimize = ["-Os"];
+    const commonFlags = [
+      "-std=c++17",
+      ...optimize,
+      "-fno-exceptions",
+      "-ffunction-sections",
+      "-fdata-sections",
+    ];
+    const icuFlags = [
+      ...commonFlags,
+      "-DU_STATIC_IMPLEMENTATION",
+      "-DU_ATTRIBUTE_DEPRECATED=",
+      "-DNDEBUG",
+      "-Wno-deprecated-declarations",
+      "-I",
+      join(vendor, "common"),
+      "-I",
+      join(vendor, "i18n"),
+    ];
+    // libc++ 20 sources need C++20 (`constinit`, ranges) and libc++'s
+    // charconv reads a header from `libcxx/libc`.
+    const cxxLibraryFlags = [
+      "-std=c++23",
+      ...optimize,
+      "-fno-exceptions",
+      "-ffunction-sections",
+      "-fdata-sections",
+      "-I",
+      join(libDir, "libcxx", "include"),
+      "-I",
+      join(libDir, "libcxx", "src"),
+      "-I",
+      join(libDir, "libcxx", "libc"),
+      "-I",
+      join(libDir, "libcxxabi", "include"),
+      "-D_LIBCPP_BUILDING_LIBRARY",
+      "-D_LIBCXXABI_BUILDING_LIBRARY",
+      "-DLIBCXX_BUILDING_LIBCXXABI",
+      "-Wno-unknown-warning-option",
+    ];
+    const cxxLibraryUnits = async (
+      subdirectory: string,
+      memberPrefix: string,
+      skip: ReadonlySet<string>,
+    ): Promise<IcuUnit[]> => {
+      const sources = (await readdir(join(libDir, subdirectory, "src")))
+        .filter((name) => name.endsWith(".cpp") && !skip.has(name))
+        .sort();
+      return sources.map((source) => ({
+        path: join(libDir, subdirectory, "src", source),
+        member: `${memberPrefix}${source}`,
+        flags: cxxLibraryFlags,
+      }));
+    };
+    try {
+      const units: IcuUnit[] = [
+        ...icuSourceList(await readFile(join(vendor, "common", "sources.txt"), "utf8")).map(
+          (source) => ({
+            path: join(vendor, "common", source),
+            member: `common-${source}`,
+            flags: icuFlags,
+            define: "U_COMMON_IMPLEMENTATION",
+          }),
+        ),
+        {
+          path: join(vendor, "stubdata", "stubdata.cpp"),
+          member: "stubdata-stubdata.cpp",
+          flags: icuFlags,
+          define: "U_COMMON_IMPLEMENTATION",
+        },
+        ...icuSourceList(await readFile(join(vendor, "i18n", "sources.txt"), "utf8")).map(
+          (source) => ({
+            path: join(vendor, "i18n", source),
+            member: `i18n-${source}`,
+            flags: icuFlags,
+            define: "U_I18N_IMPLEMENTATION",
+          }),
+        ),
+        ...(await cxxLibraryUnits("libcxx", "cxx-libcxx-", new Set())),
+        ...(await cxxLibraryUnits("libcxxabi", "cxx-libcxxabi-", new Set(["cxa_personality.cpp"]))),
+      ];
+      const width = availableParallelism();
+      for (let i = 0; i < units.length; i += width) {
+        await Promise.all(
+          units.slice(i, i + width).map(async (unit) => {
+            const output = join(buildDir, unit.member.replace(/\.cpp$/, ".o"));
+            await execFileAsync(cxx[0]!, [
+              ...cxx.slice(1),
+              ...unit.flags,
+              ...(unit.define === undefined ? [] : [`-D${unit.define}`]),
+              "-g0",
+              "-c",
+              unit.path,
+              "-o",
+              output,
+            ]);
+            return output;
+          }),
+        );
+      }
+      await execFileAsync("ar", [
+        "rcs",
+        join(buildDir, "libicu.a"),
+        ...units.map((unit) => join(buildDir, unit.member.replace(/\.cpp$/, ".o"))),
+      ]);
+      await publishVendorArtifact(join(buildDir, "libicu.a"), archive);
+    } finally {
+      await rm(buildDir, { recursive: true, force: true });
+    }
+    return archive;
+  }
+
   return {
     vendorEngineDir,
     vendorTlsDir,
-    vendorCurlDir,
+    ensureIcuSources,
+    icuArchivePath,
+    ensureIcuArchive,
+    vendorBrotliDir,
+    brotliArchivePath,
+    ensureBrotliArchive,
     vendorBuildCacheRoot,
     vendorCacheTargetFlavor,
     vendorCacheBuildIdentity,
     currentVendorCacheBuildIdentity,
-    engineArchivePath,
     stageVendorInputs,
-    ensureEngineArchive,
     lreObjectPaths,
     ensureLreObjects,
     vendorZlibDir,
     zlibObjectPaths,
     ensureZlibObjects,
-    curlStubDirPath,
-    ensureCurlStub,
+    vendorZstdDir,
+    zstdObjectPaths,
+    ensureZstdObjects,
     tlsArchivePath,
     ensureTlsArchive,
-    QJS_ENGINE_SOURCES,
     LRE_SOURCES,
     ZLIB_SOURCES,
+    ZSTD_SOURCES,
   };
 }

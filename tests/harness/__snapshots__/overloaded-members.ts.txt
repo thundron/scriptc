@@ -1,0 +1,17 @@
+overloaded-members.ts:21:15 - error SC2009: values of type 'Emitter' cannot be compiled: the record shape is supported, but its member 'emit' is an overload set, and its overload 'emit(event: "many", ...values: number[]): void' has a rest parameter (an overload set stores one fixed-arity function)
+
+  20 | }
+  21 | function fire(e: Emitter): void {
+     |               ^
+  22 |   e.emit("many", 1, 2);
+
+  hint: the outer shape is supported — the named component is the blocker; restate it inside the compilable set (number, string, boolean, arrays, Maps, Sets, RegExp, functions, classes, records, unions of those, and 'unknown')
+
+overloaded-members.ts:24:20 - error SC2004: uses of 'fire' inherit the blocker on its declaration
+
+  23 | }
+  24 | console.log(typeof fire);
+     |                    ^~~~
+  25 | 
+
+  hint: the declaration of 'fire' did not compile — fix the diagnostic reported there and these sites clear with it

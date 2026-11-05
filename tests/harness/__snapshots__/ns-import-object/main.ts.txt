@@ -1,6 +1,8 @@
-ns-import-object/main.ts:8:17 - error SC1013: module namespace objects as first-class values (access 'lib' members directly: lib.<member>) are not supported yet
+ns-import-object/main.ts:9:13 - error SC2020: 'Object.values over a module namespace' is part of the standard library types but has no scriptc lowering yet
 
-  7 | console.log(lib.one());
-  8 | const grabbed = lib;
-    |                 ^~~
-  9 | console.log(grabbed.one());
+   8 | console.log(grabbed.one());
+   9 | console.log(Object.values(grabbed));
+     |             ^~~~~~~~~~~~~~~~~~~~~~
+  10 | // Namespace value enumeration remains explicit.
+
+  hint: read the named exports directly (module namespace values are live and may have heterogeneous representations)

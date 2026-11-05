@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -23,22 +23,67 @@ afterEach(async () => {
   await Promise.all(dirs.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-test.runIf(supported)("WASI helper object plus runtime pack builds and runs without SCRIPTC_CC", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "scriptc-wasi-runtime-pack-"));
+test.runIf(supported)(
+  "WASI helper object plus runtime pack builds and runs without SCRIPTC_CC",
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-wasi-runtime-pack-"));
+    dirs.push(dir);
+    const output = join(dir, "hello.wasm");
+    const zigCache = join(dir, "zig-cache");
+    await expect(
+      execFileAsync(
+        process.execPath,
+        [
+          "--import",
+          tsxLoader,
+          cliEntry,
+          "run",
+          join(repoRoot, "tests/corpus/001-hello.ts"),
+          "-o",
+          output,
+        ],
+        {
+          env: {
+            ...process.env,
+            SCRIPTC_TARGET: "wasm32-wasi",
+            SCRIPTC_NO_CACHE: "1",
+            ZIG_GLOBAL_CACHE_DIR: join(zigCache, "global"),
+            ZIG_LOCAL_CACHE_DIR: join(zigCache, "local"),
+          },
+          encoding: "utf8",
+        },
+      ),
+    ).resolves.toMatchObject({ stdout: "hello world\n" });
+  },
+);
+
+test.runIf(supported)("switching WASI and native builds retains both executables", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-wasi-native-output-"));
   dirs.push(dir);
-  const output = join(dir, "hello.wasm");
-  const zigCache = join(dir, "zig-cache");
-  await expect(execFileAsync(process.execPath, [
-    "--import", tsxLoader, cliEntry, "run", join(repoRoot, "tests/corpus/001-hello.ts"), "-o", output,
-  ], {
-    env: {
-      ...process.env,
-      SCRIPTC_TARGET: "wasm32-wasi",
-      SCRIPTC_NO_CACHE: "1",
-      SCRIPTC_LEGACY_C_PIPELINE: "0",
-      ZIG_GLOBAL_CACHE_DIR: join(zigCache, "global"),
-      ZIG_LOCAL_CACHE_DIR: join(zigCache, "local"),
-    },
-    encoding: "utf8",
-  })).resolves.toMatchObject({ stdout: "hello world\n" });
+  const entry = join(dir, "hello.ts");
+  const outDir = join(dir, ".scriptc");
+  const nativeEnv = { ...process.env };
+  delete nativeEnv.SCRIPTC_TARGET;
+  const wasiEnv = { ...nativeEnv, SCRIPTC_TARGET: "wasm32-wasi" };
+  const build = (args: string[], env: NodeJS.ProcessEnv) =>
+    execFileAsync(process.execPath, ["--import", tsxLoader, cliEntry, "build", entry, ...args], {
+      env,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+  await writeFile(entry, 'console.log("hello");\n');
+
+  await build([], wasiEnv);
+  const llvm = await readFile(join(outDir, "hello.ll"));
+  const wasm = await readFile(join(outDir, "hello.wasm"));
+  await build(["--backend=llvm", "--keep-llvm"], nativeEnv);
+  const native = await readFile(join(outDir, process.platform === "win32" ? "hello.exe" : "hello"));
+  const nativeLlvm = await readFile(join(outDir, "hello.ll"));
+  expect(nativeLlvm.equals(llvm)).toBe(false);
+  expect(await readFile(join(outDir, "hello.wasm"))).toEqual(wasm);
+
+  await build([], wasiEnv);
+  expect(await readFile(join(outDir, "hello.ll"))).toEqual(llvm);
+  expect(
+    await readFile(join(outDir, process.platform === "win32" ? "hello.exe" : "hello")),
+  ).toEqual(native);
 });

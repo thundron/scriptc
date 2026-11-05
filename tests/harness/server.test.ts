@@ -93,7 +93,10 @@ function runLane(cmd: string, args: string[], driver: string | null): Promise<Pr
 async function build(entry: string): Promise<string> {
   const hash = createHash("sha256");
   hash.update(entry).update(readFileSync(entry));
-  const key = hash.update(sanitize ? "san" : "plain").digest("hex").slice(0, 16);
+  const key = hash
+    .update(sanitize ? "san" : "plain")
+    .digest("hex")
+    .slice(0, 16);
   const outDir = join(cacheDir, `server-${key}`);
   mkdirSync(outDir, { recursive: true });
   const result = await compile(entry, {
@@ -103,7 +106,7 @@ async function build(entry: string): Promise<string> {
     // Pinned: the listening-process differential was written against the
     // C lane; keeping lane identity fixed keeps a three-leg diff meaning
     // "server behavior changed", never "the default backend moved".
-    backend: "c",
+    backend: "llvm",
   });
   if (!result.ok) {
     throw new Error(
@@ -119,7 +122,10 @@ async function build(entry: string): Promise<string> {
 // lanes run the identical three-leg comparison. SCRIPTC_TEST_SHARD (CI's
 // matrix) keeps only this shard's slice, keyed by case name.
 const cases = shardSelect(
-  [...globSync(join(fixturesRoot, "cases/*/main.ts")), ...globSync(join(fixturesRoot, "cases/*/main.js"))]
+  [
+    ...globSync(join(fixturesRoot, "cases/*/main.ts")),
+    ...globSync(join(fixturesRoot, "cases/*/main.js")),
+  ]
     .sort()
     .map((entry) => ({
       name: entry.split("/").at(-2)!,
@@ -130,18 +136,33 @@ const cases = shardSelect(
 );
 
 describe(`server differential (${cases.length} programs${sanitize ? ", sanitized" : ""}${shardSuffix()})`, () => {
-  test.for(cases.map((c) => [c.name, c] as const))("%s", async ([, c]) => {
-    const binary = await build(c.entry);
-    // Sequential, not parallel: both lanes bind ephemeral ports and drive
-    // real sockets — parallelism buys little and interleaves kernel state.
-    const nodeRes = await runLane("node", [c.entry], c.driver);
-    const nativeRes = await runLane(binary, [], c.driver);
-    expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
-    if (!nodeRes.stdout.equals(nativeRes.stdout)) {
-      expect.unreachable("stdout differed at byte level but not after utf8 decode");
-    }
-    expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
-    expect(nativeRes.driverStdout).toBe(nodeRes.driverStdout);
+  test.for(cases.map((c) => [c.name, c] as const))(
+    "%s",
+    async ([, c]) => {
+      const binary = await build(c.entry);
+      // Sequential, not parallel: both lanes bind ephemeral ports and drive
+      // real sockets — parallelism buys little and interleaves kernel state.
+      const nodeRes = await runLane("node", [c.entry], c.driver);
+      const nativeRes = await runLane(binary, [], c.driver);
+      expect(nativeRes.stdout.toString("utf8")).toBe(nodeRes.stdout.toString("utf8"));
+      if (!nodeRes.stdout.equals(nativeRes.stdout)) {
+        expect.unreachable("stdout differed at byte level but not after utf8 decode");
+      }
+      expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+      expect(nativeRes.driverStdout).toBe(nodeRes.driverStdout);
+    },
+    120_000,
+  );
+
+  test("http-trailers answers 431 for a trailer block over the field limit", async () => {
+    const entry = join(fixturesRoot, "cases/http-trailers/main.ts");
+    const driver = join(fixturesRoot, "cases/http-trailers/limit-driver.mjs");
+    const binary = await build(entry);
+    const nativeRes = await runLane(binary, [], driver);
+    expect(nativeRes.exitCode).toBe(0);
+    expect(nativeRes.driverStdout).toBe(
+      "limit HTTP/1.1 431 Request Header Fields Too Large\nlimit driver done\n",
+    );
   }, 120_000);
 
   test("net-reuse-port emits the additive LLVM ABI", async () => {
@@ -160,7 +181,7 @@ describe(`server differential (${cases.length} programs${sanitize ? ", sanitized
           result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
       );
     }
-    const llvm = readFileSync(result.cPath, "utf8");
+    const llvm = readFileSync(result.llvmPath, "utf8");
     expect(llvm).toContain(
       "declare void @scr_net_listen_opts_reuse_port(ptr, double, ptr, i1 zeroext, i1 zeroext, ptr)",
     );
@@ -168,4 +189,28 @@ describe(`server differential (${cases.length} programs${sanitize ? ", sanitized
       /call void @scr_net_listen_opts_reuse_port\(ptr [^,]+, double [^,]+, ptr [^,]+, i1 [^,]+, i1 [^,]+, ptr [^)]+\)/,
     );
   });
+
+  test("http-host-header-optout works through the LLVM runtime pack", async () => {
+    const entry = join(fixturesRoot, "cases/http-host-header-optout/main.ts");
+    const driver = join(fixturesRoot, "cases/http-host-header-optout/driver.mjs");
+    const outDir = join(cacheDir, `server-llvm-host-header${sanitize ? "-san" : ""}`);
+    mkdirSync(outDir, { recursive: true });
+    const result = await compile(entry, {
+      outPath: join(outDir, "program"),
+      outDir,
+      sanitize,
+      backend: "llvm",
+    });
+    if (!result.ok) {
+      throw new Error(
+        "server fixture failed to compile for LLVM:\n" +
+          result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("\n"),
+      );
+    }
+    const nodeRes = await runLane("node", [entry], driver);
+    const nativeRes = await runLane(result.binaryPath, [], driver);
+    expect(nativeRes.stdout).toEqual(nodeRes.stdout);
+    expect(nativeRes.exitCode).toBe(nodeRes.exitCode);
+    expect(nativeRes.driverStdout).toBe(nodeRes.driverStdout);
+  }, 120_000);
 });

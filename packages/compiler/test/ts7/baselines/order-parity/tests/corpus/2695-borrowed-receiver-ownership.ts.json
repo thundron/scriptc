@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/2695-borrowed-receiver-ownership.ts"
+ ],
+ "diags": []
+}

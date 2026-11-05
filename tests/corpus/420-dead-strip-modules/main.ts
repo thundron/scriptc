@@ -1,7 +1,7 @@
 // Dead-strip across modules: only what the entry reaches is compiled.
 // The unused exports in lib.ts hold constructs the static compiler
 // rejects — the build succeeds anyway, and the harness dead-strip test
-// greps the emitted C to pin that they leave no trace.
+// greps the emitted LLVM to pin that they leave no trace.
 import "./side.ts";
 import { Gadget, double, pick, used } from "./lib.ts";
 

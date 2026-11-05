@@ -1,0 +1,33 @@
+{
+  "name": "@scriptc/cli-win32-x64-msvc",
+  "version": "0.4.8",
+  "description": "Native scriptc compiler for win32-x64-msvc",
+  "license": "Apache-2.0",
+  "homepage": "https://scriptc.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vercel-labs/scriptc.git",
+    "directory": "packages/cli-win32-x64-msvc"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@scriptc/llvm-win32-x64-msvc": "workspace:*",
+    "@scriptc/runtime-win32-x64-msvc": "workspace:*"
+  },
+  "scripts": {
+    "build": "node -e \"\"",
+    "build:native": "node --max-old-space-size=8192 --import tsx ../../scripts/build-native-cli.mts dist --platform-packages",
+    "prepack": "node ../../scripts/verify-native-cli.mjs ."
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

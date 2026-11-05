@@ -6,11 +6,15 @@
  * program, FFI inputs, runtime objects/archives, and system libraries meet
  * the platform linker.
  */
+import type { NativeOptimization } from "./optimization.js";
 import type { FfiProfile } from "../ffi/ffi-manifest.js";
 import type { NativeLinkFeatures } from "./native-link-info.js";
-import type { NativeArtifactDependency } from "./native-toolchain.js";
+import type { NativeArtifactDependency } from "./native/contracts.js";
+import { needsDarwinDebugSymbols } from "./debug-symbols.js";
 import { loadRuntimePack, type RuntimePackSelection } from "./runtime-pack.js";
-import type { NativeTargetSpec } from "./targets.js";
+import { executableLinkInputs } from "./link-plan-core.js";
+import { hugeTextProgram } from "./huge-text.js";
+import type { NativeTargetSpec, WindowsSubsystem } from "./targets.js";
 
 export interface NativeLinkPlan {
   target: NativeTargetSpec;
@@ -24,41 +28,71 @@ export interface NativeLinkPlan {
   /** Inputs already snapshotted by the program-object emitter. */
   programObjectDependencies: NativeArtifactDependency[];
   runtimePack: RuntimePackSelection;
+  darwinDebugSymbols?: boolean;
+  /** Linked with `--static`: the linked executable is checked before use. */
+  staticLink?: boolean;
+  /** Program code large enough for text on huge pages (huge-text.ts). */
+  hugeText?: boolean;
 }
 
 export async function createNativeLinkPlan(options: {
   target: NativeTargetSpec;
   programObject: string;
+  programPartitions?: readonly string[];
   outPath: string;
   features: NativeLinkFeatures;
   ffi: FfiProfile | null;
-  optimization: "release" | "dev";
+  optimization: NativeOptimization;
+  strip?: boolean;
+  staticLink?: boolean;
+  windowsSubsystem?: WindowsSubsystem;
+  profileGenerate?: boolean;
+  profileLayout?: boolean;
+  /** `false` keeps 4 KiB segment alignment for large program code. */
+  hugeText?: boolean;
   programObjectDependencies?: readonly NativeArtifactDependency[];
   env?: NodeJS.ProcessEnv;
   resolver?: (specifier: string) => string;
 }): Promise<NativeLinkPlan> {
+  if (options.ffi?.frameworks?.length && options.target.platform !== "darwin")
+    throw new Error("FFI frameworks require a Darwin target");
   const runtimePack = await loadRuntimePack(options);
+  const hugeText =
+    options.hugeText !== false &&
+    hugeTextProgram(options.target, [options.programObject, ...(options.programPartitions ?? [])]);
   return {
     target: options.target,
-    outputPath: options.outPath,
-    inputs: [
-      options.programObject,
-      ...(options.ffi?.libraries ?? []),
-      ...runtimePack.runtimeObjects,
-      ...runtimePack.archives,
-    ],
-    systemLibraries: [...new Set([
-      ...(options.ffi?.systemLibraries ?? []),
-      ...runtimePack.systemLibraries,
-    ])],
-    driverFlags: options.target.executableLinkerArgs.map((arg, index, args) =>
-      index > 0 && args[index - 1] === "-target" ? options.target.linkerTargetTriple : arg
+    darwinDebugSymbols: needsDarwinDebugSymbols(
+      options.target.platform,
+      options.optimization,
+      options.strip,
     ),
-    dependencyPaths: [
-      ...runtimePack.dependencyPaths,
-      ...(options.ffi?.libraries ?? []),
-    ],
+    outputPath: options.outPath,
+    ...executableLinkInputs({
+      target: options.target,
+      programObject: options.programObject,
+      ...(options.programPartitions === undefined
+        ? {}
+        : { programPartitions: options.programPartitions }),
+      ffiLibraries: options.ffi?.libraries ?? [],
+      ffiSystemLibraries: options.ffi?.systemLibraries ?? [],
+      ffiFrameworks: options.ffi?.frameworks ?? [],
+      runtimeObjects: runtimePack.runtimeObjects,
+      runtimeArchives: runtimePack.archives,
+      runtimeSystemLibraries: runtimePack.systemLibraries,
+      optimization: options.optimization,
+      ...(options.strip === undefined ? {} : { strip: options.strip }),
+      ...(options.staticLink === true ? { staticLink: true } : {}),
+      ...(options.windowsSubsystem === undefined
+        ? {}
+        : { windowsSubsystem: options.windowsSubsystem }),
+      ...(options.profileGenerate === true ? { profileGenerate: true } : {}),
+      ...(options.profileLayout === true ? { profileLayout: true } : {}),
+    }),
+    dependencyPaths: [...runtimePack.dependencyPaths, ...(options.ffi?.libraries ?? [])],
     programObjectDependencies: [...(options.programObjectDependencies ?? [])],
     runtimePack,
+    ...(options.staticLink === true ? { staticLink: true } : {}),
+    ...(hugeText ? { hugeText: true } : {}),
   };
 }

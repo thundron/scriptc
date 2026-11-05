@@ -3,8 +3,8 @@
  * gen-url-cases.mjs) from argv[1] and asserts byte equality against what
  * Node's fileURLToPath/pathToFileURL with { windows: true } produced.
  * Expected values carry an "OK:" or "ERR:" prefix; a thrown TypeError
- * compares through scr_caught_to_string ("TypeError: <message>" — the
- * same name+message Node reports). chdir("/") matches the generator.
+ * compares the name and message, matching the generator's explicit
+ * error fields. chdir("/") matches the generator.
  *
  * Exit 0 = all pass; prints each mismatch (capped) and exits 1 otherwise.
  */
@@ -62,7 +62,7 @@ static void check(const char *op, ScrStr *arg, const char *got, size_t got_len,
   }
 }
 
-/* "OK:<value>" from a +1 result, or "ERR:<String(e)>" from the pending
+/* "OK:<value>" from a +1 result, or "ERR:<name>: <message>" from the pending
  * exception. Returns a fresh ScrStr either way. */
 static ScrStr *outcome(ScrStr *result) {
   char buf[MAX_FIELD + 8];
@@ -75,7 +75,14 @@ static ScrStr *outcome(ScrStr *result) {
   }
   if (!scr_exc_pending()) return scr_str_new("ERR:<none pending>", 18);
   ScrCaught *c = scr_exc_take();
-  ScrStr *msg = scr_caught_to_string(c);
+  ScrError *error = c->payload;
+  ScrStr *name = scr_error_default_name(error);
+  ScrStr *separator = scr_str_new(": ", 2);
+  ScrStr *prefix = scr_str_concat(name, separator);
+  ScrStr *msg = scr_str_concat(prefix, error->message);
+  scr_str_release(name);
+  scr_str_release(separator);
+  scr_str_release(prefix);
   scr_caught_release(c);
   size_t n = msg->len > MAX_FIELD ? MAX_FIELD : msg->len;
   memcpy(buf, "ERR:", 4);

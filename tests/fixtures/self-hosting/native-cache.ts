@@ -1,0 +1,24 @@
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { NativeCache, contentDigest } from "../../../packages/compiler/src/native/cache.js";
+import { NativeExecutableCache } from "../../../packages/compiler/src/native/executable-cache.js";
+import { toolchainEnvironmentCachePolicy, toolchainEnvironmentFingerprint } from "../../../packages/compiler/src/backend/toolchain-environment.js";
+
+const directory = process.argv[2]!;
+const linker = process.argv[3]!;
+const script = process.argv[4]!;
+const library = process.argv[5]!;
+const output = join(directory, "program");
+const cache = new NativeCache(join(directory, "cache"));
+const key = contentDigest("native executable");
+const entry = new NativeExecutableCache(cache, key, linker, false, [library]);
+console.log(toolchainEnvironmentFingerprint({ LANG: "en_US.UTF-8" }));
+console.log(JSON.stringify(toolchainEnvironmentCachePolicy({ LIBRARY_PATH: "/fixture" })));
+console.log(entry.trace([script, library], directory));
+writeFileSync(output, "cached program");
+entry.publish(output);
+rmSync(output);
+console.log(entry.restore(output));
+console.log(readFileSync(output, "utf8"));
+writeFileSync(library, "changed library");
+console.log(entry.restore(output));

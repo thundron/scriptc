@@ -11,48 +11,52 @@ console.log(fib(30));
 $ scriptc run fib.ts
 832040
 
-$ scriptc build fib.ts -o fib && ./fib
+$ scriptc build fib.ts -o fib >/dev/null
+$ ./fib
 832040`;
 
-const COVERAGE_DEMO = `$ scriptc coverage cli.ts
+const COVERAGE_DEMO = `$ cat hello.ts
+const who: string = process.argv.length > 2 ? process.argv[2] : "world";
+console.log(\`hello, \${who}\`);
 
-  statements analyzed   4
-  compile statically    3  (75%)
+$ scriptc coverage hello.ts
 
-  runs with --dynamic   2 sites (embeds a JS engine, ~620KB — static stays the default)
-      ×1  importing 'picocolors' requires the embedded dynamic engine — the package's implementation runs there  SC2013`;
+  statements analyzed   2
+  compile statically    2  (100%)
 
-const tiers = [
+  fully static — all analyzed statements compile to native code.`;
+
+const steps = [
   {
-    title: "Compiled statically",
-    body: "The default. Ordinary TypeScript — classes, closures, async/await, the stdlib, Node's fs/path/process/http surface — becomes native code with no engine in the binary.",
+    title: "Type-check",
+    body: "The TypeScript compiler checks your program against your tsconfig.json. scriptc uses the checked types to choose a native representation for every value.",
   },
   {
-    title: "Runs dynamically",
-    body: "Opt in with --dynamic: an embedded JavaScript engine (~620KB) executes what can't be static — npm dependencies' shipped JS, any-typed code. Every value crossing back into static code is validated at runtime.",
+    title: "Compile",
+    body: "LLVM generates machine code for your program and the npm packages it imports. Anything unsupported is reported with a code, a location, and a hint.",
   },
   {
-    title: "Rejected at compile time",
-    body: "Everything else fails the build with a specific error code, a code frame, and usually a rewrite hint. Nothing is ever silently miscompiled.",
+    title: "Ship",
+    body: "The result is one executable for macOS, Linux, or Windows, or a WebAssembly module. It runs without Node.js installed.",
   },
 ];
 
 const points = [
   {
-    title: "No code changes",
-    body: "No annotations, no dialect, no special stdlib. The same TypeScript you run on Node, type-checked by the real TypeScript compiler.",
+    title: "TypeScript type checking",
+    body: "The compiler uses TypeScript's type information and narrowing rules to select native representations and identify unsupported operations.",
   },
   {
-    title: "Small and fast",
-    body: "A hello-world binary is ~320KB, starts in about 4ms, and links against nothing but libSystem. Node needs a ~120MB runtime and ~35ms to print the same line.",
+    title: "npm packages included",
+    body: "Packages your program imports compile into the executable, which doesn't read node_modules at runtime.",
   },
   {
-    title: "Measured coverage",
-    body: "scriptc coverage tells you, statement by statement, what compiles statically, what needs the dynamic engine, and exactly what blocks the rest.",
+    title: "Cross-compilation",
+    body: "Build for Linux, Windows, and WebAssembly from one machine, and build static libraries for iOS and Android apps.",
   },
   {
-    title: "Differentially tested",
-    body: "Every corpus program runs under Node and as a native binary; stdout, stderr, and exit codes must match byte-for-byte. The whole corpus re-runs under AddressSanitizer.",
+    title: "Tested against Node.js",
+    body: "The test suite runs each test program under Node.js and as a compiled executable and compares their output and exit codes. AddressSanitizer builds check for memory errors.",
   },
 ];
 
@@ -63,7 +67,7 @@ function TerminalPane({ title, code }: { title: string; code: string }) {
         <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
         <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
         <span className="h-2.5 w-2.5 rounded-full bg-gray-500" />
-        <span className="ml-3 font-mono label-12 text-gray-900">{title}</span>
+        <span className="ml-3 font-mono text-label-12 text-gray-900">{title}</span>
       </div>
       <div className="[&>div]:my-0! [&>div]:rounded-none! [&>div]:border-none! [&>div]:bg-transparent!">
         <Code lang="console">{code}</Code>
@@ -74,25 +78,25 @@ function TerminalPane({ title, code }: { title: string; code: string }) {
 
 export default function Home() {
   return (
-    <div>
+    <main id="main-content" tabIndex={-1}>
       {/* Hero */}
       <section className="relative overflow-hidden">
         <div className="relative mx-auto max-w-[1200px] px-6 pt-16 text-center sm:pt-24">
           <p className="font-mono text-[11px] font-medium uppercase tracking-[0.18em] text-gray-900 sm:text-xs sm:tracking-[0.25em]">
             macOS · Linux · Windows
           </p>
-          <h1 className="mx-auto mt-4 max-w-5xl heading-40 text-gray-1000 sm:heading-64 lg:heading-72">
+          <h1 className="mx-auto mt-4 max-w-5xl text-heading-40 text-gray-1000 sm:text-heading-64 lg:text-heading-72">
             TypeScript-to-Native <br className="hidden sm:block" />
             Compiler
           </h1>
-          <p className="mx-auto mt-4 max-w-2xl copy-16 text-gray-900 sm:copy-18">
-            Ordinary TypeScript becomes a small, fast native binary — no Node, no V8, no
-            JavaScript engine required.
+          <p className="mx-auto mt-4 max-w-2xl text-copy-16 text-gray-900 sm:text-copy-18">
+            Compile TypeScript and JavaScript to native executables and WebAssembly.
+            Check compilation support with coverage reports.
           </p>
           <div className="mt-8 flex items-center justify-center gap-3">
             <Link
-              href="/quickstart"
-              className="flex h-10 items-center rounded-md bg-gray-1000 px-5 button-14 text-background-100 transition-opacity hover:opacity-90"
+              href="/docs/quickstart"
+              className="flex h-10 items-center rounded-md bg-gray-1000 px-5 text-label-14 text-background-100 transition-opacity hover:opacity-90"
             >
               Get Started
             </Link>
@@ -100,7 +104,7 @@ export default function Home() {
               href={githubUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex h-10 items-center rounded-md border border-gray-alpha-400 px-5 button-14 text-gray-1000 transition-colors hover:border-gray-alpha-500"
+              className="flex h-10 items-center rounded-md border border-gray-alpha-400 px-5 text-label-14 text-gray-1000 transition-colors hover:border-gray-alpha-500"
             >
               GitHub
             </a>
@@ -111,25 +115,31 @@ export default function Home() {
         </div>
       </section>
 
-      {/* Three tiers */}
+      {/* How it works */}
       <section className="border-t border-gray-alpha-400">
         <div className="mx-auto max-w-[1200px] px-6 py-16">
-          <h2 className="heading-24 text-gray-1000">Three tiers, always explicit</h2>
-          <p className="mt-3 max-w-2xl copy-14 text-gray-900">
-            Every construct in your program lands in exactly one tier, and the tier is the
-            promise.
+          <h2 className="text-heading-24 text-gray-1000">From TypeScript to a native binary</h2>
+          <p className="mt-3 max-w-2xl text-copy-14 text-gray-900">
+            Write the same TypeScript you run on Node.js. {siteName} turns it into machine code in
+            three steps.
           </p>
           <div className="mt-8 grid gap-6 md:grid-cols-3">
-            {tiers.map((tier, i) => (
-              <div key={tier.title} className="rounded-lg border border-gray-alpha-400 p-6">
-                <div className="label-12 font-medium uppercase tracking-wider text-gray-700">
-                  Tier {i + 1}
+            {steps.map((step, i) => (
+              <div key={step.title} className="rounded-lg border border-gray-alpha-400 p-6">
+                <div className="text-label-12 font-medium uppercase tracking-wider text-gray-700">
+                  Step {i + 1}
                 </div>
-                <h3 className="mt-2 heading-16 text-gray-1000">{tier.title}</h3>
-                <p className="mt-2 copy-13 text-gray-900">{tier.body}</p>
+                <h3 className="mt-2 text-heading-16 text-gray-1000">{step.title}</h3>
+                <p className="mt-2 text-copy-13 text-gray-900">{step.body}</p>
               </div>
             ))}
           </div>
+          <Link
+            href="/docs/how-it-works"
+            className="mt-6 inline-block text-label-14 text-gray-1000 underline underline-offset-4"
+          >
+            How it works →
+          </Link>
         </div>
       </section>
 
@@ -138,16 +148,14 @@ export default function Home() {
         <div className="mx-auto max-w-[1200px] px-6 py-16">
           <div className="grid items-center gap-10 lg:grid-cols-2">
             <div>
-              <h2 className="heading-24 text-gray-1000">Staticness you can see</h2>
-              <p className="mt-3 copy-14 text-gray-900">
-                Most TypeScript is far more static than the ecosystem assumes. {siteName}{" "}
-                decides, construct by construct, what can compile to native code — and tells
-                you. A binary never silently grows an engine: the dynamic tier is opt-in, and
-                the coverage report names every site that needs it.
+              <h2 className="text-heading-24 text-gray-1000">Check compilation support</h2>
+              <p className="mt-3 text-copy-14 text-gray-900">
+                Run {siteName} coverage on an existing program to see how much of it compiles
+                before you build. The report explains anything unsupported and suggests a fix.
               </p>
               <Link
-                href="/coverage"
-                className="mt-4 inline-block label-14 text-gray-1000 underline underline-offset-4"
+                href="/docs/coverage"
+                className="mt-4 inline-block text-label-14 text-gray-1000 underline underline-offset-4"
               >
                 Reading coverage reports →
               </Link>
@@ -163,8 +171,8 @@ export default function Home() {
           <div className="grid gap-6 sm:grid-cols-2">
             {points.map((point) => (
               <div key={point.title} className="rounded-lg border border-gray-alpha-400 p-6">
-                <h3 className="heading-16 text-gray-1000">{point.title}</h3>
-                <p className="mt-2 copy-13 text-gray-900">{point.body}</p>
+                <h3 className="text-heading-16 text-gray-1000">{point.title}</h3>
+                <p className="mt-2 text-copy-13 text-gray-900">{point.body}</p>
               </div>
             ))}
           </div>
@@ -174,27 +182,27 @@ export default function Home() {
       {/* Footer CTA */}
       <section className="border-t border-gray-alpha-400">
         <div className="mx-auto max-w-[1200px] px-6 py-16 text-center">
-          <h2 className="heading-24 text-gray-1000">Compile your first binary</h2>
-          <p className="mx-auto mt-3 max-w-xl copy-14 text-gray-900">
-            Clone the repository, build the compiler, and turn a TypeScript file into a native
-            executable in a couple of minutes.
+          <h2 className="text-heading-24 text-gray-1000">Compile your first binary</h2>
+          <p className="mx-auto mt-3 max-w-xl text-copy-14 text-gray-900">
+            Install the CLI, create a TypeScript file, and build an executable. The
+            quickstart covers platform requirements and npm dependencies.
           </p>
           <div className="mt-6 flex justify-center gap-3">
             <Link
-              href="/quickstart"
-              className="flex h-10 items-center rounded-md bg-gray-1000 px-5 button-14 text-background-100 transition-opacity hover:opacity-90"
+              href="/docs/quickstart"
+              className="flex h-10 items-center rounded-md bg-gray-1000 px-5 text-label-14 text-background-100 transition-opacity hover:opacity-90"
             >
               Quickstart
             </Link>
             <Link
-              href="/introduction"
-              className="flex h-10 items-center rounded-md border border-gray-alpha-400 px-5 button-14 text-gray-1000 transition-colors hover:border-gray-alpha-500"
+              href="/docs"
+              className="flex h-10 items-center rounded-md border border-gray-alpha-400 px-5 text-label-14 text-gray-1000 transition-colors hover:border-gray-alpha-500"
             >
               Introduction
             </Link>
           </div>
         </div>
       </section>
-    </div>
+    </main>
   );
 }

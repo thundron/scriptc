@@ -1,0 +1,16 @@
+const prototype = Array.prototype;
+console.log(prototype === Array.prototype, Array.isArray(prototype), prototype.length);
+const value = Object.create(prototype);
+console.log(Array.isArray(value), Object.getPrototypeOf(value) === prototype, value.length);
+value[0] = "a";
+value[1] = "b";
+value.length = 2;
+console.log(value.map(item => item.toUpperCase()).join(","));
+console.log(value.every(item => item.length === 1));
+const detached = value.map;
+console.log(detached.call(value, item => item + "!").join(","));
+console.log(value.map === prototype.map, Object.keys(prototype).join(","));
+prototype.scriptcValue = "inherited";
+console.log(value.scriptcValue);
+delete prototype.scriptcValue;
+console.log(value.scriptcValue);

@@ -1,0 +1,228 @@
+"use strict";
+// A minimal test/common for building Node's test/parallel files with scriptc:
+// the helpers those files use, with the semantics of Node's
+// test/common/index.js. Add a helper here, with Node's semantics, when a
+// lane's files need it.
+const assert = require("assert");
+const os = require("os");
+const { inspect } = require("util");
+
+const hasIntl = true;
+const enoughTestMem = os.totalmem() > 0x70000000; /* 1.75 Gb */
+const isDebug = false;
+const isWindows = process.platform === "win32";
+const isAIX = os.type() === "AIX";
+const isIBMi = os.type() === "OS400";
+const isSunOS = process.platform === "sunos";
+const hasCrypto = Boolean(process.versions.openssl);
+const mustCallChecks = [];
+
+function runCallChecks(exitCode) {
+  if (exitCode !== 0) return;
+  const failed = mustCallChecks.filter((context) => {
+    if ("minimum" in context) return context.actual < context.minimum;
+    return context.actual !== context.exact;
+  });
+  for (const context of failed) {
+    console.log(
+      "Mismatched %s function calls. Expected %s, actual %d.",
+      context.name,
+      String(context.exact ?? context.minimum),
+      context.actual,
+    );
+  }
+  if (failed.length) process.exit(1);
+}
+
+function noop() {}
+
+function mustCallInner(fn, criteria, field) {
+  if (typeof fn === "number") {
+    criteria = fn;
+    fn = noop;
+  } else if (fn === undefined) {
+    fn = noop;
+  }
+  if (criteria === undefined) criteria = 1;
+  const context = { actual: 0, name: fn.name || "<anonymous>" };
+  context[field] = criteria;
+  if (mustCallChecks.length === 0) process.on("exit", runCallChecks);
+  mustCallChecks.push(context);
+  return function (...args) {
+    context.actual++;
+    return fn.apply(this, args);
+  };
+}
+
+function mustCall(fn, exact) {
+  return mustCallInner(fn, exact, "exact");
+}
+
+function mustCallAtLeast(fn, minimum) {
+  return mustCallInner(fn, minimum, "minimum");
+}
+
+function mustSucceed(fn, exact) {
+  return mustCall(function (err, ...args) {
+    assert.ifError(err);
+    if (typeof fn === "function") return fn.apply(this, args);
+  }, exact);
+}
+
+function mustNotCall(msg) {
+  return function mustNotCall() {
+    assert.fail(msg || "function should not have been called");
+  };
+}
+
+function skip(msg) {
+  console.log(`1..0 # Skipped: ${msg}`);
+  process.exit(0);
+}
+
+function skipIf32Bits() {
+  if (process.arch !== "x64" && process.arch !== "arm64")
+    skip("The tested feature is not available in 32bit builds");
+}
+
+function expectWarning(name, expected, code) {
+  if (typeof expected === "string") expected = [[expected, code]];
+  else if (expected.length !== 0 && !Array.isArray(expected[0]))
+    expected = [[expected[0], expected[1]]];
+  const check = mustCall((warning) => {
+    const [message, warningCode] = expected.shift();
+    assert.strictEqual(warning.name, name);
+    if (typeof message === "string") assert.strictEqual(warning.message, message);
+    else assert.match(warning.message, message);
+    assert.strictEqual(warning.code, warningCode);
+  }, expected.length);
+  process.on("warning", (warning) => {
+    if (warning.name !== name)
+      throw new TypeError(`"${warning.name}" was triggered without being expected.`);
+    check(warning);
+  });
+}
+
+function expectsError(validator, exact) {
+  return mustCall((...args) => {
+    if (args.length !== 1) assert.fail(`Expected one argument, got ${inspect(args)}`);
+    const error = args.pop();
+    assert.strictEqual(Object.prototype.propertyIsEnumerable.call(error, "message"), false);
+    assert.throws(() => {
+      throw error;
+    }, validator);
+    return true;
+  }, exact);
+}
+
+function printSkipMessage(msg) {
+  console.log(`1..0 # Skipped: ${msg}`);
+}
+
+function platformTimeout(ms) {
+  if (isAIX || isIBMi) return (typeof ms === "bigint" ? 2n : 2) * ms;
+  return ms;
+}
+
+function invalidArgTypeHelper(input) {
+  if (input == null) return ` Received ${input}`;
+  if (typeof input === "function") return ` Received function ${input.name}`;
+  if (typeof input === "object") {
+    const name = input.constructor?.name;
+    if (typeof name === "string" && name !== "") return ` Received an instance of ${name}`;
+    return ` Received ${inspect(input, { depth: -1 })}`;
+  }
+  let inspected = inspect(input, { colors: false });
+  if (inspected.length > 28) inspected = `${inspected.slice(inspected, 0, 25)}...`;
+  return ` Received type ${typeof input} (${inspected})`;
+}
+
+function getArrayBufferViews(buf) {
+  const { buffer, byteOffset, byteLength } = buf;
+  const out = [];
+  const arrayBufferViews = [
+    Int8Array,
+    Uint8Array,
+    Uint8ClampedArray,
+    Int16Array,
+    Uint16Array,
+    Int32Array,
+    Uint32Array,
+    Float16Array,
+    Float32Array,
+    Float64Array,
+    BigInt64Array,
+    BigUint64Array,
+    DataView,
+  ];
+  for (const type of arrayBufferViews) {
+    const { BYTES_PER_ELEMENT = 1 } = type;
+    if (byteLength % BYTES_PER_ELEMENT === 0)
+      out.push(new type(buffer, byteOffset, byteLength / BYTES_PER_ELEMENT));
+  }
+  return out;
+}
+
+function spawnPromisified(command, args, options) {
+  const { spawn } = require("child_process");
+  let stderr = "";
+  let stdout = "";
+  const child = spawn(command, args, options);
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (data) => {
+    stderr += data;
+  });
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (data) => {
+    stdout += data;
+  });
+  return new Promise((resolve, reject) => {
+    child.on("close", (code, signal) => resolve({ code, signal, stderr, stdout }));
+    child.on("error", (code, signal) => reject({ code, signal, stderr, stdout }));
+  });
+}
+
+module.exports = {
+  enoughTestMem,
+  hasCrypto,
+  hasIntl,
+  isAIX,
+  isDebug,
+  isIBMi,
+  isSunOS,
+  isWindows,
+  mustCall,
+  mustCallAtLeast,
+  mustNotCall,
+  mustSucceed,
+  skip,
+  skipIf32Bits,
+  expectWarning,
+  getArrayBufferViews,
+  expectsError,
+  invalidArgTypeHelper,
+  platformTimeout,
+  printSkipMessage,
+  spawnPromisified,
+  get hasIPv6() {
+    const re = isWindows ? /Loopback Pseudo-Interface/ : isIBMi ? /\*LOOPBACK/ : /lo/;
+    const interfaces = os.networkInterfaces();
+    return Object.keys(interfaces).some(
+      (name) => re.test(name) && interfaces[name].some(({ family }) => family === "IPv6"),
+    );
+  },
+  inFreeBSDJail: false,
+  localhostIPv4: "127.0.0.1",
+  // The helpers below load their modules on first use, so that files of other
+  // lanes do not load node:net or the tmpdir helper.
+  get defaultAutoSelectFamilyAttemptTimeout() {
+    return require("net").getDefaultAutoSelectFamilyAttemptTimeout();
+  },
+  get PIPE() {
+    const path = require("path");
+    const pipePrefix = isWindows
+      ? "\\\\.\\pipe\\"
+      : path.relative(process.cwd(), `${require("./tmpdir").path}/`);
+    return path.join(pipePrefix, `node-test.${process.pid}.sock`);
+  },
+};

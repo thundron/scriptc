@@ -1,35 +1,8 @@
-fetch-static.ts:20:9 - error SC2020: 'Response.arrayBuffer() in a static build' is part of the standard library types but has no scriptc lowering yet
+fetch-static.ts:27:23 - error SC2020: 'Response.arrayBuffer in a static build' is part of the standard library types but has no scriptc lowering yet
 
-  19 | async function arrayBufferBody(url: string): Promise<void> {
-  20 |   await (await fetch(url)).arrayBuffer();
-     |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  21 | }
-
-  hint: use Response.bytes() for the native Uint8Array body; free-standing ArrayBuffer values have no static representation
-
-fetch-static.ts:24:9 - error SC2020: 'Response.arrayBuffer() in a static build' is part of the standard library types but has no scriptc lowering yet
-
-  23 | async function bracketArrayBufferBody(url: string): Promise<void> {
-  24 |   await (await fetch(url))["arrayBuffer"]();
-     |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  25 | }
-
-  hint: use Response.bytes() for the native Uint8Array body; free-standing ArrayBuffer values have no static representation
-
-fetch-static.ts:28:23 - error SC2020: 'Response.arrayBuffer in a static build' is part of the standard library types but has no scriptc lowering yet
-
-  27 | async function bracketArrayBufferRead(url: string): Promise<void> {
-  28 |   const unsupported = (await fetch(url))["arrayBuffer"];
+  26 | async function bracketArrayBufferRead(url: string): Promise<void> {
+  27 |   const unsupported = (await fetch(url))["arrayBuffer"];
      |                       ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-  29 | }
+  28 | }
 
-  hint: the native static Response surface is status/ok/statusText/url/redirected/headers/body/bodyUsed plus json(), text(), and bytes(); use --dynamic for the wider Web API
-
-fetch-static.ts:31:17 - error SC2020: 'new Headers' is part of the standard library types but has no scriptc lowering yet
-
-  30 | bracketArrayBufferRead("http://localhost/e");
-  31 | const headers = new Headers();
-     |                 ^~~~~~~~~~~~~
-  32 | // The Headers constructor remains fenced even though response.headers is native.
-
-  hint: the type checker sees the full standard library, but only the supported surface compiles (https://scriptc.dev/limitations)
+  hint: the native static Response surface is status/ok/statusText/url/redirected/headers/body/bodyUsed plus json(), text(), bytes(), and arrayBuffer(); other forms are unsupported

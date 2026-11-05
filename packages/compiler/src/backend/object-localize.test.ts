@@ -28,7 +28,10 @@ const SHF_EXECINSTR = 0x4n;
 const SHF_GROUP = 0x200n;
 const STB_GLOBAL = 1;
 const STB_WEAK = 2;
+const SHT_SYMTAB_SHNDX = 18;
+const SHN_LORESERVE = 0xff00;
 const SHN_COMMON = 0xfff2;
+const SHN_XINDEX = 0xffff;
 
 interface ElfSymbolSpec {
   name: string;
@@ -53,27 +56,63 @@ function buildStrtab(names: string[]): { data: Uint8Array; offsets: Map<string, 
 
 /** Assemble an ET_REL ELF64LE: caller supplies content sections; the
  * builder appends .symtab, .strtab, .shstrtab (their indices are
- * sections.length, +1, +2). Symbols must list locals first. */
-function buildElf(sections: ElfSectionSpec[], symbols: ElfSymbolSpec[], localCount: number): Uint8Array {
+ * sections.length, +1, +2). Symbols must list locals first. With
+ * SHN_LORESERVE or more sections the builder uses extended section
+ * numbering, appending .symtab_shndx (index sections.length + 3) for symbol
+ * section indices from SHN_LORESERVE up; reserved symbol indices are then
+ * limited to SHN_COMMON. */
+function buildElf(
+  sections: ElfSectionSpec[],
+  symbols: ElfSymbolSpec[],
+  localCount: number,
+): Uint8Array {
   const strtab = buildStrtab(symbols.map((s) => s.name).filter((n) => n !== ""));
   const symData = new Uint8Array((symbols.length + 1) * 24);
   const symView = new DataView(symData.buffer);
+  const shndxData = new Uint8Array((symbols.length + 1) * 4);
+  let usesShndx = false;
   symbols.forEach((sym, i) => {
     const at = (i + 1) * 24;
     symView.setUint32(at, sym.name === "" ? 0 : strtab.offsets.get(sym.name)!, true);
     symView.setUint8(at + 4, (sym.binding << 4) | 0);
-    symView.setUint16(at + 6, sym.shndx, true);
+    if (sym.shndx >= SHN_LORESERVE && sym.shndx !== SHN_COMMON) {
+      symView.setUint16(at + 6, SHN_XINDEX, true);
+      new DataView(shndxData.buffer).setUint32((i + 1) * 4, sym.shndx, true);
+      usesShndx = true;
+    } else {
+      symView.setUint16(at + 6, sym.shndx, true);
+    }
     symView.setBigUint64(at + 8, sym.value ?? 0n, true);
   });
   const all: ElfSectionSpec[] = [
     { name: "", type: 0 },
     ...sections,
-    { name: ".symtab", type: SHT_SYMTAB, data: symData, link: sections.length + 2, info: localCount + 1, entsize: 24n },
+    {
+      name: ".symtab",
+      type: SHT_SYMTAB,
+      data: symData,
+      link: sections.length + 2,
+      info: localCount + 1,
+      entsize: 24n,
+    },
     { name: ".strtab", type: SHT_STRTAB, data: strtab.data },
     { name: ".shstrtab", type: SHT_STRTAB },
+    ...(usesShndx
+      ? [
+          {
+            name: ".symtab_shndx",
+            type: SHT_SYMTAB_SHNDX,
+            data: shndxData,
+            link: sections.length + 1,
+            entsize: 4n,
+          },
+        ]
+      : []),
   ];
+  const shstrndx = sections.length + 3;
+  const extended = all.length >= SHN_LORESERVE;
   const shstr = buildStrtab(all.map((s) => s.name).filter((n) => n !== ""));
-  all[all.length - 1]!.data = shstr.data;
+  all[shstrndx]!.data = shstr.data;
   let offset = 64;
   const offsets = all.map((s) => {
     const data = s.data ?? new Uint8Array(0);
@@ -95,8 +134,8 @@ function buildElf(sections: ElfSectionSpec[], symbols: ElfSymbolSpec[], localCou
   view.setBigUint64(40, BigInt(shoff), true);
   view.setUint16(52, 64, true);
   view.setUint16(58, 64, true);
-  view.setUint16(60, all.length, true);
-  view.setUint16(62, all.length - 1, true);
+  view.setUint16(60, extended ? 0 : all.length, true);
+  view.setUint16(62, shstrndx >= SHN_LORESERVE ? SHN_XINDEX : shstrndx, true);
   all.forEach((s, i) => {
     const at = shoff + i * 64;
     const data = s.data ?? new Uint8Array(0);
@@ -105,8 +144,8 @@ function buildElf(sections: ElfSectionSpec[], symbols: ElfSymbolSpec[], localCou
     view.setUint32(at + 4, s.type, true);
     view.setBigUint64(at + 8, s.flags ?? 0n, true);
     view.setBigUint64(at + 24, BigInt(s.type === 0 ? 0 : offsets[i]!), true);
-    view.setBigUint64(at + 32, BigInt(data.length), true);
-    view.setUint32(at + 40, s.link ?? 0, true);
+    view.setBigUint64(at + 32, BigInt(i === 0 && extended ? all.length : data.length), true);
+    view.setUint32(at + 40, i === 0 && shstrndx >= SHN_LORESERVE ? shstrndx : (s.link ?? 0), true);
     view.setUint32(at + 44, s.info ?? 0, true);
     view.setBigUint64(at + 48, s.addralign ?? 1n, true);
     view.setBigUint64(at + 56, s.entsize ?? 0n, true);
@@ -116,7 +155,14 @@ function buildElf(sections: ElfSectionSpec[], symbols: ElfSymbolSpec[], localCou
 
 /* Tiny independent reader for assertions. */
 interface ReadElf {
-  sections: { name: string; type: number; flags: bigint; link: number; info: number; data: Uint8Array }[];
+  sections: {
+    name: string;
+    type: number;
+    flags: bigint;
+    link: number;
+    info: number;
+    data: Uint8Array;
+  }[];
   symbols: { name: string; binding: number; shndx: number }[];
   symtabInfo: number;
 }
@@ -124,9 +170,19 @@ interface ReadElf {
 function readElf(bytes: Uint8Array): ReadElf {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const shoff = Number(view.getBigUint64(40, true));
-  const shnum = view.getUint16(60, true);
-  const shstrndx = view.getUint16(62, true);
-  const raw = [] as { nameOff: number; type: number; flags: bigint; offset: number; size: number; link: number; info: number }[];
+  let shnum = view.getUint16(60, true);
+  let shstrndx = view.getUint16(62, true);
+  if (shnum === 0) shnum = Number(view.getBigUint64(shoff + 32, true));
+  if (shstrndx === SHN_XINDEX) shstrndx = view.getUint32(shoff + 40, true);
+  const raw = [] as {
+    nameOff: number;
+    type: number;
+    flags: bigint;
+    offset: number;
+    size: number;
+    link: number;
+    info: number;
+  }[];
   for (let i = 0; i < shnum; i++) {
     const at = shoff + i * 64;
     raw.push({
@@ -156,12 +212,16 @@ function readElf(bytes: Uint8Array): ReadElf {
   const symtabIdx = raw.findIndex((s) => s.type === SHT_SYMTAB);
   const symtab = raw[symtabIdx]!;
   const strtab = raw[symtab.link]!;
+  const shndxTable = raw.find((s) => s.type === SHT_SYMTAB_SHNDX && s.link === symtabIdx);
   const symbols = [] as ReadElf["symbols"];
   for (let at = symtab.offset; at < symtab.offset + symtab.size; at += 24) {
+    let shndx = view.getUint16(at + 6, true);
+    if (shndx === SHN_XINDEX)
+      shndx = view.getUint32(shndxTable!.offset + ((at - symtab.offset) / 24) * 4, true);
     symbols.push({
       name: name(strtab, view.getUint32(at, true)),
       binding: view.getUint8(at + 4) >> 4,
-      shndx: view.getUint16(at + 6, true),
+      shndx,
     });
   }
   return { sections, symbols, symtabInfo: symtab.info };
@@ -176,7 +236,12 @@ describe("localizeElfObject", () => {
     relaView.setBigUint64(8, (3n << 32n) | 2n, true); // sym 3 (helper), R_X86_64_PC32
     const object = buildElf(
       [
-        { name: ".text", type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR, data: new Uint8Array(16) },
+        {
+          name: ".text",
+          type: SHT_PROGBITS,
+          flags: SHF_ALLOC | SHF_EXECINSTR,
+          data: new Uint8Array(16),
+        },
         { name: ".rela.text", type: SHT_RELA, data: rela, link: 3, info: 1, entsize: 24n },
       ],
       [
@@ -210,6 +275,65 @@ describe("localizeElfObject", () => {
     expect(info & 0xffffffffn).toBe(2n);
   });
 
+  test("keeps extended section numbering when the object has SHN_LORESERVE or more sections", () => {
+    // A sanitized dev program merges into an object with more sections than
+    // e_shnum and st_shndx can index: section 0 carries the count and the
+    // section-name table's index, and .symtab_shndx the symbols' indices.
+    const count = SHN_LORESERVE + 400;
+    const texts: ElfSectionSpec[] = Array.from({ length: count }, (_, i) => ({
+      name: `.text.f${i}`,
+      type: SHT_PROGBITS,
+      flags: SHF_ALLOC | SHF_EXECINSTR,
+      data: new Uint8Array(4),
+    }));
+    const rela = new Uint8Array(24);
+    new DataView(rela.buffer).setBigUint64(8, (2n << 32n) | 2n, true); // sym 2 (high)
+    const object = buildElf(
+      [
+        ...texts,
+        {
+          name: ".rela.text.last",
+          type: SHT_RELA,
+          data: rela,
+          link: count + 2,
+          info: count,
+          entsize: 24n,
+        },
+      ],
+      [
+        { name: "low", binding: STB_GLOBAL, shndx: 1 },
+        { name: "high", binding: STB_GLOBAL, shndx: count },
+        { name: "main", binding: STB_GLOBAL, shndx: count - 1 },
+        { name: "libc_ref", binding: STB_GLOBAL, shndx: 0 },
+        { name: "shared_common", binding: STB_GLOBAL, shndx: SHN_COMMON, value: 8n },
+      ],
+      0,
+    );
+    const output = localizeElfObject(object, new Set(["main"]));
+    const header = new DataView(output.buffer, output.byteOffset, output.byteLength);
+    expect(header.getUint16(60, true)).toBe(0);
+    expect(header.getUint16(62, true)).toBe(SHN_XINDEX);
+    const localized = readElf(output);
+    expect(localized.sections.length).toBe(count + 6);
+    expect(localized.sections.filter((s) => s.type === SHT_SYMTAB_SHNDX)).toHaveLength(1);
+    const byName = new Map(localized.symbols.map((s) => [s.name, s]));
+    expect(byName.get("low")!.binding).toBe(0);
+    expect(byName.get("high")!.binding).toBe(0);
+    expect(localized.sections[byName.get("high")!.shndx]!.name).toBe(`.text.f${count - 1}`);
+    expect(byName.get("main")!.binding).toBe(STB_GLOBAL);
+    expect(localized.sections[byName.get("main")!.shndx]!.name).toBe(`.text.f${count - 2}`);
+    expect(byName.get("libc_ref")!.shndx).toBe(0);
+    expect(byName.get("shared_common")!.shndx).toBe(SHN_COMMON);
+    const relaOut = localized.sections.find((s) => s.name === ".rela.text.last")!;
+    expect(localized.sections[relaOut.info]!.name).toBe(`.text.f${count - 1}`);
+    const info = new DataView(relaOut.data.buffer, relaOut.data.byteOffset).getBigUint64(8, true);
+    expect(localized.symbols[Number(info >> 32n)]!.name).toBe("high");
+    // The output reads back as the same object.
+    expect(readElf(localizeElfObject(output, new Set(["main"]))).symbols).toEqual(
+      localized.symbols,
+    );
+  });
+
   test("resolves section groups: SHT_GROUP dropped, SHF_GROUP cleared, members and indices intact", () => {
     const group = new Uint8Array(8);
     const groupView = new DataView(group.buffer);
@@ -218,7 +342,12 @@ describe("localizeElfObject", () => {
     const object = buildElf(
       [
         { name: ".group", type: SHT_GROUP, data: group, link: 3, info: 2, entsize: 4n },
-        { name: ".text.grouped", type: SHT_PROGBITS, flags: SHF_ALLOC | SHF_EXECINSTR | SHF_GROUP, data: new Uint8Array(4) },
+        {
+          name: ".text.grouped",
+          type: SHT_PROGBITS,
+          flags: SHF_ALLOC | SHF_EXECINSTR | SHF_GROUP,
+          data: new Uint8Array(4),
+        },
       ],
       [
         { name: "", binding: 0, shndx: 1 }, // the group's own section symbol
@@ -342,7 +471,12 @@ function buildCoff(sections: CoffSectionSpec[], symbols: CoffSymbolSpec[]): Uint
 }
 
 interface ReadCoff {
-  sections: { name: string; characteristics: number; data: Uint8Array; relocs: { sym: number }[] }[];
+  sections: {
+    name: string;
+    characteristics: number;
+    data: Uint8Array;
+    relocs: { sym: number }[];
+  }[];
   symbols: { name: string; section: number; storageClass: number; index: number }[];
 }
 
@@ -367,7 +501,8 @@ function readCoff(bytes: Uint8Array): ReadCoff {
     const relocAt = view.getUint32(h + 24, true);
     const relocCount = view.getUint16(h + 32, true);
     const relocs = [] as { sym: number }[];
-    for (let r = 0; r < relocCount; r++) relocs.push({ sym: view.getUint32(relocAt + r * 10 + 4, true) });
+    for (let r = 0; r < relocCount; r++)
+      relocs.push({ sym: view.getUint32(relocAt + r * 10 + 4, true) });
     sections.push({
       name,
       characteristics: view.getUint32(h + 36, true),
@@ -376,7 +511,7 @@ function readCoff(bytes: Uint8Array): ReadCoff {
     });
   }
   const symbols = [] as ReadCoff["symbols"];
-  for (let i = 0; i < symbolCount; ) {
+  for (let i = 0; i < symbolCount;) {
     const a = symtabAt + i * 18;
     const name =
       view.getUint32(a, true) === 0
@@ -546,9 +681,7 @@ describe("mergeAndLocalizeCoffObjects", () => {
       ],
     );
 
-    const merged = readCoff(
-      mergeAndLocalizeCoffObjects([program], [needed, alternate], new Set()),
-    );
+    const merged = readCoff(mergeAndLocalizeCoffObjects([program], [needed, alternate], new Set()));
     const byName = new Map(merged.symbols.map((s) => [s.name, s]));
     expect(byName.has("alternate_only")).toBe(false);
     expect(merged.sections.filter((s) => s.name === ".text")).toHaveLength(2);
@@ -598,7 +731,9 @@ describe("mergeAndLocalizeCoffObjects", () => {
         { name: ".refptr.shared", section: 2 },
       ],
     );
-    const merged = readCoff(mergeAndLocalizeCoffObjects([program], [support], new Set(["keep_me"])));
+    const merged = readCoff(
+      mergeAndLocalizeCoffObjects([program], [support], new Set(["keep_me"])),
+    );
     // One survivor section carries the stub; no COMDAT flag remains anywhere.
     const rdata = merged.sections.filter((s) => s.name === ".rdata");
     expect(rdata.length).toBe(1);
@@ -611,13 +746,77 @@ describe("mergeAndLocalizeCoffObjects", () => {
     expect(stubs[0]!.storageClass).toBe(IMAGE_SYM_CLASS_STATIC);
   });
 
+  test("private COMDAT code and leaderless unwind sections retain each object's relocations", () => {
+    const member = (name: string, marker: number): Uint8Array =>
+      buildCoff(
+        [
+          {
+            name: ".text",
+            data: new Uint8Array([marker]),
+            characteristics: 0x60000020 | IMAGE_SCN_LNK_COMDAT,
+            comdatSelection: 1,
+          },
+          {
+            name: ".xdata",
+            data: new Uint8Array([marker + 10]),
+            characteristics: 0x40000040 | IMAGE_SCN_LNK_COMDAT,
+            comdatSelection: 2,
+          },
+          {
+            name: ".pdata",
+            data: new Uint8Array(8),
+            relocs: [
+              { va: 0, sym: 2, type: 3 },
+              { va: 4, sym: 3, type: 3 },
+            ],
+          },
+        ],
+        [
+          { name: ".text", section: 1, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
+          { name: "private_fn", section: 1, storageClass: IMAGE_SYM_CLASS_STATIC },
+          { name: ".xdata", section: 2, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
+          { name: ".pdata", section: 3, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
+          { name, section: 1 },
+        ],
+      );
+    const merged = readCoff(
+      mergeAndLocalizeCoffObjects(
+        [member("first", 1), member("second", 2)],
+        [],
+        new Set(["first", "second"]),
+      ),
+    );
+    expect(merged.sections).toHaveLength(6);
+    expect(merged.sections.filter((s) => s.name === ".text").map((s) => [...s.data])).toEqual([
+      [1],
+      [2],
+    ]);
+    expect(merged.sections.filter((s) => s.name === ".xdata").map((s) => [...s.data])).toEqual([
+      [11],
+      [12],
+    ]);
+    for (const section of merged.sections)
+      expect(section.characteristics & IMAGE_SCN_LNK_COMDAT).toBe(0);
+    const byIndex = new Map(merged.symbols.map((s) => [s.index, s]));
+    const pdata = merged.sections.filter((s) => s.name === ".pdata");
+    expect(pdata.map((s) => s.relocs.map((r) => byIndex.get(r.sym)?.section))).toEqual([
+      [1, 2],
+      [4, 5],
+    ]);
+  });
+
   const comdatPair = (
     selection: number,
     firstData: Uint8Array,
     secondData: Uint8Array,
   ): { program: Uint8Array; support: Uint8Array[] } => {
     const program = buildCoff(
-      [text([{ va: 0, sym: 3, type: 4 }, { va: 4, sym: 4, type: 4 }])],
+      [
+        text([
+          { va: 0, sym: 3, type: 4 },
+          { va: 4, sym: 4, type: 4 },
+        ]),
+      ],
       [
         { name: ".text", section: 1, storageClass: IMAGE_SYM_CLASS_STATIC, sectionDef: true },
         { name: "entry", section: 1 },
@@ -648,7 +847,9 @@ describe("mergeAndLocalizeCoffObjects", () => {
 
   test("COMDAT LARGEST retains the largest selected definition", () => {
     const pair = comdatPair(6, new Uint8Array([1, 2, 3, 4]), new Uint8Array([5, 6, 7, 8, 9]));
-    const merged = readCoff(mergeAndLocalizeCoffObjects([pair.program], pair.support, new Set(["entry"])));
+    const merged = readCoff(
+      mergeAndLocalizeCoffObjects([pair.program], pair.support, new Set(["entry"])),
+    );
     const rdata = merged.sections.filter((section) => section.name === ".rdata");
     expect(rdata).toHaveLength(1);
     expect([...rdata[0]!.data]).toEqual([5, 6, 7, 8, 9]);
@@ -723,8 +924,9 @@ describe("mergeAndLocalizeCoffObjects", () => {
   test("COMDAT duplicates refuse conflicting selection kinds", () => {
     const one = comdatPair(2, new Uint8Array(4), new Uint8Array(4));
     const two = comdatPair(3, new Uint8Array(4), new Uint8Array(4));
-    expect(() => mergeAndLocalizeCoffObjects([one.program], [one.support[0]!, two.support[1]!], new Set()))
-      .toThrow(/conflicting COMDAT selections/);
+    expect(() =>
+      mergeAndLocalizeCoffObjects([one.program], [one.support[0]!, two.support[1]!], new Set()),
+    ).toThrow(/conflicting COMDAT selections/);
   });
 
   test("duplicate strong definitions refuse with both members named", () => {

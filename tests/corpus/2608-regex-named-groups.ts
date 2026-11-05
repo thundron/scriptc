@@ -45,8 +45,6 @@ console.log(size.exec("14px")!.groups!.len, size.exec("9em")!.groups!.len);
 const kv = /(?<one>1)(?<two>2)(?<three>3)/.exec("123")!.groups!;
 console.log(JSON.stringify(kv), Object.keys(kv).join(","));
 
-// Truthiness of a nonparticipating group's value agrees with Node
-// (divergence 51: the slot reads "" where Node holds undefined — both
-// falsy, so only the guarded form is byte-comparable).
+// Nonparticipating groups preserve undefined and remain own properties.
 const opt = /(?<head>x)(?<tail>y)?/.exec("x")!.groups!;
 console.log(opt.head, opt.tail ? opt.tail : "(none)");

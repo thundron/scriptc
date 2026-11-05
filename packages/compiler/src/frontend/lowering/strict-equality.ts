@@ -2,6 +2,7 @@ import { keyedHelperName } from "./stable-names.js";
 import { boolLit, varRef } from "../../ir/build.js";
 import {
   BOOL,
+  DYN,
   DYN_HANDLE_KINDS,
   type IrExpr,
   type IrType,
@@ -62,6 +63,23 @@ function atomicEquality(
     else if (lowerer.isSubclassOf(b.className, a.className))
       right = lowerer.upcastTo(right, a.className);
     else return boolLit(false, loc);
+  }
+  if (
+    a.kind === "record" &&
+    b.kind === "record" &&
+    !typeEquals(a, b) &&
+    lowerer.dynConvertible(a) &&
+    lowerer.dynConvertible(b)
+  ) {
+    // Different layouts can be shared views of one object. Compare their
+    // live capsules, never a width conversion that allocates a fresh copy.
+    return {
+      kind: "dynScalarEq",
+      left: lowerer.coerceToExpected(left, DYN),
+      right: lowerer.coerceToExpected(right, DYN),
+      type: BOOL,
+      loc,
+    };
   }
   if (a.kind !== b.kind) {
     // A structural record can represent a class view. A different layout

@@ -61,6 +61,48 @@ async function run(command: string, args: string[]) {
 }
 
 describe.runIf(supported)("LLVM native helper integration", () => {
+  test("partitioned dev coroutines release selector metadata before the LLVM context", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "scriptc-helper-context-lifetime-"));
+    dirs.push(dir);
+    const input = join(dir, "promise.ll");
+    const prepared = await compile(join(repoRoot, "tests/corpus/5040-promise-all-race-turns.ts"), {
+      outDir: dir,
+      outPath: input,
+      outputKind: "llvm",
+      optimization: "dev",
+    });
+    if (!prepared.ok)
+      throw new Error(prepared.diagnostics.map((diagnostic) => diagnostic.message).join("\n"));
+    // A fresh cache each time forces every selector destructor to execute.
+    // Scribbling freed memory stresses tracking metadata's owner lifetime.
+    for (let iteration = 0; iteration < 12; iteration++) {
+      const args = ["emit", "--input", input];
+      for (let part = 0; part < 8; part++)
+        args.push("--output", join(dir, `part-${iteration}-${part}.o`));
+      args.push(
+        "--filetype",
+        "obj",
+        "--target",
+        MACOS_ARM64_TARGET.llvmTriple,
+        "--opt-level",
+        "0",
+        "--relocation-model",
+        "pic",
+        "--diagnostic-format",
+        "json",
+        "--cache-dir",
+        join(dir, `cache-${iteration}`),
+      );
+      const result = await execFileAsync(helper, args, {
+        encoding: "utf8",
+        timeout: 15_000,
+        env: { ...process.env, MallocScribble: "1", MallocNanoZone: "0" },
+      });
+      expect(result.stderr).toBe("");
+      expect((await stat(join(dir, `part-${iteration}-0.o`))).size).toBeGreaterThan(0);
+    }
+  });
+
   test("dev helper-object emission does not prepare unused program shards", async () => {
     const dir = await mkdtemp(join(tmpdir(), "scriptc-helper-dev-"));
     dirs.push(dir);

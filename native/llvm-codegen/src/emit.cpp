@@ -989,12 +989,14 @@ compileUnoptimizedPartitions(const EmitOptions &Options,
       Objects[I].assign(Hit->getBufferStart(), Hit->getBufferEnd());
       return;
     }
+    // Target-machine selectors retain tracking metadata references. Their
+    // destructors must run while the partition's LLVMContext is still alive.
+    LLVMContext Context;
     std::string LookupError;
     std::unique_ptr<TargetMachine> Machine =
         createTargetMachine(Options.Target, Options.OptLevel, LookupError);
     if (!Machine)
       return Failures.set({"target_machine_failed", LookupError});
-    LLVMContext Context;
     Expected<std::unique_ptr<Module>> Mod =
         loadPartition(Options, Plan.Modules[I], I, Context, *Machine);
     if (!Mod)
@@ -1044,12 +1046,14 @@ compileOptimizedPartitions(const EmitOptions &Options,
       }
       return;
     }
+    // Target-machine selectors retain tracking metadata references. Their
+    // destructors must run while the partition's LLVMContext is still alive.
+    LLVMContext Context;
     std::string LookupError;
     std::unique_ptr<TargetMachine> Machine =
         createTargetMachine(Options.Target, Options.OptLevel, LookupError);
     if (!Machine)
       return Failures.set({"target_machine_failed", LookupError});
-    LLVMContext Context;
     ProfileMatch PartitionMatch;
     std::vector<std::string> MismatchedNames;
     if (Annotating)
@@ -1648,12 +1652,12 @@ emitSplitCodegen(const EmitOptions &Options, Module &M, TargetMachine &Machine,
         Failures.set(std::move(*Failure));
       return;
     }
+    LLVMContext Context;
     std::string LookupError;
     std::unique_ptr<TargetMachine> PartMachine =
         createTargetMachine(Options.Target, Options.OptLevel, LookupError);
     if (!PartMachine)
       return Failures.set({"target_machine_failed", LookupError});
-    LLVMContext Context;
     std::unique_ptr<Module> Part;
     if (Split) {
       Expected<std::unique_ptr<Module>> Parsed = parseBitcodeFile(

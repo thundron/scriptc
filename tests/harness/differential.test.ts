@@ -449,6 +449,7 @@ async function compileAndRun(rel: string, file: string): Promise<RunResult> {
       outPath: join(outDir, process.platform === "win32" ? "program.exe" : "program"),
       outDir,
       sanitize,
+      ...(requiresLibnode(file) ? {} : { nodeIslands: { mode: "off" as const } }),
       backend: "llvm",
       ...(speed ? { optimization: "speed" as const } : {}),
     }),

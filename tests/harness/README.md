@@ -94,3 +94,5 @@ For the external development toolchain, environment variables that can resolve m
 ## Test262
 
 The default static compiler has a pinned Test262 regression profile and a separate full-snapshot survey runner. See [tests/test262/README.md](../test262/README.md) for commands, outcome reporting, and the current strict-script and scalar-assertion limits. Both plain and sanitized Sandbox lanes run the regression profile.
+
+Native differential corpus builds explicitly use `node-islands=off`, so an automatic Node retry cannot make a native-code comparison pass. Programs marked `@requires-libnode` retain their Node-island policy and need the provisioned pack. ICU-dependent directory programs carry `@requires-icu` like flat programs; missing optional packs are reported as platform skips rather than silently substituted runtimes.

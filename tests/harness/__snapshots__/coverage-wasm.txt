@@ -4,8 +4,8 @@ scriptc coverage tests/coverage-fixtures/wasm/main.ts
   compile statically    9  (100%)
     in dynamic tier     1  (operate on values typed only at runtime; --explain-dynamic lists them)
 
-  npm package compilation:
-    wasm-fixture-pkg  static
+  npm package source admission:
+    wasm-fixture-pkg  admitted
 
   WebAssembly modules: (found at build time; valid ones compile to native code)
     inline module  39 bytes  valid

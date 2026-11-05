@@ -16,6 +16,8 @@ export function withLibraryRuntimeFlavors(matrix) {
     "scr_zlib.c",
     "scr_x509.c",
     "scr_copying.c",
+    "scr_decl_adopt.c",
+    "scr_type_origin.c",
     "scr_dyn_invoke.c",
     "scr_bytes_dyn.c",
     "scr_js_value.c",

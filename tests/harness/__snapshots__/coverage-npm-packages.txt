@@ -4,8 +4,8 @@ scriptc coverage tests/corpus/native-npm-imports/main.ts
   compile statically    14  (100%)
     in dynamic tier     1  (operate on values typed only at runtime; --explain-dynamic lists them)
 
-  npm package compilation:
-    mathkit      static
-    @acme/units  static
+  npm package source admission:
+    mathkit      admitted
+    @acme/units  admitted
 
   fully static — all analyzed statements compile to native code.

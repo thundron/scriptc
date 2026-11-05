@@ -259,6 +259,54 @@ async function main(args: string[], host: CliHost): Promise<number> {
   if (command !== "build" && command !== "run" && command !== "coverage") {
     fail(`unknown command "${command}"\n\n${USAGE}`);
   }
+  if (values.lib && command === "coverage") {
+    if (!values.profile || inputArg)
+      fail("scriptc coverage --lib requires --profile and no input positional");
+    if (
+      values.emit !== undefined ||
+      values.out !== undefined ||
+      values.sanitize ||
+      values.optimization !== undefined ||
+      values["emit-ir"] ||
+      values.static ||
+      values.strip ||
+      values["explain-dynamic"] ||
+      values["provenance-sources"] ||
+      values.tier !== undefined ||
+      values.ffi !== undefined ||
+      values.backend !== undefined ||
+      (values["npm-static"] ?? []).length ||
+      externalTypeArgs.length ||
+      hasNodeIslandFlags(values)
+    )
+      fail("library coverage takes its graph and policy from the profile");
+    if (values.print !== undefined && values.print !== "diagnostics")
+      fail("library coverage supports --print=diagnostics");
+    const requested = values["fail-on"];
+    if (requested !== undefined && !(COVERAGE_FAIL_ON as readonly string[]).includes(requested))
+      fail("unknown --fail-on value");
+    const result = await host.analyze(resolve(values.profile), {
+      libraryProfilePath: resolve(values.profile),
+    });
+    const failOn = requested as CoverageFailOn | undefined;
+    process.stdout.write(
+      values.print === "diagnostics"
+        ? JSON.stringify(
+            coverageEnvelope(result.coverage, {
+              compilerVersion: host.version(),
+              sourceTexts: result.sourceTexts,
+              ...(failOn ? { failOn } : {}),
+            }),
+            null,
+            2,
+          ) + "\n"
+        : renderCoverage(result.coverage, {
+            sourceTexts: result.sourceTexts,
+            root: process.cwd(),
+          }) + "\n",
+    );
+    return coveragePasses(result.coverage, failOn) ? 0 : 1;
+  }
   if (values.lib) {
     // LIBRARY mode: the profile names the entry module and pins the
     // emission; the executable lane's mode flags have no meaning here

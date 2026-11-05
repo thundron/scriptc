@@ -1,4 +1,13 @@
-export type WasmValueClass = "f64" | "i32" | "string" | "bytes" | "void";
+import type { LibraryProfile } from "../library/library-profile.js";
+export type WasmValueClass =
+  | "f64"
+  | "i32"
+  | "i64"
+  | "u64"
+  | "string"
+  | "bytes"
+  | "cstring"
+  | "void";
 
 export interface WasmImportSig {
   module: string;
@@ -25,7 +34,7 @@ function isPair(c: WasmValueClass): boolean {
 }
 
 function assertResultScalar(where: string, name: string, result: WasmValueClass): void {
-  if (result === "string" || result === "bytes") {
+  if (result === "string" || result === "bytes" || result === "cstring") {
     throw new Error(
       `wasm-glue: ${where} '${name}' returns '${result}', but string/bytes results are not supported in the wasm host-import ABI (return a scalar or void, or write into a caller buffer)`,
     );
@@ -41,6 +50,10 @@ function importParams(params: WasmValueClass[]): { wasmParams: string[]; jsArgs:
       const l = `l${i}`;
       wasmParams.push(p, l);
       jsArgs.push(c === "string" ? `readStr(${p}, ${l})` : `readBytes(${p}, ${l})`);
+    } else if (c === "cstring") {
+      const p = `p${i}`;
+      wasmParams.push(p);
+      jsArgs.push(`readCstr(${p})`);
     } else if (c === "void") {
     } else {
       const a = `a${i}`;
@@ -55,12 +68,10 @@ function exportArgs(params: WasmValueClass[]): {
   jsParams: string[];
   pre: string[];
   wasmArgs: string[];
-  post: string[];
 } {
   const jsParams: string[] = [];
   const pre: string[] = [];
   const wasmArgs: string[] = [];
-  const post: string[] = [];
   params.forEach((c, i) => {
     if (c === "void") return;
     const a = `a${i}`;
@@ -70,12 +81,17 @@ function exportArgs(params: WasmValueClass[]): {
       const l = `l${i}`;
       pre.push(`const [${p}, ${l}] = ${c === "string" ? "passStr" : "passBytes"}(${a});`);
       wasmArgs.push(p, l);
-      post.push(`freeStaged(${p}, ${l});`);
+      pre.push(`staged.push([${p}, ${l}]);`);
+    } else if (c === "cstring") {
+      const p = `p${i}`,
+        l = `l${i}`;
+      pre.push(`const [${p}, ${l}] = passCstr(${a});`, `staged.push([${p}, ${l}]);`);
+      wasmArgs.push(p);
     } else {
       wasmArgs.push(a);
     }
   });
-  return { jsParams, pre, wasmArgs, post };
+  return { jsParams, pre, wasmArgs };
 }
 
 function emitImportGroup(module: string, sigs: WasmImportSig[]): string {
@@ -95,23 +111,40 @@ function emitImportGroup(module: string, sigs: WasmImportSig[]): string {
 }
 
 function emitExportWrapper(sig: WasmExportSig): string {
-  assertResultScalar("export", sig.name, sig.result);
-  const { jsParams, pre, wasmArgs, post } = exportArgs(sig.params);
-  const call = `exports[${JSON.stringify(sig.name)}](${wasmArgs.join(", ")})`;
-  const lines: string[] = [];
-  lines.push(`    ${JSON.stringify(sig.name)}: (${jsParams.join(", ")}) => {`);
-  for (const p of pre) lines.push(`      ${p}`);
-  if (sig.result === "void") {
-    lines.push(`      ${call};`);
-    for (const p of post) lines.push(`      ${p}`);
-  } else if (post.length === 0) {
-    lines.push(`      return ${call};`);
-  } else {
-    lines.push(`      const r = ${call};`);
-    for (const p of post) lines.push(`      ${p}`);
-    lines.push(`      return r;`);
+  const { jsParams, pre, wasmArgs } = exportArgs(sig.params);
+  const pair = isPair(sig.result);
+  const staged = pre.length > 0 || pair;
+  const lines = [`    ${JSON.stringify(sig.name)}: (${jsParams.join(", ")}) => {`];
+  if (staged) lines.push("      const staged = [];", "      try {");
+  const indent = staged ? "        " : "      ";
+  for (const line of pre) {
+    lines.push(indent + line);
   }
-  lines.push(`    },`);
+  if (pair) {
+    lines.push(`${indent}const out = exports.scriptc_alloc(8);`, `${indent}staged.push([out, 8]);`);
+    lines.push(
+      `${indent}exports[${JSON.stringify(sig.name)}](${[...wasmArgs, "out", "out + 4"].join(", ")});`,
+    );
+    lines.push(`${indent}const result = new DataView(exports.memory.buffer);`);
+    lines.push(
+      `${indent}const p = result.getUint32(out, true), l = result.getUint32(out + 4, true);`,
+    );
+    lines.push(
+      `${indent}return ${sig.result === "string" ? "readStr(p, l)" : "readBytes(p, l).slice()"};`,
+    );
+  } else {
+    const call = `exports[${JSON.stringify(sig.name)}](${wasmArgs.join(", ")})`;
+    lines.push(
+      `${indent}${sig.result === "void" ? "" : "return "}${sig.result === "cstring" ? `readCstr(${call})` : sig.result === "u64" ? `BigInt.asUintN(64, ${call})` : call};`,
+    );
+  }
+  if (staged)
+    lines.push(
+      "      } finally {",
+      "        for (let i = staged.length - 1; i >= 0; i--) freeStaged(staged[i][0], staged[i][1]);",
+      "      }",
+    );
+  lines.push("    },");
   return lines.join("\n");
 }
 
@@ -137,8 +170,19 @@ const te = new TextEncoder();
 function bindHost(host, getExports) {
   let exports;
   const mem = () => new Uint8Array(exports.memory.buffer);
-  const readStr = (ptr, len) => td.decode(mem().subarray(ptr, ptr + len));
-  const readBytes = (ptr, len) => mem().subarray(ptr, ptr + len);
+  const readBytes = (ptr, len) => {
+    ptr >>>= 0; len >>>= 0;
+    const bytes = mem();
+    if (ptr > bytes.length || len > bytes.length - ptr) throw new RangeError("wasm byte span is outside memory");
+    return bytes.subarray(ptr, ptr + len);
+  };
+  const readStr = (ptr, len) => td.decode(readBytes(ptr, len));
+  const readCstr = (ptr) => {
+    ptr >>>= 0;
+    const bytes = mem(), end = bytes.indexOf(0, ptr);
+    if (ptr >= bytes.length || end < 0) throw new RangeError("wasm cstring is outside memory or unterminated");
+    return td.decode(bytes.subarray(ptr, end));
+  };
   const passStr = (s) => {
     const b = te.encode(s);
     const p = exports.scriptc_alloc(b.length);
@@ -149,6 +193,13 @@ function bindHost(host, getExports) {
     const p = exports.scriptc_alloc(u8.length);
     mem().set(u8, p);
     return [p, u8.length];
+  };
+  const passCstr = (text) => {
+    if (text.includes("\\0")) throw new TypeError("cstring cannot contain NUL");
+    const bytes = te.encode(text), size = bytes.length + 1;
+    const ptr = exports.scriptc_alloc(size);
+    mem().set(bytes, ptr); mem()[ptr + bytes.length] = 0;
+    return [ptr, size];
   };
   const freeStaged = (p, l) => { exports.scriptc_free && exports.scriptc_free(p, l); };
 
@@ -233,4 +284,37 @@ export async function instantiate(host, url = new URL(${JSON.stringify(mod.stem 
   return instantiateFromBytes(bytes, host);
 }
 `;
+}
+
+function libraryClass(value: string): WasmValueClass {
+  if (
+    value === "f64" ||
+    value === "void" ||
+    value === "bytes" ||
+    value === "string" ||
+    value === "cstring" ||
+    value === "i64" ||
+    value === "u64"
+  )
+    return value;
+  if (value === "bool" || value === "u8" || value === "u32" || value === "i32") return "i32";
+  throw new Error(`wasm-glue: ABI class '${value}' is not supported`);
+}
+
+export function emitLibraryWasmGlue(profile: LibraryProfile, stem: string): string {
+  return emitWasmGlue({
+    stem,
+    initSymbol: profile.initSymbol,
+    imports: profile.callbacks.map((callback) => ({
+      module: "scriptc",
+      name: callback.name,
+      params: callback.params.map(libraryClass),
+      result: libraryClass(callback.returns),
+    })),
+    exports: profile.exports.map((entry) => ({
+      name: entry.symbol,
+      params: entry.params.map(libraryClass),
+      result: libraryClass(entry.returns),
+    })),
+  });
 }

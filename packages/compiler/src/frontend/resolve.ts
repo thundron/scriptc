@@ -300,11 +300,31 @@ const DTS_RUNTIME_SIBLINGS: readonly (readonly [string, string])[] = [
 
 export function projectDtsRuntimeSibling(path: string): string | null {
   if (path.includes("/node_modules/") || path.includes("\\node_modules\\")) return null;
-  // A project without any package.json is one realm, exactly like a project
-  // inside one: its declarations and their runtime siblings walk up to
-  // nothing. Only a declaration whose nearest package.json is the entry's
-  // own realm answers — a nested realm keeps its declarations.
-  if (!projectRealmSet || nearestPkgJsonPath(path) !== projectRealmPkgJson) return null;
+  if (!projectRealmSet) return null;
+  const owner = nearestPkgJsonPath(path);
+  if (owner !== projectRealmPkgJson) {
+    // Source-only workspace packages are program modules, including imports
+    // reached through another package. Installed-package admission is unchanged.
+    if (owner === null) return null;
+    const directory = dirname(owner),
+      pkg = pkgJsonOf(directory);
+    const entry =
+      pkg?.exports === undefined
+        ? pkg?.main
+        : resolveExports(pkg.exports, ".", RUNTIME_IMPORT_CONDITIONS);
+    if (
+      typeof entry !== "string" ||
+      !/\.(?:ts|tsx|mts|cts)$/.test(entry) ||
+      /\.d\.(?:ts|mts|cts)$/.test(entry)
+    )
+      return null;
+    const runtime = entry.endsWith(".mts")
+      ? entry.slice(0, -4) + ".mjs"
+      : entry.endsWith(".cts")
+        ? entry.slice(0, -4) + ".cjs"
+        : entry.replace(/\.(?:ts|tsx)$/, ".js");
+    if (isFile(join(directory, runtime))) return null;
+  }
   for (const [declaration, runtime] of DTS_RUNTIME_SIBLINGS) {
     if (!path.endsWith(declaration)) continue;
     const sibling = path.slice(0, -declaration.length) + runtime;

@@ -68,6 +68,8 @@ export interface EarlyLibraryNativeFeatures {
   /** Buffer.prototype methods on checked-dynamic values (scr_bytes_dyn.c). */
   dynBuffer?: boolean;
   dynTier?: boolean;
+  declAdopt?: boolean;
+  typeOrigins?: boolean;
   regex: boolean;
   assert: boolean;
   inspect: boolean;
@@ -150,7 +152,11 @@ function validNativeFeatures(value: unknown): value is EarlyLibraryNativeFeature
   return validSharedNativeFeatures<EarlyLibraryNativeFeatures>(
     value,
     BOOLEAN_NATIVE_KEYS,
-    (native) => native.buildId === undefined || /^[0-9a-f]{16}$/.test(native.buildId),
+    (native) =>
+      (native.buildId === undefined || /^[0-9a-f]{16}$/.test(native.buildId)) &&
+      [native.declAdopt, native.typeOrigins].every(
+        (value) => value === undefined || typeof value === "boolean",
+      ),
   );
 }
 

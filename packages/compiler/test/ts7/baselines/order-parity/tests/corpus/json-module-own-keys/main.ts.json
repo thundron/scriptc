@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/json-module-own-keys/main.ts"
+ ],
+ "diags": []
+}

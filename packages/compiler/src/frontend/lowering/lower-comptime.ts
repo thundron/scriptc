@@ -203,7 +203,9 @@ function comptimeFits(lowerer: Lowerer, value: unknown, t: IrType): boolean {
       const declared = new Set(shape.fields.map((f) => f.name));
       return (
         Object.keys(obj).every((key) => declared.has(key)) &&
-        shape.fields.every((f) => comptimeFits(lowerer, obj[f.name], f.type))
+        shape.fields.every((f) =>
+          comptimeFits(lowerer, Object.hasOwn(obj, f.name) ? obj[f.name] : undefined, f.type),
+        )
       );
     }
     case "union":
@@ -343,10 +345,24 @@ export function comptimeValueToIr(
         // width tolerance (nothing was declared for the extra field).
         if (!declared.has(key)) fail(`an object with an unexpected field '${key}'`);
       }
-      const fields = shape.fields.map((f) => ({
-        name: f.name,
-        value: lowerer.comptimeValueToIr(obj[f.name], f.type, `${path}.${f.name}`, blame),
+      // Preserve own-property presence and source order. A union-shaped JSON array may
+      // declare optional slots belonging only to another element; materialising those
+      // as explicit undefined values changes Object.keys/hasOwn/spread semantics.
+      const fields = Object.keys(obj).map((name) => ({
+        name,
+        value: lowerer.comptimeValueToIr(
+          obj[name],
+          shape.fields.find((field) => field.name === name)!.type,
+          `${path}.${name}`,
+          blame,
+        ),
       }));
+      for (const field of shape.fields) {
+        if (Object.hasOwn(obj, field.name)) continue;
+        const absent = lowerer.absentFieldValue(field.type, loc);
+        if (!absent) fail(`an object missing field '${field.name}'`);
+        fields.push({ name: field.name, value: absent });
+      }
       return { kind: "recordLit", fields, type: expected, loc };
     }
     case "union": {

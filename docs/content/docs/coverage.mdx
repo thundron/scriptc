@@ -23,7 +23,11 @@ $ scriptc coverage hello.ts
   fully static — all analyzed statements compile to native code.
 ```
 
-Every statement in this program compiles, so `scriptc build` will succeed. The counts describe this program only, not JavaScript or Node.js support in general.
+Every statement in this program lowers successfully. A build still needs the target backend, runtime pack and linker. The counts describe this entry and analysis mode, not JavaScript or Node.js support in general.
+
+For a library, use `scriptc coverage --lib --profile p.json --fail-on=blockers`. It analyzes the profile’s exported entry points under the same static-only lowering and library fences as `scriptc build --lib`; ordinary executable coverage does not establish library compatibility. This check does not link an artifact or verify SDK availability.
+
+Package source admission is separate from successful lowering, runtime compatibility and linking. An admitted package joins the source graph; its runtime fences and unsupported operations still matter. The separate Node-island report lists policy candidates, including carried and shared packages. That report-only model can flag patterns which have native implementations, so a candidate is not proof the build runs it in Node.
 
 <span id="report-fields" />
 
@@ -42,7 +46,7 @@ When a program has unsupported operations, the report adds a group for each root
     <tr><td><code>deferred to runtime</code></td><td>Other deferred operations in JavaScript code. Each throws only if it runs.</td></tr>
     <tr><td><code>in unreached code</code></td><td>Blockers in code the entry never reaches. A build never compiles that code, so these cannot fail it.</td></tr>
     <tr><td><code>differs from Node</code></td><td>Sites that compile but can behave differently from Node.js. See <a href="#node-divergences">Node divergences</a>.</td></tr>
-    <tr><td><code>npm package compilation</code></td><td>Native package compilation outcomes and refusal reasons.</td></tr>
+    <tr><td><code>npm package source admission</code></td><td>Whether package source joins the analyzed graph, with refusal reasons. This is not a whole-package build or execution verdict.</td></tr>
   </tbody>
 </table>
 
@@ -60,11 +64,11 @@ If a function's signature can't compile, the statements in its body count as not
 
 Code that operates on values whose types are known only at runtime, such as `any` values, the result of an untyped `JSON.parse`, or untyped JavaScript, compiles into dynamic-tier functions. They are native code too, but they check types and look up properties at runtime, so they are slower than code with static types. The report's `in dynamic tier` line counts their statements.
 
-`--explain-dynamic` lists those functions and the operation that makes each one dynamic. It also lists the units an unsupported construct would move to the dynamic tier: the binding, field, class, function, or module that has no static representation for the construct, with the diagnostic behind each one. These are the constructs the dynamic tier is planned to compile; today they remain blockers in TypeScript and deferred runtime errors in JavaScript. Add a name, such as `--explain-dynamic=Point`, to show only the matching units. With `--print=diagnostics`, the document gains a `tiers` object with the same information.
+`--explain-dynamic` lists those functions and the operation that makes each one dynamic. It also lists the units an unsupported construct would move to the dynamic tier: the binding, field, class, function, or module that has no static representation for the construct, with the diagnostic behind each one. The listing describes the affected units, not a blanket support claim: constructs without a checked-dynamic lowering remain blockers in TypeScript and deferred runtime errors in JavaScript. Add a name, such as `--explain-dynamic=Point`, to show only the matching units. With `--print=diagnostics`, the document gains a `tiers` object with the same information.
 
 The report also explains runtime-optional storage. A binding or parameter whose value comes from a read that can miss, such as an array element or a record key, keeps storage that holds `undefined`, while the checker types every read with the declared type. TypeScript's narrowing at those reads therefore does not reach the storage, and lowering extracts the value through a checked narrowing. For each such slot the report names the expression that made it optional, whether the slot is a binding, a pattern binding or a parameter, and the reads where the checker's type is narrower than the storage. With `--print=diagnostics`, the `tiers` object carries the same slots.
 
-`--tier=static-only` keeps every unsupported construct a blocker instead of moving it to the dynamic tier; code that already operates on runtime-typed values compiles as before. Today `auto`, the default, behaves the same way.
+`--tier=static-only` keeps every unsupported construct a blocker instead of moving it to the dynamic tier; code that already operates on runtime-typed values compiles as before. `auto`, the default, can use available checked-dynamic lowerings, including spread merges whose union arms cannot share a static representation.
 
 ### Untyped code that likely runs often
 

@@ -4,13 +4,13 @@ scriptc coverage tests/coverage-fixtures/node-islands/main.ts
   compile statically    28  (96%)
     in dynamic tier     14  (operate on values typed only at runtime; --explain-dynamic lists them)
 
-  npm package compilation:
+  npm package source admission:
     ni-bundled  refused (its shipped JS carries build-transform markers (bundled/transpiled dist))
-    ni-gap      static
-    ni-eval     static
-    ni-ctor     static
-    ni-typed    static
-    ni-dep      static
+    ni-gap      admitted
+    ni-eval     admitted
+    ni-ctor     admitted
+    ni-typed    admitted
+    ni-dep      admitted
 
   Node islands   (would-be, report-only: the build is unchanged; --node-islands=auto)
     gap           ni-gap@1.0.0

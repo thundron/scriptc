@@ -156,6 +156,14 @@ export interface TiersEnvelope {
 }
 
 export interface DiagnosticsEnvelope {
+  analysisMode?: "library";
+  /** Source graph admission is not a promise of native execution or link success. */
+  npmSourceAdmission?: {
+    package: string;
+    status: "admitted" | "refused";
+    detail?: string;
+    hint?: string;
+  }[];
   schema: typeof DIAGNOSTICS_SCHEMA;
   schemaVersion: typeof DIAGNOSTICS_SCHEMA_VERSION;
   compilerVersion: string;

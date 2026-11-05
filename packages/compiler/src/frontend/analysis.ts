@@ -1,3 +1,5 @@
+import { prepareLibrary, libraryWasmRefusal } from "../library/prepare.js";
+import { loadLibraryProfile } from "../library/library-profile.js";
 import { packageNameOfSpecifier } from "./workspace-registry.js";
 import { npmStaticRefusalDiag, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
 import type { AnalyzeOptions, AnalyzeResult } from "../compile-types.js";
@@ -23,6 +25,48 @@ export function analyzeWithFrontend(
   buildPlatform: string,
   createFrontend: FrontendFactory,
 ): AnalyzeResult {
+  if (opts.libraryProfilePath !== undefined) {
+    const loaded = loadLibraryProfile(opts.libraryProfilePath);
+    let lowered: LowerResult | undefined;
+    const targetRefusal =
+      loaded.ok && buildPlatform === "wasi" ? libraryWasmRefusal(loaded.profile, false) : null;
+    const prepared =
+      loaded.ok && targetRefusal === null
+        ? prepareLibrary(
+            loaded.profile,
+            opts.libraryProfilePath,
+            "analysis",
+            buildPlatform,
+            createFrontend,
+            undefined,
+            (result) => {
+              lowered = result;
+            },
+          )
+        : null;
+    const diagnostics =
+      targetRefusal !== null
+        ? [targetRefusal]
+        : prepared === null
+          ? loaded.ok
+            ? []
+            : loaded.diagnostics
+          : prepared.ok
+            ? []
+            : prepared.diagnostics;
+    return {
+      coverage: {
+        file: loaded.ok ? loaded.profile.entry : opts.libraryProfilePath,
+        stats: lowered?.stats ?? { statementsTotal: 0, statementsFailed: 0, functionsSkipped: 0 },
+        diagnostics,
+        preflightFailed: lowered === undefined,
+        analysisMode: "library",
+        ...(lowered?.runtimeFences ? { runtimeFences: lowered.runtimeFences } : {}),
+        ...(lowered?.performance ? { performance: lowered.performance } : {}),
+      },
+      sourceTexts: prepared?.sourceTexts ?? new Map(),
+    };
+  }
   let ffi: FfiProfile | null = null;
   if (opts.ffiProfilePath !== undefined) {
     const loaded = loadFfiProfile(opts.ffiProfilePath);

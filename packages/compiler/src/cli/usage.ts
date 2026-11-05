@@ -6,6 +6,8 @@ Usage:
   scriptc coverage <file.ts|.js>            how much compiles statically, and why not
   scriptc coverage <file.ts|.js> --external-types <specifier=file.d.ts>
                                             type-resolve an embedder-provided module for analysis
+  scriptc coverage --lib --profile <p.json>
+                                            analyze the library export graph and fences (no linking)
   scriptc build --lib --profile <p.json>    library mode: compile the profile's entry
                                             module to a linkable static archive
                                             (<name>.lib.a), or a Wasm reactor

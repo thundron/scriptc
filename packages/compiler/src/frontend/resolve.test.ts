@@ -114,3 +114,32 @@ test("package imports inside a --npm-static package answer the shipped JavaScrip
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("source-only package JavaScript keeps runtime precedence over its declaration twin", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "scriptc-source-dts-"));
+  try {
+    const pkg = join(dir, "packages", "source");
+    await mkdir(pkg, { recursive: true });
+    await writeFile(join(dir, "package.json"), '{"type":"module"}');
+    await writeFile(
+      join(pkg, "package.json"),
+      '{"name":"source","type":"module","exports":{".":"./index.ts"}}',
+    );
+    await writeFile(join(pkg, "index.ts"), 'export { value } from "./generated.js";');
+    const runtime = join(pkg, "generated.js"),
+      declaration = join(pkg, "generated.d.ts");
+    await writeFile(runtime, "export const value = 42;");
+    await writeFile(declaration, "export declare const value: number;");
+    clearResolveCaches();
+    setProjectRealm(join(dir, "main.ts"));
+    expect(projectDtsRuntimeSibling(declaration)).toBe(runtime);
+    expect(resolveProjectModule(join(pkg, "index.ts"), "./generated.js")).toBe(runtime);
+    await writeFile(join(pkg, "index.js"), "export const value = 0;");
+    clearResolveCaches();
+    setProjectRealm(join(dir, "main.ts"));
+    expect(projectDtsRuntimeSibling(declaration)).toBeNull();
+  } finally {
+    clearResolveCaches();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

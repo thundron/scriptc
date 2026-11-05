@@ -1,3 +1,4 @@
+import { emitLibraryWasmGlue } from "../backend/wasm-glue.js";
 import type { NativeOptimization } from "../backend/optimization.js";
 import { compilationTiming } from "../timing.js";
 import {
@@ -1014,6 +1015,11 @@ export class NativeCompiler {
         writeFileSync(sidecarPath, prepared.sidecarJson);
       }
       renameSync(stagedArchive, archivePath);
+      if (wasm)
+        writeFileSync(
+          join(dirname(archivePath), basename(archivePath, ".wasm") + ".mjs"),
+          emitLibraryWasmGlue(profile, basename(archivePath, ".wasm")),
+        );
       return {
         ok: true,
         archivePath,

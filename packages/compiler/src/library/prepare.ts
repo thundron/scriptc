@@ -541,6 +541,7 @@ export function prepareLibrary(
   buildPlatform: string,
   createFrontend: FrontendFactory,
   timing: (phase: string, detail?: Record<string, unknown>) => void = () => {},
+  onLowered?: (result: LowerResult) => void,
 ): PreparedLibrary | CompileFailure {
   const entryPath = profile.entry;
   // Library and executable graphs share automatic package eligibility.
@@ -659,6 +660,7 @@ export function prepareLibrary(
         checkerPanicDiag(e.message.split("\n", 1)[0]!, { file: entryPath, start: 0, end: 0 }),
       ]);
     }
+    onLowered?.(lowered);
     if (lowered.module === null) return fail(lowered.diagnostics);
     entryInfo = fe.entryExports(profile.exports.map((e) => e.export));
     sourceTexts = fe.sourceTexts();

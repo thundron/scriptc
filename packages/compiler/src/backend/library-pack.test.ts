@@ -28,3 +28,12 @@ describe("library archive runtime gates", () => {
     });
   });
 });
+
+test("library boundary adoption and origin recording select their pure runtime units", () => {
+  expect(libraryArchiveFeatures({ ...base, declAdopt: true, typeOrigins: true })).toMatchObject({
+    declAdopt: true,
+    typeOrigins: true,
+  });
+  expect(libraryArchiveFeatures(base).declAdopt).not.toBe(true);
+  expect(libraryArchiveFeatures(base).typeOrigins).not.toBe(true);
+});

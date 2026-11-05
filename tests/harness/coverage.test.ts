@@ -1034,6 +1034,12 @@ test("Node islands (report-only): one package per class, gap islands first", asy
   await expect(report(entry)).toMatchFileSnapshot("__snapshots__/coverage-node-islands.txt");
   const { coverage, sourceTexts } = analyze(entry);
   const islands = coverage.nodeIslands!;
+  expect(renderCoverage(coverage)).toContain("npm package source admission");
+  expect(
+    coverageEnvelope(coverage, { compilerVersion: "test", sourceTexts }).npmSourceAdmission?.find(
+      (row) => row.package === "ni-eval",
+    )?.status,
+  ).toBe("admitted");
   expect(islands.islands.map((i) => [i.package, i.class])).toEqual([
     ["ni-gap", "gap"],
     ["ni-eval", "runtime"],
@@ -1237,3 +1243,18 @@ test(`every corpus program is 100% static (corpus and coverage agree${shardSuffi
     if (++n % 10 === 0) await new Promise((r) => setImmediate(r));
   }
 }, 600_000);
+
+test("library coverage uses the profile export roots and static-only fences", () => {
+  const profile = fixture("library-union-spread/profile.json");
+  const { coverage, sourceTexts } = analyze(profile, { libraryProfilePath: profile });
+  expect(coverage.analysisMode).toBe("library");
+  expect(coverage.diagnostics.some((diagnostic) => diagnostic.message.includes("spread"))).toBe(
+    true,
+  );
+  expect(coverage.diagnostics.some((diagnostic) => diagnostic.code === "SC4001")).toBe(false);
+  expect(coveragePasses(coverage, "blockers")).toBe(false);
+  expect(renderCoverage(coverage)).toContain("library profile: static-only");
+  expect(coverageEnvelope(coverage, { compilerVersion: "test", sourceTexts }).analysisMode).toBe(
+    "library",
+  );
+});

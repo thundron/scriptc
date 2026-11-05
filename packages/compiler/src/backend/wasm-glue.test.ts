@@ -41,12 +41,26 @@ describe("emitWasmGlue (unit)", () => {
     expect(glue).toContain("export async function instantiateFromBytes");
   });
 
-  it("refuses string/bytes results (unsupported in the wasm host-import ABI)", () => {
+  it("copies string/bytes export results through owned output slots", () => {
+    const glue = emitWasmGlue({
+      stem: "x",
+      imports: [],
+      exports: [
+        { name: "text", params: [], result: "string" },
+        { name: "bytes", params: ["bytes"], result: "bytes" },
+      ],
+    });
+    expect(glue).toContain('exports["text"](out, out + 4)');
+    expect(glue).toContain('exports["bytes"](p0, l0, out, out + 4)');
+    expect(glue).toContain("return readBytes(p, l).slice()");
+    expect(glue).toContain("finally");
+  });
+  it("still refuses borrowed host-import string/bytes returns", () => {
     expect(() =>
       emitWasmGlue({
         stem: "x",
-        imports: [],
-        exports: [{ name: "f", params: [], result: "string" }],
+        exports: [],
+        imports: [{ module: "host", name: "text", params: [], result: "string" }],
       }),
     ).toThrow(/string\/bytes results are not supported/);
   });

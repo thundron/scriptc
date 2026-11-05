@@ -289,7 +289,26 @@ export function setProjectRealm(entryPath: string): void {
 export function projectDtsRuntimeSibling(path: string): string | null {
   if (path.includes("/node_modules/") || path.includes("\\node_modules\\")) return null;
   if (!path.endsWith(".d.ts")) return null;
-  if (projectRealmPkgJson === null || nearestPkgJsonPath(path) !== projectRealmPkgJson) return null;
+  const owner = nearestPkgJsonPath(path);
+  if (owner === null || owner !== projectRealmPkgJson) {
+    // Source-only workspace packages are program modules too. Their generated
+    // JavaScript must not disappear behind an adjacent declaration file merely
+    // because the importing TypeScript belongs to another package realm.
+    if (owner === null) return null;
+    const directory = dirname(owner),
+      pkg = pkgJsonOf(directory);
+    const entry =
+      pkg?.exports === undefined
+        ? pkg?.main
+        : resolveExports(pkg.exports, ".", RUNTIME_IMPORT_CONDITIONS);
+    if (
+      typeof entry !== "string" ||
+      !/\.(?:ts|tsx|mts|cts)$/.test(entry) ||
+      /\.d\.(?:ts|mts|cts)$/.test(entry)
+    )
+      return null;
+    if (isFile(join(directory, entry).replace(/\.(?:ts|tsx|mts|cts)$/, ".js"))) return null;
+  }
   const sibling = path.slice(0, -".d.ts".length) + ".js";
   return isFile(sibling) ? sibling : null;
 }

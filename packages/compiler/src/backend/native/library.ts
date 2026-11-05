@@ -119,6 +119,8 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     ...(opts.zlib ? ["scr_zlib.c"] : []),
     ...(opts.x509 ? ["scr_x509.c"] : []),
     ...(opts.copying ? ["scr_copying.c"] : []),
+    ...(opts.declAdopt ? ["scr_decl_adopt.c"] : []),
+    ...(opts.typeOrigins ? ["scr_type_origin.c"] : []),
   ];
   const cflags = [
     "-std=c11",

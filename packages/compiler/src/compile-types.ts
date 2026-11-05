@@ -231,6 +231,8 @@ export type CompileLibraryResult =
   | { ok: false; diagnostics: ScrDiagnostic[]; sourceTexts: Map<string, string> };
 
 export interface AnalyzeOptions {
+  /** Analyze the exact static-only export graph and fences of a library profile. */
+  libraryProfilePath?: string;
   /** --npm-static (see CompileOptions.npmStatic): the analysis compiles
    * opted-in packages' JS as program modules and the coverage report
    * carries each package's native/refused status. */

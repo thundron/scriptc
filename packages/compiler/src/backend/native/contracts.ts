@@ -465,6 +465,8 @@ export interface LibArchiveOptions {
   dynBuffer?: boolean;
   /** See CompileOptions.dynTier: the scr_js_* units. */
   dynTier?: boolean;
+  declAdopt?: boolean;
+  typeOrigins?: boolean;
   regex?: boolean;
   assert?: boolean;
   inspect?: boolean;

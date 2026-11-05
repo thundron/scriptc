@@ -46,6 +46,7 @@ import { classDescription } from "../node-islands/rules.js";
 import type { SrcLoc } from "../ir/ir.js";
 
 export interface CoverageInput {
+  analysisMode?: "library";
   file: string;
   stats: LowerStats;
   diagnostics: ScrDiagnostic[];
@@ -161,8 +162,18 @@ export function renderCoverage(input: CoverageInput, opts: CoverageRenderOptions
   };
   out.push(`${c(BOLD, "scriptc coverage")} ${DIMPath(input.file, opts.color ?? false)}`);
   out.push("");
+  if (input.analysisMode === "library")
+    out.push(
+      "  library profile: static-only export graph and library fences (not a link check)",
+      "",
+    );
 
   if (input.preflightFailed) {
+    if (input.analysisMode === "library") {
+      out.push("  analysis stopped before library lowering:");
+      renderRows(groupBlockers(input.diagnostics), RED);
+      return out.join("\n");
+    }
     // Three preflight failure shapes, in order of "whose problem is it":
     // an incompatible project config (SC0002 — ours to explain), real
     // TypeScript errors (theirs to fix), and OUR import-form fences
@@ -256,12 +267,12 @@ export function renderCoverage(input: CoverageInput, opts: CoverageRenderOptions
   // Report native package compilation and the first reason for each refusal.
   const npmStatic = input.npmStatic ?? [];
   if (npmStatic.length > 0) {
-    out.push(`  ${c(DIM, "npm package compilation:")}`);
+    out.push(`  ${c(DIM, "npm package source admission:")}`);
     const widestP = Math.max(...npmStatic.map((s) => s.package.length));
     for (const s of npmStatic) {
       const status =
         s.status === "static"
-          ? c(GREEN, "static")
+          ? c(GREEN, "admitted")
           : c(RED, "refused") + (s.detail !== undefined ? ` ${c(DIM, `(${s.detail})`)}` : "");
       out.push(`    ${s.package.padEnd(widestP)}  ${status}`);
     }
@@ -618,6 +629,15 @@ export function coverageEnvelope(
   const skipped = input.stats.functionsSkipped + (un?.stats.functionsSkipped ?? 0);
   const ok = total - failed;
   return {
+    ...(input.npmStatic?.length
+      ? {
+          npmSourceAdmission: input.npmStatic.map((row) => ({
+            ...row,
+            status: row.status === "static" ? ("admitted" as const) : ("refused" as const),
+          })),
+        }
+      : {}),
+    ...(input.analysisMode ? { analysisMode: input.analysisMode } : {}),
     schema: DIAGNOSTICS_SCHEMA,
     schemaVersion: DIAGNOSTICS_SCHEMA_VERSION,
     compilerVersion: opts.compilerVersion,

@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { WASI } from "node:wasi";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import {
@@ -127,6 +128,56 @@ describe.skipIf(!hasZig).each(["node", "native"] as const)(
       api.app_init();
       return { api, reports, panics, text };
     }
+
+    test("generated glue owns returned strings/bytes across growth and links checked unknown casts", async () => {
+      const entry = join(directory, "owned-results.ts"),
+        path = join(directory, "owned-results.json");
+      await writeFile(
+        entry,
+        `let keep = new Uint8Array(0);
+export function echo(text: string): string { return text + "λ\\0😀"; }
+export function bytes(data: Uint8Array): Uint8Array { const result = new Uint8Array(data.length); for (let i=0;i<data.length;i++) result[i] = data[i]!; return result; }
+export function grow(size: number): number { keep = new Uint8Array(size); return keep.length; }
+export function cast(text: string): number { const raw: unknown = JSON.parse(text); return (raw as {x: number}).x; }
+export function signed(): number { return -7; }
+export function unsigned(): number { return 9007199254740991; }
+`,
+      );
+      await writeFile(
+        path,
+        JSON.stringify({
+          profile_format: 1,
+          name: "owned_results",
+          emission: "llvm",
+          entry,
+          abi: { prefix: "r_", init_symbol: "r_init", sink_register_symbol: "r_sink" },
+          callbacks: [],
+          exports: [
+            { export: "echo", symbol: "r_echo", params: ["string"], returns: "string" },
+            { export: "bytes", symbol: "r_bytes", params: ["bytes"], returns: "bytes" },
+            { export: "grow", symbol: "r_grow", params: ["f64"], returns: "f64" },
+            { export: "cast", symbol: "r_cast", params: ["string"], returns: "f64" },
+            { export: "signed", symbol: "r_signed", params: [], returns: "i64" },
+            { export: "unsigned", symbol: "r_unsigned", params: [], returns: "u64" },
+          ],
+        }),
+      );
+      const result = await compileLibrary({ profilePath: path, outDir: directory });
+      if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
+      const glue = await import(pathToFileURL(result.archivePath.replace(/\.wasm$/, ".mjs")).href);
+      const api = await glue.instantiateFromBytes(await readFile(result.archivePath), {});
+      expect(api.r_echo("é\0")).toBe("é\0λ\0😀");
+      const returned = api.r_bytes(new Uint8Array([0, 127, 128, 255]));
+      expect(api.r_grow(40 * 1024 * 1024)).toBe(40 * 1024 * 1024);
+      api.r_bytes(new Uint8Array([9, 8, 7]));
+      expect(Array.from(returned)).toEqual([0, 127, 128, 255]);
+      expect(api.r_echo("")).toBe("λ\0😀");
+      expect(api.r_bytes(new Uint8Array(0)).length).toBe(0);
+      expect(api.r_cast('{"x":42}')).toBe(42);
+      expect(api.r_signed()).toBe(-7n);
+      expect(api.r_unsigned()).toBe(9007199254740991n);
+      expect(() => api.r_cast('{"x":"wrong"}')).toThrow();
+    });
 
     test("exports only the callable ABI and requires named host imports", () => {
       expect(
@@ -346,6 +397,16 @@ describe.skipIf(!hasZig).each(["node", "native"] as const)(
       expect(cString(api.cs_greet(ptr))).toBe("hello, w\u00f6rld!");
       expect(logs).toEqual(["W\u00d6RLD"]);
       api.scriptc_free(ptr);
+      const glue = await import(pathToFileURL(result.archivePath.replace(/\.wasm$/, ".mjs")).href);
+      const jsLogs: string[] = [];
+      const jsApi = await glue.instantiateFromBytes(await readFile(result.archivePath), {
+        log: (text: string) => jsLogs.push(text),
+      });
+      expect(jsApi.cs_greet("wörld")).toBe("hello, wörld!");
+      expect(jsLogs).toEqual(["WÖRLD"]);
+      expect(() => jsApi.cs_greet("bad\0argument")).toThrow(/NUL/);
+      expect(jsApi.cs_greet("")).toBe("hello, !");
+      expect(() => jsApi.cs_with_nul()).toThrow(/U\+0000/);
       expect(() => api.cs_with_nul()).toThrow();
       expect(panics).toHaveLength(1);
       expect(panics[0]).toContain("a cstring value contains U+0000");

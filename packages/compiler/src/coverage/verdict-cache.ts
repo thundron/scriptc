@@ -99,7 +99,7 @@ export function verdictKey(
 ): string | null {
   // The tier report carries source locations the semantic replay does not
   // move; explaining analyses always lower.
-  if (opts.explainDynamic === true) return null;
+  if (opts.explainDynamic === true || opts.libraryProfilePath !== undefined) return null;
   let ffi = "";
   if (opts.ffiProfilePath !== undefined) {
     try {

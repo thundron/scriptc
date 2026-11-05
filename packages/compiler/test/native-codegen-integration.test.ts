@@ -498,9 +498,14 @@ done:
     const cache = join(dir, "cache");
     const oldCacheDir = process.env["SCRIPTC_CACHE_DIR"];
     const oldNoCache = process.env["SCRIPTC_NO_CACHE"];
+    const oldPath = process.env["PATH"];
     try {
       process.env["SCRIPTC_CACHE_DIR"] = cache;
       delete process.env["SCRIPTC_NO_CACHE"];
+      // Darwin's final-artifact cache deliberately trusts only the Apple
+      // system shim. LLVM 22 may head the caller's PATH for IR compilation,
+      // but this object-only link must exercise that trusted system driver.
+      process.env["PATH"] = "/usr/bin:/bin:" + (oldPath ?? "");
       const result = await compile(join(repoRoot, "tests/corpus/001-hello.ts"), {
         outDir: dir,
         outPath: join(dir, "program"),
@@ -519,6 +524,8 @@ done:
       expect(dependencies).toContain(helperPackage);
       expect(dependencies).toContain(join(dirname(helperPackage), "bin", "scriptc-llvm-codegen"));
     } finally {
+      if (oldPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = oldPath;
       if (oldCacheDir === undefined) delete process.env["SCRIPTC_CACHE_DIR"];
       else process.env["SCRIPTC_CACHE_DIR"] = oldCacheDir;
       if (oldNoCache === undefined) delete process.env["SCRIPTC_NO_CACHE"];

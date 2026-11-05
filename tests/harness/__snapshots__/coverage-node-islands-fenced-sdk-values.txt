@@ -12,4 +12,4 @@ scriptc coverage tests/coverage-fixtures/node-islands-fenced-sdk-values/main.ts
           tests/coverage-fixtures/node-islands-fenced-sdk-values/node_modules/ni-sdk/index.js:7:26: SC1090: extending classes not declared in the program ('Promise') is not supported yet
     hint: scriptc coverage --explain-island=<package> lists every reason
 
-  fully static — all analyzed statements compile to native code.
+  source lowering complete — Node-island policy candidates are reported separately.

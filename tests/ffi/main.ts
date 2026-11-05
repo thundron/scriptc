@@ -257,9 +257,18 @@ const foreignTimer = setInterval(() => {
   foreignTimerTicks++;
 }, 0);
 const foreignBurstTick = (threadId: number, sequence: number) => {
+  // Count only timers delivered during the burst. A zero-delay interval has
+  // a minimum delay, so a very fast burst can otherwise finish before it is due.
+  if (foreignBurstCount === 0) foreignTimerTicks = 0;
   if (sequence !== foreignBurstNext[threadId]) foreignBurstOrderErrors++;
   foreignBurstNext[threadId] = foreignBurstNext[threadId] + 1;
   foreignBurstCount++;
+  // Make a timer due within the queue's batch budget. Draining the whole
+  // foreign queue without yielding still fails the fairness assertion.
+  if (foreignBurstCount % 64 === 0) {
+    const deadline = performance.now() + 2;
+    while (performance.now() < deadline) {}
+  }
   foreignBurstSum += threadId * 500 + sequence;
   if (foreignBurstCount === 1000) {
     nativeForeignBurstStop(foreignBurstTick);

@@ -339,8 +339,10 @@ export function comptimeValueToIr(
       }
       const shape = lowerer.shapes.get(expected.shapeId)!; // bakeable-checked
       const obj = value as Record<string, unknown>;
-      const declared = new Set(shape.fields.map((f) => f.name));
-      for (const key of Object.keys(obj)) {
+      const declared = new Map<string, IrType>();
+      for (const field of shape.fields) declared.set(field.name, field.type);
+      const ownKeys = Object.keys(obj);
+      for (const key of ownKeys) {
         // Exact shapes, like everywhere else: comptime results get no
         // width tolerance (nothing was declared for the extra field).
         if (!declared.has(key)) fail(`an object with an unexpected field '${key}'`);
@@ -348,14 +350,9 @@ export function comptimeValueToIr(
       // Preserve own-property presence and source order. A union-shaped JSON array may
       // declare optional slots belonging only to another element; materialising those
       // as explicit undefined values changes Object.keys/hasOwn/spread semantics.
-      const fields = Object.keys(obj).map((name) => ({
+      const fields = ownKeys.map((name) => ({
         name,
-        value: lowerer.comptimeValueToIr(
-          obj[name],
-          shape.fields.find((field) => field.name === name)!.type,
-          `${path}.${name}`,
-          blame,
-        ),
+        value: lowerer.comptimeValueToIr(obj[name], declared.get(name)!, `${path}.${name}`, blame),
       }));
       for (const field of shape.fields) {
         if (Object.hasOwn(obj, field.name)) continue;

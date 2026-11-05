@@ -227,6 +227,7 @@ test("deferred fences in a module's top-level code report as running at startup"
     ["SC1090", expect.any(Number), false],
   ]);
   const out = report(fixture("startup-fences.js"));
+  expect(out).not.toContain("fully static");
   expect(out).toMatch(
     /runs at startup {3}1 site .*\n.*'instanceof' right-hand sides other than classes declared in the program\n\s+at tests\/coverage-fixtures\/startup-fences\.js:5:30/,
   );
@@ -1035,6 +1036,7 @@ test("Node islands (report-only): one package per class, gap islands first", asy
   const { coverage, sourceTexts } = analyze(entry);
   const islands = coverage.nodeIslands!;
   expect(renderCoverage(coverage)).toContain("npm package source admission");
+  expect(renderCoverage(coverage)).not.toContain("fully static");
   expect(
     coverageEnvelope(coverage, { compilerVersion: "test", sourceTexts }).npmSourceAdmission?.find(
       (row) => row.package === "ni-eval",

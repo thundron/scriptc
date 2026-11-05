@@ -431,8 +431,19 @@ export function renderCoverage(input: CoverageInput, opts: CoverageRenderOptions
   };
 
   const unreachedDiags = [...(un?.diagnostics ?? []), ...(un?.runtimeFences ?? [])];
-  if (failed === 0 && input.diagnostics.length === 0 && unreachedDiags.length === 0) {
-    out.push(`  ${c(GREEN, "fully static")} — all analyzed statements compile to native code.`);
+  if (
+    failed === 0 &&
+    input.diagnostics.length === 0 &&
+    unreachedDiags.length === 0 &&
+    fences.length === 0
+  ) {
+    const candidates =
+      (input.nodeIslands?.islands.length ?? 0) + (input.nodeIslands?.userModules.length ?? 0);
+    out.push(
+      candidates > 0
+        ? "  source lowering complete — Node-island policy candidates are reported separately."
+        : `  ${c(GREEN, "fully static")} — all analyzed statements compile to native code.`,
+    );
     if (divergences.length > 0) {
       out.push("");
       renderDivergences();

@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { beforeEach, describe, expect, test } from "vitest";
-import { analyze, compile } from "@scriptc/compiler";
+import { analyze, compile, renderCoverage } from "@scriptc/compiler";
 import { skipUnownedTest } from "./shard.js";
 
 const execFileAsync = promisify(execFile);
@@ -304,6 +304,7 @@ describe(`npm-static pilots${sanitize ? " (sanitized)" : ""}`, () => {
         writeFileSync(entry, 'import "renderer-values";');
         const { coverage } = analyze(entry, { npmStatic: "auto" });
         expect(coverage.npmStatic).toEqual([{ package: "renderer-values", status: "static" }]);
+        expect(renderCoverage(coverage)).not.toContain("fully static");
         expect(coverage.diagnostics).toHaveLength(0);
         expect(
           coverage.runtimeFences ?? [],

@@ -5,7 +5,9 @@ const a: Appliance = {exterior: {w: 3, d: 4, h: 5}, niche: {w: 1, d: 2, h: 3, hM
 const selected = select(a);
 console.log(selected.w, selected.d, selected.h);
 selected.w = 9;
-console.log(a.niche!.w, Object.keys(selected).join(","));
+console.log(a.niche!.w, Object.keys(selected).join(","), selected === a.niche);
+a.niche!.d = 13;
+console.log(selected.d);
 console.log(select({exterior: {w: 6, d: 7, h: 8}}).w);
 let calls = 0;
 function fallback(): Size { calls++; return {w: 10, d: 11, h: 12}; }

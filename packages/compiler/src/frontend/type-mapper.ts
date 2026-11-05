@@ -1490,6 +1490,8 @@ export type TypeParamTsResolver = (t: ts.Type) => ts.Type | null;
  * once per Lowerer and threaded through the recursion — adding a hook means
  * one new field here, not a new parameter at every call site. */
 export interface TypeMapperCtx {
+  /** Homogeneous tuple families requiring growable array storage in this program. */
+  growableTuple?: (arity: number) => boolean;
   /** Whether the program creates primitive wrapper objects
    * (primitive-wrappers.ts): then the boxed interface types (`String`,
    * `Number`, `Boolean`) map to the checked-dynamic value instead of the
@@ -3011,6 +3013,14 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
 
       fields.push({ name: String(i), type: et });
     }
+    const first = fields[0]?.type;
+    if (
+      first &&
+      ctx.growableTuple?.(fields.length) &&
+      isSupportedArrayElem(first) &&
+      fields.every((field) => typeEquals(field.type, first))
+    )
+      return arrayOf(first);
     fields.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     return { kind: "record", shapeId: ctx.shapes.intern(fields, true) };
   }

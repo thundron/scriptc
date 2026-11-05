@@ -100,7 +100,11 @@ function plainShape(shape: IrRecordShape, allowEmpty = false): boolean {
     !isDirentShape(shape) &&
     !shapeHasAccessorSlots(shape) &&
     shapeKeyOrders(shape).length === 1 &&
-    !shape.fields.some((field) => field.name === KEY_ORDER_FIELD || field.name.startsWith("%"))
+    !shape.fields.some(
+      (field) =>
+        field.name === KEY_ORDER_FIELD ||
+        (field.name.startsWith("%") && !(field.name === "%call" && field.type.kind === "func")),
+    )
   );
 }
 
@@ -150,6 +154,12 @@ export function planRecordViews(mod: IrModule, options: ViewOptions): RecordView
   // properties, and through the record a view of it names. Class instances,
   // functions, untyped values, promises and the other kinds that can
   // reference arbitrary objects count as holding every type.
+  // The internal call slot of a materialized declaration owns a zero-capture
+  // closure, not an arbitrary environment capable of retaining its view.
+  // Every constructor/store is checked; opaque/capturing calls keep the
+  // conservative copy rule. Other function-valued fields still hold anything.
+  const noncapturingCalls = new Set<string>();
+  const unsafeCalls = new Set<string>();
   const held = new Map<string, Set<string> | "any">();
   const holds = (shapeId: string): Set<string> | "any" => {
     const known = held.get(shapeId);
@@ -167,7 +177,13 @@ export function planRecordViews(mod: IrModule, options: ViewOptions): RecordView
           if (shape?.indexValue !== undefined && !visit(shape.indexValue)) return false;
           if (!(sources.get(t.shapeId) ?? []).every((id) => visit({ kind: "record", shapeId: id })))
             return false;
-          return (shape?.fields ?? []).every((field) => visit(field.type));
+          return (shape?.fields ?? []).every(
+            (field) =>
+              (field.name === "%call" &&
+                noncapturingCalls.has(t.shapeId) &&
+                !unsafeCalls.has(t.shapeId)) ||
+              visit(field.type),
+          );
         }
         case "array":
         case "set":
@@ -190,10 +206,21 @@ export function planRecordViews(mod: IrModule, options: ViewOptions): RecordView
   const partialPairs: { target: string; source: string }[] = [];
   for (const fn of mod.functions)
     everyStmtList(fn.body, {
-      stmt: () => true,
+      stmt: (s) => {
+        if ((s.kind === "recordSet" && s.field === "%call") || s.kind === "recordKeySet")
+          unsafeCalls.add(s.shapeId);
+        return true;
+      },
       expr: (e) => {
+        if (e.kind === "recordLit" && e.type.kind === "record") {
+          const call = e.fields.find((field) => field.name === "%call")?.value;
+          if (call?.kind === "closure" && call.captures.length === 0)
+            noncapturingCalls.add(e.type.shapeId);
+          else if (call) unsafeCalls.add(e.type.shapeId);
+        }
         if (e.kind === "dynCheck") {
           checked.push(e.type);
+          if (e.type.kind === "record") unsafeCalls.add(e.type.shapeId);
           if (
             e.partialView === true &&
             e.type.kind === "record" &&
@@ -227,7 +254,11 @@ export function planRecordViews(mod: IrModule, options: ViewOptions): RecordView
   for (const id of reachable) {
     const target = shapes.get(id);
     if (!target || !plainShape(target) || target.freezable === true) continue;
-    if (options.traced(id) || options.excluded(id)) continue;
+    if (
+      (options.traced(id) && !target.fields.some((field) => field.name === "%call")) ||
+      options.excluded(id)
+    )
+      continue;
     const found: string[] = [];
     for (const source of shapes.values()) {
       if (source.id === id || !live.has(source.id) || !plainShape(source)) continue;

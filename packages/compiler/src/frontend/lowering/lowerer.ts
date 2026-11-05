@@ -1,3 +1,8 @@
+import {
+  callableExpandoValue,
+  finalizeCallableExpandos,
+  type CallableExpando,
+} from "./callable-expandos.js";
 import { programCreatesWrappers, routeWrapperConsumers } from "./primitive-wrappers.js";
 import type { DiagnosticCode } from "../../diagnostics/codes.js";
 import { markInferredFactChecks, shapeOverlayFileNames } from "../shape-inference/index.js";
@@ -3874,6 +3879,7 @@ export class Lowerer {
    * global — string keys for spelled/folded names, ts.Symbols for
    * unique-symbol keys (lower-expando.ts). */
   readonly expandoMembers = new Map<ts.Symbol, ExpandoMembers>();
+  readonly callableExpandos = new Map<string, CallableExpando>();
   /** CJS export globals ALSO key by their declaration NODE: the checker
    * hands importers a distinct (late-bound) symbol for `module.exports`
    * property exports — different object, same declaration — so globalOf
@@ -4694,6 +4700,7 @@ export class Lowerer {
       checkedTable("checkedVirtualJsValueReturns", () => this.checkedVirtualJsValueReturns.size),
       checkedTable("globalsBySymbol", () => this.globalsBySymbol.size),
       checkedTable("expandoMembers", () => this.expandoMembers.size),
+      checkedTable("callableExpandos", () => this.callableExpandos.size),
       checkedTable("globalsByDeclNode", () => this.globalsByDeclNode.size),
       checkedTable("globalsList", () => this.globalsList.length),
       checkedTable("npmInitActions", () => this.npmInitActions.size),
@@ -5451,6 +5458,7 @@ export class Lowerer {
     const islands = this.nodeIslands;
     const shadow = canonShadowHook(this.checker);
     this.typeCtx = {
+      growableTuple: (arity) => this.facts.growableTupleArities().has(arity),
       ...(islands !== null ? { foreignType: (t: ts.Type) => this.foreignType(t) } : {}),
       checker: this.checker,
       positionOf: (node) => this.positions.of(node),
@@ -10283,6 +10291,7 @@ export class Lowerer {
     // monomorphization worklists drained): an identity comparison against
     // one is exact only if the declaration is held at a single signature.
     checkGenericIdentityPins(this);
+    finalizeCallableExpandos(this, functions);
     finalizeRecordLinks(this, functions);
     // The statics lookup installs before value boxing, so the function
     // values it adds to the entry module are boxed with the rest.
@@ -13152,6 +13161,26 @@ export class Lowerer {
    * else (including a DIFFERENT union) is left for requireExactShape, which
    * rejects union mismatches with SC2003. */
   coerceToExpected(expr: IrExpr, expected: IrType): IrExpr {
+    if (
+      expr.type.kind === "func" &&
+      expected.kind === "record" &&
+      this.shapes.get(expected.shapeId)?.fields.some((field) => field.name === "%call")
+    ) {
+      const materialized = callableExpandoValue(this, expr, expected);
+      if (materialized)
+        return this.coerceToExpected(
+          typeEquals(materialized.type, expected)
+            ? materialized
+            : {
+                kind: "dynFrom",
+                value: materialized,
+                liveRef: true,
+                type: DYN,
+                loc: materialized.loc,
+              },
+          expected,
+        );
+    }
     // A comma expression ending in a unit literal (`return log(), null`):
     // its effects run first, unchanged, and the unit value takes the
     // destination's representation (a bare unit literal has none).

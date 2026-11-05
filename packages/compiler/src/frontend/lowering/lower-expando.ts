@@ -42,6 +42,8 @@ export interface ExpandoMember {
   /** Source start of the FIRST assignment in the declaring file — the
    * init-position read guard's boundary. */
   firstWriteStart: number;
+  /** An unconditional module-level initialization, when one exists. */
+  initialWriteStart?: number;
   /** The declaring file (guards apply to same-file init reads only —
    * importers evaluate after the exporter's init, the module-globals
    * stance). */
@@ -175,9 +177,18 @@ export function collectExpandoMembers(lowerer: Lowerer, sf: ts.SourceFile): void
         members = { names: new Map(), symbols: new Map() };
         lowerer.expandoMembers.set(w.fnSym, members);
       }
+      const initialWriteStart =
+        node.parent && ts.isExpressionStatement(node.parent) && ts.isSourceFile(node.parent.parent)
+          ? ts.tokenStartOfNode(node)
+          : undefined;
       const existing = memberOf(members, w.key);
       if (existing) {
         existing.firstWriteStart = Math.min(existing.firstWriteStart, ts.tokenStartOfNode(node));
+        if (initialWriteStart !== undefined)
+          existing.initialWriteStart = Math.min(
+            existing.initialWriteStart ?? initialWriteStart,
+            initialWriteStart,
+          );
       } else if (
         !(typeof w.key === "string" && READONLY_FN_MEMBERS.has(w.key)) &&
         !nsOwnedMember(lowerer, w.access)
@@ -212,6 +223,7 @@ export function collectExpandoMembers(lowerer: Lowerer, sf: ts.SourceFile): void
           const entry: ExpandoMember = {
             global: g,
             firstWriteStart: ts.tokenStartOfNode(node),
+            ...(initialWriteStart !== undefined ? { initialWriteStart } : {}),
             file: sf,
           };
           if (typeof w.key === "string") members.names.set(w.key, entry);

@@ -1,3 +1,6 @@
+import { dirname } from "node:path";
+import { prepareExecutableModule } from "../executable/prepare.js";
+import { moduleRuntimeFeatures } from "../ir/runtime-features.js";
 import { prepareLibrary, libraryWasmRefusal } from "../library/prepare.js";
 import { loadLibraryProfile } from "../library/library-profile.js";
 import { packageNameOfSpecifier } from "./workspace-registry.js";
@@ -320,6 +323,35 @@ export function analyzeWithFrontend(
           });
     const nodeIslands =
       islandReport !== null && hasNodeIslandFindings(islandReport) ? islandReport : null;
+    const sourceTexts =
+      lowerLoad.fe === null
+        ? fe.sourceTexts()
+        : new Map([...fe.sourceTexts(), ...lowerLoad.fe.sourceTexts()]);
+    // Report candidates over-approximate runtime needs. Ask the executable
+    // preparer for its reached graph and retry/fallback decision, instead of
+    // substituting prescan classes for actual Node bridge placement.
+    let nodeExecution: { packages: string[]; modules: string[] } | undefined;
+    let preparationDiagnostics: ScrDiagnostic[] = [];
+    if (policy.mode !== "off" && nodeIslands !== null) {
+      const plan = prepareExecutableModule(
+        entryPath,
+        {
+          ...opts,
+          outDir: dirname(entryPath),
+          outPath: entryPath + ".coverage-plan",
+        },
+        ffi,
+        buildPlatform,
+        createFrontend,
+      );
+      if (
+        plan.ok &&
+        plan.mod.nodeIsland !== undefined &&
+        moduleRuntimeFeatures(plan.mod).nodeIsland
+      )
+        nodeExecution = plan.islands ?? { packages: [], modules: [] };
+      if (!plan.ok) preparationDiagnostics = plan.diagnostics;
+    }
     return {
       coverage: {
         file: entryPath,
@@ -329,7 +361,12 @@ export function analyzeWithFrontend(
         // which the report groups with these).
         // --strict-user-js: R2 constructs in user JavaScript are blockers
         // (SC8101–SC8105), as scope B's builds will make them errors.
-        diagnostics: [...preflight, ...lowered.diagnostics, ...(nodeIslands?.userJs ?? [])],
+        diagnostics: distinctDiagnostics([
+          preflight,
+          lowered.diagnostics,
+          nodeIslands?.userJs ?? [],
+          preparationDiagnostics,
+        ]),
         ...(lowered.runtimeFences.length > 0 ? { runtimeFences: lowered.runtimeFences } : {}),
         ...(lowered.divergences !== undefined ? { divergences: lowered.divergences } : {}),
         ...(lowered.performance !== undefined ? { performance: lowered.performance } : {}),
@@ -344,14 +381,12 @@ export function analyzeWithFrontend(
         ...(lowered.tiers !== undefined ? { tiers: lowered.tiers } : {}),
         ...(lowered.wasmModules !== undefined ? { wasmModules: lowered.wasmModules } : {}),
         ...(nodeIslands !== null ? { nodeIslands } : {}),
+        ...(nodeExecution === undefined ? {} : { nodeExecution }),
         preflightFailed: false,
       },
       // The island reload's files are a subset of the first load's; merging
       // keeps both loads' texts for whatever a diagnostic names.
-      sourceTexts:
-        lowerLoad.fe === null
-          ? fe.sourceTexts()
-          : new Map([...fe.sourceTexts(), ...lowerLoad.fe.sourceTexts()]),
+      sourceTexts,
     };
   } finally {
     lowerLoad.fe?.dispose();

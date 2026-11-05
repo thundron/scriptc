@@ -46,6 +46,8 @@ import { classDescription } from "../node-islands/rules.js";
 import type { SrcLoc } from "../ir/ir.js";
 
 export interface CoverageInput {
+  /** Node bridge placement from the same lowering/retry policy as a build, not prescan candidates. */
+  nodeExecution?: { packages: string[]; modules: string[] };
   analysisMode?: "library";
   file: string;
   stats: LowerStats;
@@ -233,6 +235,15 @@ export function renderCoverage(input: CoverageInput, opts: CoverageRenderOptions
       );
     }
     return out.join("\n");
+  }
+
+  const nodeExecution = input.nodeExecution;
+  if (nodeExecution && (nodeExecution.packages.length > 0 || nodeExecution.modules.length > 0)) {
+    out.push(
+      `  Node bridge plan: ${[...nodeExecution.packages, ...nodeExecution.modules].join(", ")}`,
+    );
+    out.push("    these imports lower through Node; executable linking needs a libnode pack.");
+    out.push("");
   }
 
   // Whole-program totals include reached and unreached statements.
@@ -438,7 +449,10 @@ export function renderCoverage(input: CoverageInput, opts: CoverageRenderOptions
     fences.length === 0
   ) {
     const candidates =
-      (input.nodeIslands?.islands.length ?? 0) + (input.nodeIslands?.userModules.length ?? 0);
+      (input.nodeIslands?.islands.length ?? 0) +
+      (input.nodeIslands?.userModules.length ?? 0) +
+      (input.nodeExecution?.packages.length ?? 0) +
+      (input.nodeExecution?.modules.length ?? 0);
     out.push(
       candidates > 0
         ? "  source lowering complete — Node-island policy candidates are reported separately."
@@ -649,6 +663,7 @@ export function coverageEnvelope(
         }
       : {}),
     ...(input.analysisMode ? { analysisMode: input.analysisMode } : {}),
+    ...(input.nodeExecution ? { nodeExecution: input.nodeExecution } : {}),
     schema: DIAGNOSTICS_SCHEMA,
     schemaVersion: DIAGNOSTICS_SCHEMA_VERSION,
     compilerVersion: opts.compilerVersion,

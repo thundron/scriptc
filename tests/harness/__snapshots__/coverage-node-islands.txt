@@ -1,5 +1,8 @@
 scriptc coverage tests/coverage-fixtures/node-islands/main.ts
 
+  Node bridge plan: ni-bundled
+    these imports lower through Node; executable linking needs a libnode pack.
+
   statements analyzed   29
   compile statically    28  (96%)
     in dynamic tier     14  (operate on values typed only at runtime; --explain-dynamic lists them)

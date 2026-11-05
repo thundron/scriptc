@@ -1236,7 +1236,7 @@ test(`every corpus program is 100% static (corpus and coverage agree${shardSuffi
     // (the deferred-fence corpus) — it still passes the differential
     // oracle because the fences never execute.
     const deferred = /^\/\/ @deferred-fences:\s*(\d+)\s*$/.exec(firstLine);
-    const { coverage } = analyze(file, {});
+    const { coverage } = analyze(file, { nodeIslands: { mode: "off" } });
     expect.soft(coverage.diagnostics, file).toEqual([]);
     // Corpus programs match Node by definition: a divergence warning on one
     // is a false positive.
@@ -1259,4 +1259,18 @@ test("library coverage uses the profile export roots and static-only fences", ()
   expect(coverageEnvelope(coverage, { compilerVersion: "test", sourceTexts }).analysisMode).toBe(
     "library",
   );
+});
+
+test("coverage separates actual Node bridge placement from native source admission", () => {
+  const entry = join(repoRoot, "tests/corpus/7009-finalization-registry-wasm-loader/main.ts");
+  const automatic = analyze(entry).coverage;
+  expect(automatic.npmStatic).toContainEqual({ package: "counter-wasm", status: "static" });
+  expect(automatic.nodeExecution?.packages).toContain("counter-wasm");
+  expect(renderCoverage(automatic)).toContain("Node bridge plan: counter-wasm");
+  expect(
+    coverageEnvelope(automatic, { compilerVersion: "test" }).nodeExecution?.packages,
+  ).toContain("counter-wasm");
+  const native = analyze(entry, { nodeIslands: { mode: "off" } }).coverage;
+  expect(native.diagnostics).toEqual([]);
+  expect(native.nodeExecution).toBeUndefined();
 });

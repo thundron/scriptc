@@ -157,6 +157,7 @@ export interface TiersEnvelope {
 
 export interface DiagnosticsEnvelope {
   analysisMode?: "library";
+  nodeExecution?: { packages: string[]; modules: string[] };
   /** Source graph admission is not a promise of native execution or link success. */
   npmSourceAdmission?: {
     package: string;

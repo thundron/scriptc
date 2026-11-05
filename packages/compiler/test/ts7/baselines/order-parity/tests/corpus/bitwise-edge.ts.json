@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/bitwise-edge.ts"
+ ],
+ "diags": []
+}

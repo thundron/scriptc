@@ -1,3 +1,4 @@
+// @requires-icu
 // A package builds its segmenters at module load (pi-tui, grok-mermaid):
 // a grapheme segmenter with a locale tag, one with empty options, and a
 // word segmenter that only some paths use. Grapheme segmentation matches

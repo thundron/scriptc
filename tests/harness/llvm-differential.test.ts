@@ -246,6 +246,7 @@ async function build(file: string, optimization: "release" | "dev") {
     outPath: join(outDir, `program-llvm-${optimization}${sanitize ? "-san" : ""}`),
     outDir,
     sanitize,
+    ...(requiresLibnode(file) ? {} : { nodeIslands: { mode: "off" as const } }),
     optimization,
     ...(cpuDispatch ? { cpuDispatch } : {}),
     ...(targetCpu === undefined ? {} : { targetCpu }),

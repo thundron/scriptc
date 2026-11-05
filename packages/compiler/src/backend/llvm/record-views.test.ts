@@ -226,3 +226,13 @@ console.log(v.a);
   expect(views.partial(idOf("a"), idOf("a,b"))).toBe(false);
   expect(views.partialTargets.size).toBe(0);
 });
+
+test("initialized noncapturing callable declarations share width views", async () => {
+  const views = await plannedViews(`
+function check(value: unknown): boolean { check.errors = null; return value !== null; }
+check.errors = null as string[] | null;
+check.tag = 1;
+const view: ((value: unknown) => boolean) & {errors: string[] | null} = check;
+view.errors = ["bad"]; console.log(check.errors, view(1));`);
+  expect(views).toEqual(new Map([["%call,errors", ["%call,errors,tag"]]]));
+});

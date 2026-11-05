@@ -10244,6 +10244,13 @@ function lowerObjectStaticCall(
   const enumerated = objectEnumerationReceiver(lowerer, lowerer.lowerExpr(argNode), argIr, loc);
   // A record that kept undeclared properties of its checked source answers
   // from its live checked view (values checked into the static result).
+  if (shape.fields.some((field) => field.name === "%call")) {
+    lowerer.unsupported(
+      "SC1090",
+      argNode,
+      "enumerating a callable value's own properties (the native call slot is not a JavaScript property)",
+    );
+  }
   const recordT = argIr;
   const sourced = (staticAnswer: (record: IrExpr) => IrExpr): IrExpr =>
     recordMayKeepSource(lowerer, recordT)

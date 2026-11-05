@@ -5502,6 +5502,7 @@ export class Lowerer {
     const islands = this.nodeIslands;
     const shadow = canonShadowHook(this.checker);
     this.typeCtx = {
+      growableTuple: (arity) => this.facts.growableTupleArities().has(arity),
       ...(islands !== null ? { foreignType: (t: ts.Type) => this.foreignType(t) } : {}),
       checker: this.checker,
       positionOf: (node) => this.positions.of(node),

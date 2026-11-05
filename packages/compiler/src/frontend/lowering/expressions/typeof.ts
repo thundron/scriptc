@@ -311,6 +311,8 @@ export function lowerTypeofExpr(lowerer: Lowerer, expr: ts.TypeOfExpression, loc
     undefinedT: "undefined",
     nullT: "object",
   };
+  if (lowerer.checker.getCallSignatures(lowerer.typeOf(expr.expression)).length > 0)
+    operand = lowerer.hybridCallUnwrap(operand);
   // An f64 handle (a readline Interface, a Timeout) is an object.
   const folded =
     operand.type.kind === "f64" && isF64HandleTyped(lowerer, expr.expression)

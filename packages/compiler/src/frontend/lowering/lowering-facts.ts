@@ -1,3 +1,4 @@
+import { growableTupleArities } from "./tuple-storage.js";
 /* The program facts one island round's lowering passes share.
  *
  * lowerToIrWithIslands constructs a Lowerer per pass: validation, reachable
@@ -126,6 +127,8 @@ export class LoweringFacts {
   private opinionIndexVerified = false;
   private jsDynamicVerified = false;
   private protocols: ClassProtocols | null = null;
+  private tupleArities: ReadonlySet<number> | null = null;
+  private tupleAritiesVerified = false;
 
   /** Whether hits are recomputed and compared (SCRIPTC_LOWERING_FACTS_VERIFY). */
   readonly verify: boolean;
@@ -320,6 +323,24 @@ export class LoweringFacts {
   classProtocols(): ClassProtocols {
     this.protocols ??= new ClassProtocols(this.program.getTypeChecker(), this.moduleOrder);
     return this.protocols;
+  }
+
+  growableTupleArities(): ReadonlySet<number> {
+    const compute = () => growableTupleArities(this.moduleOrder, this.program.getTypeChecker());
+    if (this.tupleArities === null) return (this.tupleArities = compute());
+    if (this.verify && !this.tupleAritiesVerified) {
+      this.tupleAritiesVerified = true;
+      const fresh = compute();
+      this.countVerified("growableTupleArities");
+      if (
+        fresh.size !== this.tupleArities.size ||
+        [...fresh].some((arity) => !this.tupleArities!.has(arity))
+      )
+        throw new InternalCompilerError(
+          "growable tuple representation facts changed during lowering",
+        );
+    }
+    return this.tupleArities;
   }
 
   private verifyHit<T>(fact: string, known: T, recompute: () => T): T {

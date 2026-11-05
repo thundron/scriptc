@@ -624,6 +624,33 @@ export function lowerNullishPair(
       );
     }
   }
+  // A present record may be structurally wider than the fallback/result.
+  // Narrow only after the original nullish test, then use the ordinary
+  // shared checked record boundary; the fallback remains lazy.
+  const recordPresent = rest.length === 1 ? rest[0]! : null;
+  if (recordPresent?.kind === "record" && type.kind === "record") {
+    const helper = lowerer.narrowedArmHelper(left.type.unionId, recordPresent, loc);
+    if (helper !== null) {
+      return nullishBranches(
+        lowerer,
+        left,
+        left.type,
+        def.arms,
+        type,
+        loc,
+        () => lowerer.lowerExprExpecting(expr.right, type),
+        (stable) =>
+          lowerer.coerceInto(
+            expr.left,
+            lowerer.coerceToExpected(
+              { kind: "call", callee: helper, args: [stable], type: recordPresent, loc },
+              DYN,
+            ),
+            type,
+          ),
+      );
+    }
+  }
   // A subclass value defaulted to a base-class value (`circle ?? shape`):
   // the present arm upcasts after the original nullish test, and the
   // default lowers lazily into the base-class result.
@@ -2642,6 +2669,16 @@ export function lowerStrictEquality(
   negated: boolean,
   loc: SrcLoc,
 ): IrExpr {
+  if (
+    left.type.kind === "func" &&
+    lowerer.checker.getCallSignatures(lowerer.typeOf(rightNode)).length > 0
+  )
+    right = lowerer.hybridCallUnwrap(right);
+  if (
+    right.type.kind === "func" &&
+    lowerer.checker.getCallSignatures(lowerer.typeOf(leftNode)).length > 0
+  )
+    left = lowerer.hybridCallUnwrap(left);
   // JavaScript: a checked-dynamic name the checker's flow analysis narrowed
   // (`let c; ... (c = s[i]) === " "`) is compared unchecked. Strict
   // equality never throws, and the flow type is the checker's inference

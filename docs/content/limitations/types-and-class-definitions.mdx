@@ -8,3 +8,17 @@ const results = await Promise.all(jobs); // number[]
 ```
 
 `Promise.allSettled` and `Promise.any` take the same `Promise<T>[]` input and return `PromiseSettledResult<T>[]` and `T`.
+
+Homogeneous fixed tuples written through runtime indices use growable array storage, including generic and readonly views of that tuple family.
+Aliases observe element replacement, holes, length growth and non-index numeric properties.
+Read-only tuple programs and literal-index-only writes retain their fixed layout; runtime writes to mixed-element fixed tuples remain unsupported.
+
+JavaScript `var` reads before assignment observe `undefined`, including direct reads and self-referencing initializers.
+TypeScript definite-assignment errors remain enforced.
+Nullish coalescing can widen a present record into the fallback's record type through a shared checked native view, without eagerly evaluating the fallback or detaching mutations from the original record.
+
+A module-level function declaration with initialized expando properties can be assigned to a matching callable intersection type.
+The declaration and its typed aliases share property updates and function identity.
+The callable signature and retained property types must match; a narrower alias with opaque or capturing extra properties is unsupported rather than copied into disconnected storage.
+Required properties must be initialized before materializing the alias.
+Enumeration of callable aliases with `Object.keys`, `Object.values` or `Object.entries` remains unsupported; the compiler's internal call slot is not a JavaScript property.

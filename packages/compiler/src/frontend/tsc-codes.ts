@@ -289,6 +289,13 @@ const JSDOC_CLAIM =
   "a JSDoc type-space claim is documentation Node never reads: the values keep their runtime behavior and every use meets the per-site fences";
 
 const OPINION_ROWS: readonly (readonly [number, Opinion])[] = [
+  [
+    2454,
+    CHECKER(
+      "JavaScript var bindings start as undefined; the hoisting analysis gives early reads runtime-optional storage",
+      ["tests/corpus/var-direct-early-reads.js", "tests/corpus/5114-var-hoisting-js.js"],
+    ),
+  ],
   // implicit any (params, variables, elements, this, returns, rest,
   // construct signatures, index reads over shapes with no index signature —
   // typeof globalThis)
@@ -1400,16 +1407,6 @@ const TRIAGE_ROWS: readonly (readonly [number, JsTscCodeTriage])[] = [
     ),
   ],
   [2451, KEEP(KEEP_GRAMMAR)],
-  [
-    2454,
-    REFUSE(
-      "a 'var' read before its assignment",
-      "the construct is legal JavaScript: admitting it needs a differential proof that the lowering is Node-exact — the checker's refusal stands until then",
-    ),
-  ],
-  // The `+` and `+=` forms have left this decision: the JS_OPINIONS row above
-  // admits them where the lowering reproduces Node's TypeError. This row
-  // stays for the operators whose lowered form would throw another message.
   [
     2469,
     REWRITE(

@@ -2840,7 +2840,7 @@ export function lowerElementWrite(lowerer: Lowerer, expr: ts.BinaryExpression): 
         lowerer.unsupported(
           "SC1090",
           target.argumentExpression,
-          "tuple indexing with a non-literal index (tuples are fixed-shape — use t[0], t[1], ...)",
+          "runtime-index writes to a heterogeneous fixed tuple (homogeneous tuple families use growable array storage)",
         );
       }
       const fieldType = shape.fields.find((f) => f.name === String(idx))?.type;

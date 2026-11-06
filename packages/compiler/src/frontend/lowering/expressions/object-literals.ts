@@ -51,6 +51,7 @@ import { builtinGlobalValue } from "./property-access.js";
 import { holdsEvolvingArray } from "../lower-stmts.js";
 import { builtinNamespaceValue } from "../builtin-namespaces.js";
 import { tsUntypedGlobalValue } from "../global-values.js";
+import { lowerFiniteUnionSpreadMerge } from "./union-spreads.js";
 
 /** `{ a: 1, b: "x" }` → recordLit. The record type comes from the
  * contextual type when tsc has one (annotated declarations, arguments,
@@ -1147,6 +1148,7 @@ export function lowerObjectLiteral(
       // `k?: ...` — which desugar to one conditional field at the
       // spread's own position (any position: they introduce one fresh
       // name, collision-fenced below). Everything else stays fenced.
+      if (lowerer.spreadArmOverrides.has(spreadSourceNode(lowerer, prop.expression))) continue;
       const cs = conditionalSpreadOf(prop.expression) ?? andSpreadOf(lowerer, prop.expression);
       if (cs === "unsupported" && conditionalRecordSpreadOf(lowerer, prop.expression) === null) {
         deferredConditionalSpread ??= prop;
@@ -1446,6 +1448,13 @@ export function lowerObjectLiteral(
     return lowerDynObjectLiteral(lowerer, expr);
   }
   if (deferredConditionalSpread) {
+    const native =
+      !exact && mapped?.kind === "union" ? lowerNativeUnionSpread(lowerer, expr, mapped) : null;
+    if (native) return native;
+    if (!exact && mapped?.kind === "union") {
+      const dynamic = lowerUnionSpreadMergeDyn(lowerer, expr, mapped);
+      if (dynamic) return dynamic;
+    }
     // The checked-dynamic build copies whichever arm the conditional picks,
     // in Node's own-key order, so a shape the field desugar cannot express
     // still lands — copy then validate into the record. When the target has
@@ -1465,13 +1474,14 @@ export function lowerObjectLiteral(
     // A spread merge over UNION-typed sources (`{ ...base, ...override }`
     // with `base`, `override` of arm-union types) has one field set per
     // combination of source arms, so its own type is a union of records.
-    // No single arm of the contextual union can hold that value without
-    // dropping the fields the other arms contributed (Node keeps them
-    // all), and a runtime tag would be a guess about which arm the value
-    // "is". Build the object Node builds instead — the checked-dynamic
-    // copy — and let the union's checked conversion validate it.
+    // Plan a native layout for every finite combination before emitting
+    // the copy. If no total native plan preserves all contributed keys,
+    // auto mode can still build a checked-dynamic object and validate it
+    // into the declared union; static-only/library builds keep the fence.
     if (mapped?.kind === "union") {
       if (!exact && unionCtx?.kind === "union") {
+        const native = lowerNativeUnionSpread(lowerer, expr, unionCtx);
+        if (native) return native;
         const merged = lowerUnionSpreadMergeDyn(lowerer, expr, unionCtx);
         if (merged) return merged;
       }
@@ -2058,7 +2068,12 @@ export function lowerObjectLiteral(
       }
     }
     if (ts.isSpreadAssignment(prop)) {
-      const cs = conditionalSpreadOf(prop.expression) ?? andSpreadOf(lowerer, prop.expression);
+      const overriddenSpread = lowerer.spreadArmOverrides.has(
+        spreadSourceNode(lowerer, prop.expression),
+      );
+      const cs = overriddenSpread
+        ? null
+        : (conditionalSpreadOf(prop.expression) ?? andSpreadOf(lowerer, prop.expression));
       if (cs && cs !== "unsupported") {
         widthBlocked = true;
         // `...(c ? { k: v } : {})` — one conditional field per carried
@@ -2142,7 +2157,9 @@ export function lowerObjectLiteral(
       // once, including empty sources and those whose fields are all
       // overridden. Field snapshots above preserve the copy order.
       const srcNode = spreadSourceNode(lowerer, prop.expression);
-      const condRecord = conditionalRecordSpreadOf(lowerer, prop.expression);
+      const condRecord = overriddenSpread
+        ? null
+        : conditionalRecordSpreadOf(lowerer, prop.expression);
       let srcLowered = capture(
         condRecord !== null
           ? lowerConditionalRecordSpread(lowerer, condRecord, locOf(prop))
@@ -2977,6 +2994,25 @@ function isEmptyArrayLiteral(node: ts.Node): boolean {
  * absence arm included) throws the catchable TypeError. Null when the
  * literal is not this shape, before anything is lowered except the
  * source; the caller keeps its refusal. */
+function lowerNativeUnionSpread(
+  lowerer: Lowerer,
+  expr: ts.ObjectLiteralExpression,
+  target: IrType & { kind: "union" },
+): IrExpr | null {
+  // Preserve auto mode's existing representation and compile cost. This
+  // native product is the static-only/library alternative to demotion.
+  if (lowerer.tierMode !== "static-only") return null;
+  return lowerFiniteUnionSpreadMerge(lowerer, expr, target, {
+    source: (node) => spreadSourceNode(lowerer, node),
+    name: (name) =>
+      ts.isComputedPropertyName(name)
+        ? literalComputedKey(lowerer, name)
+        : propNameText(lowerer, name),
+    build: (arm) => lowerObjectLiteral(lowerer, expr, arm, true),
+    shorthand: (prop) => lowerShorthandValue(lowerer, prop),
+  });
+}
+
 function lowerDistributedUnionSpread(
   lowerer: Lowerer,
   expr: ts.ObjectLiteralExpression,
@@ -4358,6 +4394,8 @@ export function lowerShorthandValue(
   // Identifier (the grammar allows nothing else in shorthand position).
   const propName = prop.name as ts.Identifier;
   const loc = locOf(propName);
+  const overridden = lowerer.chainRecvByNode.get(propName);
+  if (overridden) return { ...overridden, loc };
   const symbol = lowerer.checker.getShorthandAssignmentValueSymbol(prop);
   // Import identifiers in shorthand position carry the property's symbol,
   // so the ordinary identifier expression path cannot resolve them.

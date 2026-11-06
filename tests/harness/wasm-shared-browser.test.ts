@@ -80,14 +80,15 @@ self.onmessage=async()=>{
   const buffer=runtime.buffer(8);buffer.writeFloat32(new Float32Array([1,2,3,4,5,6,7,8]));
   const counters=await Promise.all([runtime.call('run',[buffer,0,4,10]),runtime.call('run',[buffer,4,8,20])]);
   const states=await Promise.all([runtime.call('state',[]),runtime.call('state',[])]);
-  const values=Array.from(buffer.readFloat32()),sum=await runtime.call('sum',[buffer]);buffer.release();
+  const values=Array.from(buffer.readFloat32()),sum=await runtime.call('sum',[buffer]);
+  const readOnlySums=await Promise.all([runtime.call('readOnlySum',[buffer]),runtime.call('readOnlySum',[buffer])]);buffer.release();
   const text=await runtime.call('text',['é\\0']);
   const cstring=await runtime.call('cstring',['hello']);
   const returned=Array.from(await runtime.call('bytes',[new Uint8Array([0,127,128,255])]));
   const negativeZero=Object.is(await runtime.call('echo',[-0]),-0);
   const nan=Number.isNaN(await runtime.call('echo',[NaN]));
   const randomOkay=await runtime.call('randomOkay',[]);
-  const result={crossOriginIsolated:self.crossOriginIsolated,capabilities:runtime.capabilities,fallbackReason,counters,states,values,sum,text,cstring,returned,negativeZero,nan,randomOkay};
+  const result={crossOriginIsolated:self.crossOriginIsolated,capabilities:runtime.capabilities,fallbackReason,counters,states,values,sum,readOnlySums,text,cstring,returned,negativeZero,nan,randomOkay};
   await runtime.close();runtime=null;self.postMessage(result);
  }catch(error){self.postMessage({error:String(error)});}
  finally{if(runtime)await runtime.close();}
@@ -260,6 +261,7 @@ test.runIf(!!chromium && threaded)(
         expect(result.error).toBeUndefined();
         expect(result.values).toEqual([11, 12, 13, 14, 25, 26, 27, 28]);
         expect(result.sum).toBe(156);
+        expect(result.readOnlySums).toEqual([156, 156]);
         expect(result.text).toBe("é\0λ\0😀");
         expect(result.cstring).toBe("hello✓");
         expect(result.returned).toEqual([0, 127, 128, 255]);

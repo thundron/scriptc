@@ -550,6 +550,7 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "buffer.fromStr": "scr_bytes_from_str",
   "shared.f32New": "scr_shared_f32_new",
   "shared.f32View": "scr_shared_f32_view",
+  "shared.f32ReadOnlyView": "scr_shared_f32_readonly_view",
   "shared.f32Release": "scr_shared_f32_release_handle",
   "buffer.fromStrChecked": "scr_bytes_from_str_checked",
   "buffer.brand": "scr_bytes_as_buffer",

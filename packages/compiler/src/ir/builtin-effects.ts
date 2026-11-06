@@ -10,6 +10,7 @@ import type { IrLibFn } from "./builtin-signatures.js";
 export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "shared.f32New",
   "shared.f32View",
+  "shared.f32ReadOnlyView",
   "shared.f32Release",
   // The copied error of a synchronous call into Node (@scriptc/node).
   "nodeIsland.callSync",

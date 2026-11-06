@@ -106,6 +106,9 @@ export function shared(handle) {
   if (!slot) throw new RangeError("invalid shared float32 handle");
   return new Float32Array(slot.buffer);
 }
+export function sharedReadOnly(handle) {
+  return shared(handle);
+}
 export function releaseShared(handle) {
   const slot = sharedSlot(handle);
   if (!slot) throw new RangeError("invalid shared float32 handle");

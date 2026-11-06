@@ -26,6 +26,9 @@
  *     run packages/compiler/test/ts7/order-parity.test.ts rewrites
  *     baselines/order-parity/ from the CURRENT native lane; commit it
  *     with the behavior delta stated in the message, one bump per commit.
+ *     For new fixtures, SCRIPTC_TS7_BASELINE_FILTER selects repository-relative
+ *     paths by regex while updating. A filtered update never prunes other
+ *     baselines; completeness and ordinary parity checks still cover all entries.
  *  5. Then the real gates: pnpm build + lint, both vitest lanes uncached,
  *     and the diagnostics snapshots (tests/harness/__snapshots__) — those
  *     re-pin the same way, one snapshot per commit with the delta named.
@@ -162,7 +165,10 @@ for (let i = 0; i < entries.length; i += CHUNK) chunks.push(entries.slice(i, i +
 if (UPDATE) {
   test("re-record baselines from the current native frontend", async () => {
     const written = new Set<string>();
-    const all = allEntries();
+    const pattern = process.env["SCRIPTC_TS7_BASELINE_FILTER"];
+    const filter = pattern === undefined ? null : new RegExp(pattern);
+    const all = allEntries().filter((entry) => filter === null || filter.test(relativeName(entry)));
+    if (all.length === 0) throw new Error("baseline update filter matched no fixtures");
     for (let i = 0; i < all.length; i += CHUNK) {
       const batch = all.slice(i, i + CHUNK);
       const answers = await nativeAnswers(batch);
@@ -174,9 +180,10 @@ if (UPDATE) {
       }
     }
     // Drop the baselines of fixtures that no longer exist.
-    for (const path of globSync(join(repoRoot, ORDER_BASELINE_DIR, "**/*.json"))) {
-      if (!written.has(path)) rmSync(path);
-    }
+    if (filter === null)
+      for (const path of globSync(join(repoRoot, ORDER_BASELINE_DIR, "**/*.json"))) {
+        if (!written.has(path)) rmSync(path);
+      }
   }, 600_000);
 } else {
   describe(`preflight/order canary vs recorded 5.9.3 baselines (${entries.length} entries${FULL ? ", full sweep" : ""})`, () => {

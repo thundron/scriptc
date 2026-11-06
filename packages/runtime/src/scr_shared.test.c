@@ -147,9 +147,16 @@ static void raw_f32_registry(void) {
     double handle = scriptc_shared_f32_new(4);
     assert(handle > 0);
     ScrBytes *left = scr_shared_f32_view(handle), *right = scr_shared_f32_view(handle);
+    ScrBytes *input = scr_shared_f32_readonly_view(handle);
+    ScrBytes *part = scr_bytes_subarray(input, 1, 3);
     assert(left != right && left->backing == right->backing);
+    assert(!left->shared_readonly && !right->shared_readonly && !left->backing->shared_readonly);
+    assert(input->shared_readonly && input->backing == left->backing);
+    assert(part->shared_readonly && part->data == input->data + sizeof(float));
     assert(scriptc_shared_f32_release(handle) == 0);
     scr_bytes_release(left);scr_bytes_release(right);
+    assert(input->len == 4 && part->len == 2);
+    scr_bytes_release(input);scr_bytes_release(part);
     assert(scr_array_buffers_held(true) == held && scr_weak_dispose_hook == saved_hook);
   }
   double owner = scriptc_shared_f32_new(1);

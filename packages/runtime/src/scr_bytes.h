@@ -87,6 +87,9 @@ typedef struct ScrBytes {
    * value that held this view (see scr_dyn_trace_v). In padding, so the
    * offsets compiled code uses hold. */
   bool properties_traced;
+  /* Explicit immutable-input promise on this view, not a buffer freeze.
+   * Shared writers through any alias must be excluded while it is read. */
+  bool shared_readonly;
 #if SIZE_MAX > UINT32_MAX
   uint16_t held_hi; /* bits 32-47 of the counted storage, in padding */
 #endif
@@ -100,8 +103,13 @@ typedef struct ScrBytes {
 #endif
 } ScrBytes;
 #if SIZE_MAX > UINT32_MAX
-_Static_assert(offsetof(ScrBytes, data) == 24 && offsetof(ScrBytes, shared) == 48 && sizeof(ScrBytes) == 64,
+_Static_assert(offsetof(ScrBytes, data) == 24 && offsetof(ScrBytes, shared) == 48 &&
+               offsetof(ScrBytes, shared_readonly) == 45 && sizeof(ScrBytes) == 64,
                "the counted storage sits in padding: compiled code reads data at 24 and shared at 48");
+#else
+_Static_assert(offsetof(ScrBytes, data) == 12 && offsetof(ScrBytes, shared) == 28 &&
+               offsetof(ScrBytes, shared_readonly) == 25 && sizeof(ScrBytes) == 40,
+               "the read-only promise sits in padding: data at 12 and shared at 28");
 #endif
 
 /* The bytes of storage an owner counts in process.memoryUsage()'s
@@ -772,6 +780,7 @@ uintptr_t scriptc_shared_f32_data(double handle);
 double scriptc_shared_f32_length(double handle);
 double scr_shared_f32_new(double length);
 ScrBytes *scr_shared_f32_view(double handle);
+ScrBytes *scr_shared_f32_readonly_view(double handle);
 void scr_shared_f32_release_handle(double handle);
 
 #endif /* SCR_BYTES_H */

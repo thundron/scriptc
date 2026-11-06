@@ -2576,10 +2576,9 @@ function mapTypeInner(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
     if (!ctx.erasedMember || ctx.erasedMember.outerConsulted) contextResolutions++;
     return DYN;
   }
-  // Readonly<C> over a program class (Object.freeze's result type) is the
-  // same instance.
-  const readonlyClass = readonlyClassType(type, ctx);
-  if (readonlyClass !== null) return readonlyClass;
+  // Readonly<C> preserves a native class or typed-array view's identity.
+  const readonlyReference = readonlyNativeReferenceType(type, ctx);
+  if (readonlyReference !== null) return readonlyReference;
   if (resolveTypeParam && type.flags & ts.TypeFlags.TypeParameter) {
     const bound = resolveTypeParam(type);
     if (bound) {
@@ -7723,7 +7722,7 @@ function mentionsMappedParams(
   return false;
 }
 
-function readonlyClassType(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
+function readonlyNativeReferenceType(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   const alias = type.getAliasSymbol();
   if (alias === undefined || ts.symbolName(alias) !== "Readonly") return null;
   const args = type.getAliasTypeArguments();
@@ -7733,7 +7732,9 @@ function readonlyClassType(type: ts.Type, ctx: TypeMapperCtx): IrType | null {
   );
   if (!isLibAlias) return null;
   const mapped = mapType(args[0], ctx);
-  return mapped !== null && isDynTypedRefType(mapped) ? mapped : null;
+  // A readonly type annotation changes the write surface, not the view's
+  // representation or backing identity. It is not a concurrency promise.
+  return mapped !== null && (isDynTypedRefType(mapped) || mapped.kind === "bytes") ? mapped : null;
 }
 
 function mapGenericUtilityAlias(widened: ts.Type, ctx: TypeMapperCtx): IrType | null {

@@ -1,4 +1,4 @@
-import { shared, allocateShared, releaseShared, add, mul, add4 } from "@scriptc/experimental/f32";
+import { shared, sharedReadOnly, allocateShared, releaseShared, add, mul, add4 } from "@scriptc/experimental/f32";
 let privateCounter = 0;
 export function run(handle: number, begin: number, end: number, bias: number): number {
   const values = shared(handle);
@@ -13,6 +13,15 @@ export function sum(handle: number): number {
   const values = shared(handle);
   let total = 0;
   for (let i = 0; i < values.length; i++) total = add(total, values[i]);
+  return total;
+}
+export function readOnlySum(handle: number): number {
+  const values = sharedReadOnly(handle), lanes = new Float32Array(4);
+  let i = 0;
+  for (; i + 4 <= values.length; i += 4) add4(lanes, 0, lanes, 0, values, i);
+  let total = 0;
+  for (let j = 0; j < 4; j++) total = add(total, lanes[j]!);
+  for (; i < values.length; i++) total = add(total, values[i]!);
   return total;
 }
 export function allocate(length: number): number { return allocateShared(length); }

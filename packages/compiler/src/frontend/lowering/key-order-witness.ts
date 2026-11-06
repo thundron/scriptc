@@ -136,11 +136,14 @@ export type WidthSegment =
   | { kind: "spread"; value: IrExpr & { kind: "varRef" } }
   | { kind: "key"; name: string };
 
-/** A width literal's contributors and whether its static copy drops source
- * keys the target does not declare. */
+/** A literal's contributors and whether its static copy needs a kept
+ * source for undeclared keys or for an observed union merge's own order. */
 export interface WidthNote {
   segments: readonly WidthSegment[];
   drops: boolean;
+  /** Finite union merges retain the contributors' actual own-key order
+   * when reflection observes them, without changing their native layout. */
+  preserveOrder?: true;
 }
 
 /** Witness notes the lowering attaches to the IR nodes it builds. Keyed by
@@ -208,6 +211,11 @@ export class KeyOrderNotes {
 
   widthOf(node: IrExpr): WidthNote | undefined {
     return this.widths.get(node);
+  }
+
+  preserveSpreadOrder(node: IrExpr): void {
+    const note = this.widths.get(node);
+    if (note) this.widths.set(node, { ...note, preserveOrder: true });
   }
 
   /** A statically-false `"k" in r` over a closed record, which a kept
@@ -797,6 +805,7 @@ export function applyKeyOrderWitnesses(lowerer: Lowerer, fns: readonly IrFunctio
    * today's table (as a literal with a dropped field does without the
    * kept source). */
   const keptDropShapes = new Set<string>();
+  const keptOrderLiterals = new Set<IrExpr>();
   {
     const early = new Set<string>();
     const earlySeen = new Set<string>();
@@ -830,7 +839,12 @@ export function applyKeyOrderWitnesses(lowerer: Lowerer, fns: readonly IrFunctio
     for (let grew = true; grew;) {
       grew = false;
       for (const { wrapper, literal, note } of widthSites) {
-        if (!note.drops || keptWidths.has(wrapper) || literal.type.kind !== "record") continue;
+        if (
+          (!note.drops && !note.preserveOrder) ||
+          keptWidths.has(wrapper) ||
+          literal.type.kind !== "record"
+        )
+          continue;
         if (!early.has(literal.type.shapeId) || !widthKeepable(lowerer, wrapper, note.segments))
           continue;
         keptWidths.add(wrapper);
@@ -874,21 +888,22 @@ export function applyKeyOrderWitnesses(lowerer: Lowerer, fns: readonly IrFunctio
       if (!keptWidths.has(wrapper) || literal.type.kind !== "record") continue;
       const shapeId = literal.type.shapeId;
       notes.keptSourceShapes.add(shapeId);
-      if (!note.drops) {
+      if (!note.drops && !note.preserveOrder) {
         // A same-shape copy keeps its own order (a spread of the literal's
         // own shape reads its source's index): its witness stays, and the
         // plan finds the source binding through the wrapper's prologue.
         keptLiteralStmts.set(literal, wrapper.stmts);
         continue;
       }
-      // A kept copy that drops keys enumerates through its own kept source,
-      // so like a checked conversion it contributes no order to its shape's
-      // table, and the shape keeps today's table.
+      // The kept source supplies this copy's order, not its shape's table.
+      // Ordinary constructors of the same shape can still use a witness;
+      // only a copy dropping fields suppresses that shape's table entirely.
       const segments = notes.literalOf(literal);
       const literals = facts.get(shapeId)?.literals;
       const at = segments === undefined || literals === undefined ? -1 : literals.indexOf(segments);
       if (at >= 0) literals!.splice(at, 1);
-      keptDropShapes.add(shapeId);
+      if (note.drops) keptDropShapes.add(shapeId);
+      else keptOrderLiterals.add(literal);
     }
     // Same-shape clones of a record that can keep keys copy them too, when
     // the program converts checked values or keeps a width spread and the
@@ -1749,6 +1764,9 @@ export function applyKeyOrderWitnesses(lowerer: Lowerer, fns: readonly IrFunctio
     return null;
   };
   const orderIndex = (id: string, lit: IrExpr & { kind: "recordLit" }): IrExpr | number | null => {
+    // Its kept source is authoritative. Initialize the native witness too
+    // when the same shape's ordinary values use a finite order table.
+    if (keptOrderLiterals.has(lit)) return 0;
     const orders = variants.get(id)!;
     const segments = notes.literalOf(lit);
     if (segments !== undefined && selfSpread(segments, id)) {

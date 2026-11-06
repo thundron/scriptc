@@ -29,7 +29,9 @@ Under Node.js, `run(fn)` returns `fn()` and `release()` does nothing.
 
 ## Binary32 arithmetic
 
-Import explicit single-precision operations from `@scriptc/experimental/f32`. Each operation rounds its operands and result to binary32. Ordinary `number` expressions and embedding arguments remain binary64; operations do not enable fast math or multiply-add fusion. `min` and `max` propagate NaNs and preserve the JavaScript signed-zero rules. NaN payload bits are not part of the contract.
+Import explicit single-precision operations from `@scriptc/experimental/f32`. Each operation rounds its operands and result to binary32. Ordinary `number` expressions retain their JavaScript binary64 semantics, and embedding arguments remain binary64. Operations do not enable fast math or multiply-add fusion. `min` and `max` propagate NaNs and preserve the JavaScript signed-zero rules. NaN payload bits are not part of the contract.
+
+The compiler can also use binary32 instructions in ordinary code when it proves the result is unchanged: `Math.min` and `Math.max` of exactly representable binary32 values, or addition, subtraction, and multiplication of those values at a `Math.fround` boundary or a statement-only Float32Array store. An assignment expression's returned value remains unrounded binary64. Other arithmetic, including ordinary division, keeps its binary64 path.
 
 ```ts
 import { add, mul, add4 } from "@scriptc/experimental/f32";
@@ -87,7 +89,9 @@ try {
 }
 ```
 
-Inside compiled source, `shared(handle)` returns a context-local Float32Array view. `allocateShared(length)` and `releaseShared(handle)` manage raw, runtime-scoped handles; existing views remain valid after a handle is released. Raw numeric handles require caller-managed job lifetimes. Shared backing is atomic-owned; mutable objects, closures, globals, and GC roots remain private to each worker. Shared element accesses use atomic loads/stores, while vector arithmetic can operate on gathered lanes.
+Inside compiled source, `shared(handle)` returns a context-local Float32Array view. `allocateShared(length)` and `releaseShared(handle)` manage raw, runtime-scoped handles; existing views remain valid after a handle is released. Raw numeric handles require caller-managed job lifetimes. Shared backing is atomic-owned; mutable objects, closures, globals, and GC roots remain private to each worker. Four-lane operations on mutable shared views retain their atomic gather/scatter paths.
+
+Use `sharedReadOnly(handle)` only with an explicit immutable-input contract: exclude writes through every alias and from every agent while compiled code can read the view, including concurrent jobs. Do not write through the returned view or derived aliases. The function does not freeze storage or synchronize writers; violating the contract is unsupported. It enables non-atomic scalar reads and direct four-lane loads for complete in-range inputs when the output is thread-local. Four-lane writes to shared outputs still use atomic scatter. A `Readonly<Float32Array>` annotation alone does not establish this concurrency contract.
 
 Jobs carry at most 64 KiB of serialized control data; use buffer handles for bulk geometry. `workers` accepts 1–64, and the pending queue defaults to eight jobs per worker. `timeoutMs` and an `AbortSignal` bound shared jobs. Once a job is admitted, a timeout or abort discards the pool and its memory, as does a trap or close with pending jobs; create a fresh runtime afterward. Scalar calls execute synchronously in their hosting context and cannot be interrupted by its own timer. `memoryBytes` reports linear-memory size, not process RSS. Host-import returns remain scalar-only, and callback buffers remain read-only.
 

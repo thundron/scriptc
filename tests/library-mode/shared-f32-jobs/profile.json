@@ -41,6 +41,12 @@
       "returns": "f64"
     },
     {
+      "export": "readOnlySum",
+      "symbol": "sfj_readOnlySum",
+      "params": ["f64"],
+      "returns": "f64"
+    },
+    {
       "export": "allocate",
       "symbol": "sfj_allocate",
       "params": [

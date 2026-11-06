@@ -18,3 +18,13 @@ add4(out, 0, a, Infinity, b, 0); console.log(JSON.stringify(out));
 const base = new Float32Array([1,2,3,4,5,6,7,8]);
 add4(base.subarray(1), 0, base.subarray(0), 0, base.subarray(2), 0);
 console.log(JSON.stringify(base));
+let changing = new Float32Array([1, 2, 3, 4]);
+function replaceInput(): number {
+  changing = new Float32Array([10, 20, 30, 40]);
+  return 0;
+}
+add4(out, 0, changing, replaceInput(), changing, 0);
+console.log(JSON.stringify(out));
+try {
+  add4(out, 0, changing, (() => { throw new Error('index'); })(), changing, 0);
+} catch (error) { console.log(error instanceof Error, JSON.stringify(out)); }

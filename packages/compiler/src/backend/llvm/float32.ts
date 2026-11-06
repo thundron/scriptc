@@ -1,6 +1,44 @@
 import { InternalCompilerError } from "../../errors.js";
-import { emitBytesHeaderLength } from "./expr-bytes.js";
+import {
+  emitBytesHeaderLength,
+  emitBytesSharedStorage,
+  emitBytesReadOnlyShared,
+  noteBytesReceiver,
+} from "./expr-bytes.js";
 import type { LibCallExpr, LlValue, LlvmEmitterContext } from "./expr-context.js";
+import { emitBorrowedInputs } from "./borrowed-inputs.js";
+
+/** Narrow only exact binary32 values and explicit rounding boundaries.
+ * A product of binary32 operands is exact in binary64. A binary64 sum or
+ * difference of them rounds to the same binary32 as the direct operation.
+ * Division and sqrt deliberately keep the existing binary64 path here. */
+export function emitProvenFloat32Math(host: LlvmEmitterContext, expr: LibCallExpr): LlValue | null {
+  const exact = (value: (typeof expr.args)[number]): boolean =>
+    host.float32Values.isValue(value, host.currentFunctionName);
+  if ((expr.fn === "math.min" || expr.fn === "math.max") && expr.args.every(exact))
+    return emitFloat32Math(host, {
+      ...expr,
+      fn: expr.fn === "math.min" ? "math.f32Min" : "math.f32Max",
+    });
+  const value = expr.args[0];
+  if (
+    expr.fn === "math.fround" &&
+    value?.kind === "bin" &&
+    exact(value.left) &&
+    exact(value.right)
+  ) {
+    const fn =
+      value.op === "+"
+        ? "math.f32Add"
+        : value.op === "-"
+          ? "math.f32Sub"
+          : value.op === "*"
+            ? "math.f32Mul"
+            : null;
+    if (fn) return emitFloat32Math(host, { ...expr, fn, args: [value.left, value.right] });
+  }
+  return null;
+}
 
 /** Binary32 computation is explicit: ordinary numeric IR keeps its existing
  * double ABI. Extensions/truncations disappear between chained operations
@@ -54,7 +92,7 @@ export function emitFloat32Math(host: LlvmEmitterContext, expr: LibCallExpr): Ll
  * existing non-racy element accessors, never unguarded native vector memory. */
 export function emitFloat32x4Math(host: LlvmEmitterContext, expr: LibCallExpr): LlValue {
   const B = host.B;
-  const args = expr.args.map((argument) => host.emitExpr(argument));
+  const args = emitBorrowedInputs(host, expr.args);
   const done = B.newLabel("f32x4.done");
   const slow = B.newLabel("f32x4.elements");
   const vector = (a: string, b: string): string => {
@@ -83,9 +121,24 @@ export function emitFloat32x4Math(host: LlvmEmitterContext, expr: LibCallExpr): 
     }
     return result;
   };
-  if (!host.mod.workers && !host.mod.lib?.threadInstances) {
+  {
     const indices: string[] = [];
     for (let i = 0; i < 6; i += 2) {
+      noteBytesReceiver(host, expr.args[i]!, args[i]!.name);
+      if (host.mod.workers || host.mod.lib?.threadInstances) {
+        const storage = emitBytesSharedStorage(host, args[i]!.name);
+        const plain = B.tmp(),
+          local = B.newLabel("f32x4.local");
+        B.line(`${plain} = icmp eq ptr ${storage}, null`);
+        let allowed = plain;
+        if (i !== 0) {
+          const readOnly = emitBytesReadOnlyShared(host, args[i]!.name);
+          allowed = B.tmp();
+          B.line(`${allowed} = or i1 ${plain}, ${readOnly}`);
+        }
+        B.condBr(allowed, local, slow);
+        B.startBlock(local);
+      }
       const length = emitBytesHeaderLength(host, args[i]!.name);
       const capacity = B.tmp(),
         room = B.tmp(),
@@ -143,7 +196,7 @@ export function emitFloat32x4Math(host: LlvmEmitterContext, expr: LibCallExpr): 
     const result = vector(a, b);
     B.line(`store <4 x float> ${result}, ptr ${out}, align 4`);
     B.br(done);
-  } else B.br(slow);
+  }
   B.startBlock(slow);
   const offset = (argument: number, lane: number): LlValue => {
     if (lane === 0) return args[argument]!;

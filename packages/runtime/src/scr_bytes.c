@@ -304,6 +304,7 @@ scr_bytes_own(uint8_t *data, size_t len, ScrBytesElem elem, size_t held) {
   b->shared = NULL;
   b->properties = NULL;
   b->properties_traced = false;
+  b->shared_readonly = false;
   scr_bytes_set_held(b, held);
   scr_array_buffers_local += held;
 #ifdef SCR_RC_AUDIT
@@ -1019,6 +1020,7 @@ ScrBytes *scr_bytes_subarray(ScrBytes *b, double start, double end) {
   v->data = b->data + s * scr_bytes_elem_size(b->elem);
   v->backing = scr_bytes_retain(owner);
   v->is_buffer = b->is_buffer;
+  v->shared_readonly = b->shared_readonly;
   v->is_data_view = false;
   v->external = false;
   v->untransferable = false;
@@ -1392,6 +1394,7 @@ ScrBytes *scr_dataview_new(ScrBytes *src, double byte_off, bool has_len, double 
   v->data = owner->data + (size_t)off;
   v->backing = scr_bytes_retain(owner);
   v->is_buffer = false;
+  v->shared_readonly = false;
   v->is_data_view = true;
   v->external = false;
   v->untransferable = false;
@@ -3741,6 +3744,7 @@ static ScrBytes *scr_pool_take(size_t len) {
   v->data = scr_pool_slab->data + scr_pool_offset;
   v->backing = scr_bytes_retain(scr_pool_slab);
   v->is_buffer = true;
+  v->shared_readonly = false;
   v->is_data_view = false;
   v->external = false;
   v->untransferable = false;

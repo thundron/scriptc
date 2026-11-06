@@ -10213,7 +10213,80 @@ function lowerObjectStaticCall(
   // Inferred records can carry runtime-optional index values that the
   // checker omits (named regex captures). Enumerate the represented shape.
   const represented = tryLowerExpression(lowerer, argNode);
-  if (represented?.type.kind === "record") argIr = represented.type;
+  if (represented?.type.kind === "record" || represented?.type.kind === "union")
+    argIr = represented.type;
+  if (member === "keys" && argIr?.kind === "union") {
+    const type = argIr;
+    const def = lowerer.unions.get(type.unionId);
+    if (
+      def &&
+      def.arms.every((arm) => {
+        if (arm.kind !== "record") return false;
+        const shape = lowerer.shapes.get(arm.shapeId);
+        return (
+          shape !== undefined &&
+          !shape.tuple &&
+          !shape.indexValue &&
+          !shapeHasAccessorSlots(shape) &&
+          !shape.fields.some((field) => field.name.startsWith("%"))
+        );
+      })
+    ) {
+      const loc = locOf(call),
+        resultT = arrayOf(STRING);
+      const local = lowerer.declareHiddenLocal("%unionKeys", type);
+      const ref: IrExpr = { kind: "varRef", localId: local.id, type, loc };
+      let result: IrExpr | null = null;
+      for (let tag = def.arms.length - 1; tag >= 0; tag--) {
+        const arm = def.arms[tag]!;
+        if (arm.kind !== "record") return null;
+        fencePerfEntryKeyWalk(lowerer, arm, call, "Object.keys");
+        fenceX509KeyWalk(lowerer, arm, call, "Object.keys");
+        const narrowed: IrExpr = {
+          kind: "unionNarrow",
+          value: ref,
+          unionId: type.unionId,
+          tag,
+          type: arm,
+          loc,
+        };
+        const keys = recordKeysArrayCall(
+          lowerer,
+          narrowed,
+          arm,
+          lowerer.shapes.get(arm.shapeId)!,
+          loc,
+        );
+        result =
+          result === null
+            ? keys
+            : {
+                kind: "ternary",
+                cond: {
+                  kind: "unionIsTag",
+                  value: ref,
+                  unionId: type.unionId,
+                  tag,
+                  negated: false,
+                  type: BOOL,
+                  loc,
+                },
+                then: keys,
+                else_: result,
+                type: resultT,
+                loc,
+              };
+      }
+      if (result)
+        return {
+          kind: "seqExpr",
+          stmts: [{ kind: "varDecl", localId: local.id, init: lowerer.lowerExpr(argNode), loc }],
+          result,
+          type: resultT,
+          loc,
+        };
+    }
+  }
   if (argIr?.kind !== "record") return null; // Maps, classes, arrays → the SC2020 fence
   const shape = lowerer.shapes.get(argIr.shapeId);
   if (!shape || shape.tuple) return null; // tuple → the fence

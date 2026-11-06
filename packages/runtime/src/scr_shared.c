@@ -672,6 +672,11 @@ ScrBytes *scr_shared_f32_view(double handle) {
   scr_shared_release(storage);
   return view;
 }
+ScrBytes *scr_shared_f32_readonly_view(double handle) {
+  ScrBytes *view = scr_shared_f32_view(handle);
+  if (view) view->shared_readonly = true;
+  return view;
+}
 void scr_shared_f32_release_handle(double handle) {
   if (scriptc_shared_f32_release(handle) != 0)
     scr_throw_error_msg(SCR_ERR_RANGE, "invalid shared float32 handle", sizeof("invalid shared float32 handle") - 1);

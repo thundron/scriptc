@@ -22,6 +22,7 @@ export const F32_OPERATIONS = {
   max4: { fn: "f32x4.max", arity: 6, result: "void" },
   allocateShared: { fn: "shared.f32New", arity: 1, result: "number" },
   shared: { fn: "shared.f32View", arity: 1, result: "array" },
+  sharedReadOnly: { fn: "shared.f32ReadOnlyView", arity: 1, result: "array" },
   releaseShared: { fn: "shared.f32Release", arity: 1, result: "void" },
 } as const satisfies Record<
   string,

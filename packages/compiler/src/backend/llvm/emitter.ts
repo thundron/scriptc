@@ -224,6 +224,7 @@ import {
   unionBoxBits,
 } from "./inline-unions.js";
 import { OptionalArrayReads, type LocalArrayRead } from "./local-array-reads.js";
+import { Float32Values } from "./float32-values.js";
 import { borrowsCheckedNarrow, CheckedNarrows } from "./checked-narrows.js";
 import {
   emitDenseArraySet,
@@ -1683,6 +1684,7 @@ export class LlEmitter {
    * whose bindings end with the list (emitBlock and function bodies). */
   private stmtCursor: { stmts: IrStmt[]; index: number } | null = null;
   readonly optionalArrayReads: OptionalArrayReads;
+  readonly float32Values: Float32Values;
   /** Union sources a binding or projection can hold in a stack box. */
   readonly unionSources: UnionSources;
   readonly checkedNarrows: CheckedNarrows;
@@ -2488,6 +2490,10 @@ export class LlEmitter {
       this.unionsById,
       (id) => this.nullableUnions.single(id) !== null,
     );
+    this.float32Values = new Float32Values(this.fnByName, (expr) => {
+      const element = this.optionalArrayReads.get(expr)?.bytesElement;
+      return element === "f32" || element === "f16";
+    });
     this.unionSources = {
       unions: this.boxedUnionsById,
       receiverUnions: this.unionsById,

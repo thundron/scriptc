@@ -76,6 +76,27 @@ console.log(countByte(a, 10), countOther(new Float32Array([1, NaN]), 1), d[0], k
   expect(body("countByte")).toMatch(/fcmp oeq double|icmp eq i32/);
 });
 
+test("floating optional reads compare without heap boxes, including non-null assertions", async () => {
+  const body = await emit(`
+function equal(a: Float64Array, i: number, b: Float64Array, j: number): boolean { return a[i] === b[j]; }
+function bang(a: Float64Array, i: number, b: Float64Array, j: number): boolean { return a[i]! !== b[j]!; }
+function mixed(a: Float32Array, i: number, b: Float64Array, j: number): boolean { return a[i] !== b[j]; }
+interface State { values: Float64Array }
+function nested(s: State, b: Float64Array): number {
+  let count = 0;
+  for (let k = 0; k < 2; k++) for (let j = 0; j < 16; j++)
+    if (s.values[k * 16 + j] !== b[k * 16 + j]) count++;
+  return count;
+}
+const a = new Float64Array([NaN, 0]);
+console.log(equal(a, 9, a, 10), bang(a, 0, a, 0), mixed(new Float32Array(1), 3, a, 4), nested({values: a}, a));
+`);
+  for (const name of ["equal", "bang", "mixed", "nested"]) {
+    expect(body(name), name).not.toMatch(/_bytes_idxOr_|scr_union_new_|sc_rc_release_union/);
+    expect(body(name), name).toMatch(/fcmp oeq double/);
+  }
+});
+
 test("reads that may be undefined on both sides keep undefined === undefined", async () => {
   const body = await emit(`
 function bothReads(a: Uint8Array, i: number, b: Uint8Array, j: number): boolean {
@@ -97,7 +118,8 @@ console.log(bothReads(a, 5, a, 6), optional(a, 9, undefined), outside(a));
 `);
   // Two NaN-coded reads compare equal when both stand for undefined.
   expect(body("bothReads")).toMatch(/fcmp uno double/);
-  // A possibly-undefined operand and an observed out-of-bounds binding
-  // keep `number | undefined`.
-  for (const name of ["optional", "outside"]) expect(body(name), name).toMatch(UNION);
+  // Observing absence keeps the optional value's tag, but its scalar
+  // payload can live in a private stack box rather than a heap union.
+  for (const name of ["optional", "outside"])
+    expect(body(name), name).not.toMatch(/_bytes_idxOr_|scr_union_new_|sc_rc_release_union/);
 });

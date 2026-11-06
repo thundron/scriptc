@@ -988,6 +988,7 @@ function buildLibFnSignatures() {
     "math.fround": { argTypes: [F64], result: F64 },
     "shared.f32New": { argTypes: [F64], result: F64 },
     "shared.f32View": { argTypes: [F64], result: bytesOf("f32") },
+    "shared.f32ReadOnlyView": { argTypes: [F64], result: bytesOf("f32") },
     "shared.f32Release": { argTypes: [F64], result: VOID },
     "math.f32Add": { argTypes: [F64, F64], result: F64 },
     "math.f32Sub": { argTypes: [F64, F64], result: F64 },

@@ -278,6 +278,23 @@ export function emitBytesSharedStorage(host: LlvmEmitterContext, receiver: strin
   return storage;
 }
 
+/** The immutable-input promise is a view-local byte in header padding.
+ * Runtime ABI 49 initializes it before publishing any view. */
+export function emitBytesReadOnlyShared(host: LlvmEmitterContext, receiver: string): string {
+  const cached = cachedHeader(host, receiver)?.readOnly;
+  if (cached !== undefined && cached !== null) return cached;
+  const B = host.B;
+  const slot = B.tmp(),
+    flag = B.tmp(),
+    readOnly = B.tmp();
+  B.line(
+    `${slot} = getelementptr inbounds i8, ptr ${receiver}, ${host.sizeType} ${host.sizeType === "i64" ? 45 : 25}`,
+  );
+  B.line(`${flag} = load i8, ptr ${slot}${bytesHeaderAlias(host)}`);
+  B.line(`${readOnly} = icmp ne i8 ${flag}, 0`);
+  return readOnly;
+}
+
 /** Worker programs: an element of a view of a SharedArrayBuffer (`shared` is
  * fixed before script code can see the view) is read and written with one
  * relaxed atomic access of its width, as the runtime's shared accessors do;
@@ -285,14 +302,22 @@ export function emitBytesSharedStorage(host: LlvmEmitterContext, receiver: strin
  * view's length never changes, so both paths use the one checked integer
  * index. Branches to the returned label for a thread-owned buffer and
  * continues in the shared block. */
-function emitSharedBytesSplit(host: LlvmEmitterContext, receiver: string): string {
+function emitSharedBytesSplit(host: LlvmEmitterContext, receiver: string, read = false): string {
   const B = host.B;
   host.declare(`declare i1 @llvm.expect.i1(i1, i1)`);
   const storage = emitBytesSharedStorage(host, receiver),
     isShared = B.tmp(),
     expected = B.tmp();
   B.line(`${isShared} = icmp ne ptr ${storage}, null`);
-  B.line(`${expected} = call i1 @llvm.expect.i1(i1 ${isShared}, i1 false)`);
+  let atomic = isShared;
+  if (read) {
+    const readOnly = emitBytesReadOnlyShared(host, receiver);
+    const mutable = B.tmp();
+    atomic = B.tmp();
+    B.line(`${mutable} = xor i1 ${readOnly}, true`);
+    B.line(`${atomic} = and i1 ${isShared}, ${mutable}`);
+  }
+  B.line(`${expected} = call i1 @llvm.expect.i1(i1 ${atomic}, i1 false)`);
   const shared = B.newLabel("bytes.shared"),
     local = B.newLabel("bytes.local");
   B.condBr(expected, shared, local);
@@ -375,6 +400,31 @@ function emitScopedBytesGet(
   return { name: out, type: F64, uint32: u32, ordered: valid, nanInteger: integer };
 }
 
+/** An optional element read as scalar bits plus presence, without a heap
+ * union. Genuine NaNs remain present; only an invalid index is absent. */
+export function emitOptionalBytesGet(
+  host: LlvmEmitterContext,
+  elem: IrBytesElem,
+  receiver: string,
+  index: LlValue,
+  expr?: IrExpr,
+): { value: LlValue; present: string } {
+  const B = host.B;
+  const invalid = B.newLabel("bytes.optional.missing");
+  const done = B.newLabel("bytes.optional.done");
+  const loaded = emitBytesLoad(host, elem, receiver, index, expr, false, invalid, false);
+  const found = B.currentLabel();
+  B.br(done);
+  B.startBlock(invalid);
+  B.br(done);
+  B.startBlock(done);
+  const value = B.tmp(),
+    present = B.tmp();
+  B.line(`${value} = phi double [ ${loaded.name}, %${found} ], [ 0.0, %${invalid} ]`);
+  B.line(`${present} = phi i1 [ true, %${found} ], [ false, %${invalid} ]`);
+  return { value: { name: value, type: F64 }, present };
+}
+
 function emitBytesLoad(
   host: LlvmEmitterContext,
   elem: IrBytesElem,
@@ -441,7 +491,7 @@ function emitSharedOrLocalLoad(
 ): LlValue {
   const B = host.B;
   const floating = elem === "f16" || elem === "f32" || elem === "f64";
-  const local = emitSharedBytesSplit(host, receiver);
+  const local = emitSharedBytesSplit(host, receiver, true);
   let shared: string;
   if (elem === "f16") {
     host.declare(`declare double @scr_bytes_shared_get_f64(ptr, ${host.sizeType})`);

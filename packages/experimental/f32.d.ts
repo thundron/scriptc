@@ -82,5 +82,12 @@ export declare function allocateShared(length: number): number;
  * valid when the owning handle is released; new lookups of it then fail.
  * Only the backing numeric bytes, not JavaScript/GC graphs, are shared. */
 export declare function shared(handle: number): Float32Array;
+/** Assert the immutable-input contract for a shared view. You must exclude
+ * writes through every alias and from every agent while compiled code can
+ * read this view, including concurrent jobs. This enables non-atomic scalar
+ * and SIMD loads. It does not freeze the storage or synchronize writers.
+ * Do not use the view or a derived alias to write. Violating this contract
+ * is unsupported; use shared() when other agents may write concurrently. */
+export declare function sharedReadOnly(handle: number): Readonly<Float32Array>;
 /** Release an owning handle. Invalid/stale/double releases throw RangeError. */
 export declare function releaseShared(handle: number): void;

@@ -170,6 +170,36 @@ describe.skipIf(!hasZig).each(["node", "native"] as const)(
       return { api, reports, panics, text };
     }
 
+    test("finite union spread libraries preserve evaluation and own-key order", async () => {
+      const profilePath = join(
+        import.meta.dirname,
+        "../library-mode/finite-union-spread/profile.json",
+      );
+      const result = await compileLibrary({ profilePath, outDir: join(directory, "union-spread") });
+      if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
+      const glue = await import(pathToFileURL(result.archivePath.replace(/\.wasm$/, ".mjs")).href);
+      const api = await glue.instantiateFromBytes(await readFile(result.archivePath));
+      const hash = (text: string): number => {
+        let value = 0;
+        for (let i = 0; i < text.length; i++) value = (value * 33 + text.charCodeAt(i)) | 0;
+        return value;
+      };
+      for (const n of [-2, 0, 1.25, 3])
+        expect(api.fus_run(n)).toBe(
+          hash(JSON.stringify({ name: "x", sofa: { seats: 2, depth: n }, bed: { width: 160 } })),
+        );
+      for (const left of [-1, 1])
+        for (const right of [-1, 1]) {
+          let count = 0;
+          const tick = (): number => ++count;
+          const a = left > 0 ? { x: left } : { y: "r" };
+          const b = right > 0 ? { x: "late" } : { z: false };
+          expect(api.fus_product(left, right)).toBe(
+            hash(JSON.stringify({ before: tick(), ...a, between: tick(), ...b, after: tick() })),
+          );
+        }
+    });
+
     test("generated glue owns returned strings/bytes across growth and links checked unknown casts", async () => {
       const entry = join(directory, "owned-results.ts"),
         path = join(directory, "owned-results.json");
@@ -341,6 +371,11 @@ export function createHost(){return {};}
           expect(Array.from(snapshot)).toEqual(
             Array.from(input, (v, i) => Math.fround(v + (i < 32 ? 1.5 : 2.5))),
           );
+          const expectedSum = snapshot.reduce((total, value) => Math.fround(total + value), 0);
+          expect(
+            await Promise.all(Array.from({ length: 4 }, () => runtime.call("readOnlySum", [data]))),
+          ).toEqual([expectedSum, expectedSum, expectedSum, expectedSum]);
+          expect(Array.from(data.readFloat32())).toEqual(Array.from(snapshot));
           const large = runtime.buffer(8 * 1024 * 1024);
           large.writeUint32(new Uint32Array([0x80000000, 0x7fc00000, 0x7f800000]));
           expect(Array.from(large.readUint32(0, 3))).toEqual([0x80000000, 0x7fc00000, 0x7f800000]);

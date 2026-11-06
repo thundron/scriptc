@@ -25,6 +25,7 @@ test("coverage --lib --profile reports the library refusal without compiling an 
     mergeProfiles: unexpected,
     typePatches: unexpected,
     run: unexpected,
+    reinvoke: unexpected,
   };
   const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
     output.push(String(chunk));

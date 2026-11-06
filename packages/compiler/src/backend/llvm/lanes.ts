@@ -128,7 +128,12 @@ export function beginFunctionLanes(emitter: LlEmitter, fn: IrFunction): void {
 export function laneLoopPlan(emitter: LlEmitter, loop: IrStmt): LanePlan | null {
   const state = LANES.of(emitter);
   if (state.width < 2 || emitter.debug !== null) return null;
-  if (emitter.mod.workers === true || emitter.mod.bytesHeadersMutable === true) return null;
+  if (
+    emitter.mod.workers === true ||
+    emitter.mod.lib?.threadInstances === true ||
+    emitter.mod.bytesHeadersMutable === true
+  )
+    return null;
   if (emitter.speculation !== null || emitter.speculationResume !== null) return null;
   if (emitter.int32Kinds !== null) return null;
   const plan = state.plans.get(loop);

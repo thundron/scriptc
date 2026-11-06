@@ -112,6 +112,16 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
   });
 
   test.each([
+    "finite-union-spreads.ts",
+    "float32-arithmetic.ts",
+    "float32-automatic.ts",
+    "float32-vector-lanes.ts",
+    "float32-shared-handles.ts",
+    "float32-shared-readonly.ts",
+    "float32-function-values.ts",
+    "float32-bvh-build.ts",
+    "record-alias-expando.js",
+    "json-module-own-keys/main.ts",
     "js-prototype-host-boundary.js",
     "js-regex-record-captures.js",
     "js-callable-proxy.js",
@@ -208,6 +218,7 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
     "object-key-indexes.js",
     "record-key-order.ts",
     "typed-array-bulk-conversion.mjs",
+    "typed-array-optional-equality.ts",
     "typed-array-numeric-import.ts",
     "1612-cjs-module-globals.cjs",
     "992-fs-roundtrip.ts",

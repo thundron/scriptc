@@ -1215,36 +1215,57 @@ test("--strict-user-js reports R2 constructs in user JavaScript as SC8101–SC81
   ).toMatchFileSnapshot("__snapshots__/coverage-node-islands-user-js.txt");
 });
 
-test(`every corpus program is 100% static (corpus and coverage agree${shardSuffix()})`, async () => {
-  // The differential corpus compiles by definition; coverage must agree.
-
-  // The sweep runs minutes on slow machines and each analyze() blocks the
-  // worker thread — without the periodic yield, vitest's worker RPC starves
-  // ("Timeout calling onTaskUpdate") even while every check passes, and the
-  // default per-test timeout is far too small for a whole-corpus analysis.
-  let n = 0;
-  const flatEntries = shardSelect(
-    ["ts", "js", "mjs", "cjs"]
-      .flatMap((ext) => globSync(join(repoRoot, `tests/corpus/*.${ext}`)))
-      .sort(),
-    (file) => file.slice(repoRoot.length + 1),
-  );
-  for (const file of flatEntries) {
-    const firstLine = readFileSync(file, "utf8").split("\n", 1)[0] ?? "";
-    // `// @deferred-fences: N` on the first line: a JS program that
-    // DELIBERATELY carries N runtime-fence statements on untaken paths
-    // (the deferred-fence corpus) — it still passes the differential
-    // oracle because the fences never execute.
-    const deferred = /^\/\/ @deferred-fences:\s*(\d+)\s*$/.exec(firstLine);
-    const { coverage } = analyze(file, { nodeIslands: { mode: "off" } });
-    expect.soft(coverage.diagnostics, file).toEqual([]);
-    // Corpus programs match Node by definition: a divergence warning on one
-    // is a false positive.
-    expect.soft(coverage.divergences ?? [], file).toEqual([]);
-    expect.soft(coverage.stats.statementsFailed, file).toBe(deferred ? Number(deferred[1]) : 0);
-    if (++n % 10 === 0) await new Promise((r) => setImmediate(r));
+test("island packages: package data types and callable handles cross the boundary", () => {
+  // The types-only twin of an island package declares shapes the type
+  // mapper must read as data the program receives, never as a value the
+  // package's implementation produces: a union alias over Node data types
+  // (`Buffer | ArrayBuffer | Buffer[]`, `@types/ws`'s RawData) becomes the
+  // checked dynamic value, and a callable type with no native
+  // representation (`express.json()`'s NextHandleFunction) stays the handle
+  // of the function the island made.
+  for (const [name, pkg] of [
+    ["island-package-type-alias", "frames"],
+    ["island-callable-handle", "bodyish"],
+  ] as const) {
+    const { coverage } = analyze(join(repoRoot, "tests/corpus", name, "main.ts"));
+    expect(coverage.diagnostics, name).toEqual([]);
+    expect(
+      coverage.nodeIslands?.islands.map((i) => i.package),
+      name,
+    ).toContain(pkg);
   }
-}, 600_000);
+});
+
+// The differential corpus compiles by definition; coverage must agree for
+// every selected entry. Bounded batches give slow cases a local deadline
+// without imposing one deadline on the entire corpus. Yield between analyses
+// so synchronous frontend work cannot starve Vitest's worker RPC.
+const coverageCorpusEntries = shardSelect(
+  ["ts", "js", "mjs", "cjs"]
+    .flatMap((ext) => globSync(join(repoRoot, `tests/corpus/*.${ext}`)))
+    .sort(),
+  (file) => file.slice(repoRoot.length + 1),
+);
+const coverageBatchSize = 32;
+for (let start = 0; start < coverageCorpusEntries.length; start += coverageBatchSize) {
+  const entries = coverageCorpusEntries.slice(start, start + coverageBatchSize);
+  test(`every corpus program is 100% static (corpus and coverage agree${shardSuffix()}, ${start + 1}-${start + entries.length})`, async () => {
+    let n = 0;
+    for (const file of entries) {
+      const firstLine = readFileSync(file, "utf8").split("\n", 1)[0] ?? "";
+      // `// @deferred-fences: N` on the first line: a JS program that
+      // DELIBERATELY carries N runtime-fence statements on untaken paths
+      // (the deferred-fence corpus) still matches Node on its reached paths.
+      const deferred = /^\/\/ @deferred-fences:\s*(\d+)\s*$/.exec(firstLine);
+      const { coverage } = analyze(file, { nodeIslands: { mode: "off" } });
+      expect.soft(coverage.diagnostics, file).toEqual([]);
+      // A divergence warning on a Node-exact corpus program is a false positive.
+      expect.soft(coverage.divergences ?? [], file).toEqual([]);
+      expect.soft(coverage.stats.statementsFailed, file).toBe(deferred ? Number(deferred[1]) : 0);
+      if (++n % 10 === 0) await new Promise((r) => setImmediate(r));
+    }
+  }, 120_000);
+}
 
 test("library coverage uses the profile export roots and static-only fences", () => {
   const profile = fixture("library-union-spread/profile.json");

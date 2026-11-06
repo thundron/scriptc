@@ -9,6 +9,7 @@ import { f64Lit } from "./common.js";
 import { emitAlwaysThrowLibCall } from "./lib-shared.js";
 import { emitTruncF64 } from "./trunc.js";
 import { markWrappingOperands } from "./wrapping-sums.js";
+import { emitFloat32Math, emitFloat32x4Math, emitProvenFloat32Math } from "./float32.js";
 
 const FS_ALWAYS_THROW_SYMS: Readonly<Record<string, string>> = {
   "fs.mkdtempChk": "scr_fs_mkdtemp_chk",
@@ -1247,6 +1248,8 @@ export function emitPowerOfTwoQuotient(
 export function emitPrimitiveLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlValue {
   const B = host.B;
   if (e.fn === "math.min" || e.fn === "math.max") {
+    const single = emitProvenFloat32Math(host, e);
+    if (single) return single;
     // IEEE 754-2019 minimum/maximum: NaN propagates and -0 orders below +0,
     // exactly Math.min/Math.max of two numbers.
     const a = host.emitExpr(e.args[0]!);
@@ -1330,7 +1333,11 @@ export function emitPrimitiveLibCall(host: LlvmEmitterContext, e: LibCallExpr): 
     B.line(`${t} = call double @scr_f16_to_f64(i16 zeroext ${narrowed})`);
     return { name: t, type: e.type };
   }
+  if (e.fn.startsWith("f32x4.")) return emitFloat32x4Math(host, e);
+  if (e.fn.startsWith("math.f32")) return emitFloat32Math(host, e);
   if (e.fn === "math.fround") {
+    const single = emitProvenFloat32Math(host, e);
+    if (single) return single;
     const v = host.emitExpr(e.args[0]!);
     const narrowed = B.tmp();
     const t = B.tmp();

@@ -12,7 +12,10 @@ import { planRecordViews } from "./record-views.js";
 
 /** The views planned for `source`'s module, as target field names → source
  * field names (each list sorted). */
-async function plannedViews(source: string): Promise<Map<string, string[]>> {
+async function plannedViews(
+  source: string,
+  inspect?: (module: IrModule) => void,
+): Promise<Map<string, string[]>> {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-record-views-"));
   try {
     const entry = join(dir, "main.ts"),
@@ -21,6 +24,7 @@ async function plannedViews(source: string): Promise<Map<string, string[]>> {
     const result = await compile(entry, { outDir: dir, outPath, outputKind: "ir" });
     if (!result.ok) throw new Error(result.diagnostics.map((d) => d.message).join("\n"));
     const mod: IrModule = deserializeModule(await readFile(outPath, "utf8"));
+    inspect?.(mod);
     const traced = computeTraced(mod).shapes;
     const views = planRecordViews(mod, {
       traced: (id) => traced.has(`record:${id}`),
@@ -227,12 +231,27 @@ console.log(v.a);
   expect(views.partialTargets.size).toBe(0);
 });
 
-test("initialized noncapturing callable declarations share width views", async () => {
-  const views = await plannedViews(`
+test("native callable properties do not plan detached record width views", async () => {
+  const views = await plannedViews(
+    `
 function check(value: unknown): boolean { check.errors = null; return value !== null; }
 check.errors = null as string[] | null;
 check.tag = 1;
 const view: ((value: unknown) => boolean) & {errors: string[] | null} = check;
-view.errors = ["bad"]; console.log(check.errors, view(1));`);
-  expect(views).toEqual(new Map([["%call,errors", ["%call,errors,tag"]]]));
+view.errors = ["bad"]; console.log(check.errors, view(1));`,
+    (module) => {
+      expect(
+        (module.records ?? []).flatMap((shape) => shape.fields.map((field) => field.name)),
+      ).not.toContain("%call");
+      for (const fn of module.functions)
+        everyStmtList(fn.body, {
+          stmt: (statement) => {
+            expect(statement.kind).not.toBe("runtimeFence");
+            return true;
+          },
+          expr: () => true,
+        });
+    },
+  );
+  expect(views).toEqual(new Map());
 });

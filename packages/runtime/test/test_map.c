@@ -858,9 +858,9 @@ static void test_absent_key_filter(void) {
 }
 
 /* SCR_MAP_VAL_CREF: string keys with compact class values in 16-byte
- * entries (a 32-bit hash, the value as an address over 8). The values here
- * are stand-in addresses, never dereferenced. */
-static uint64_t cref_val(size_t i) { return (uint64_t)(i + 1) * 8; }
+ * entries (a 32-bit hash, the value as a compact reference). The values
+ * are stand-in addresses in the compact window, never dereferenced. */
+static uint64_t cref_val(size_t i) { return scr_compact_ref_address((uint32_t)(i + 1)); }
 
 static void test_compact_values(void) {
   ScrMap *m = scr_map_new(SCR_MAP_KEY_STR, SCR_MAP_VAL_CREF, NULL);
@@ -877,7 +877,7 @@ static void test_compact_values(void) {
   for (size_t i = 0; i < N; i++) {
     all &= scr_map_get_str_ref(m, keys[i]) == (void *)(uintptr_t)cref_val(i);
     const ScrMapCEntry *e = scr_map_entry_str_c(m, keys[i]);
-    all &= e && ((uint64_t)e->val << 3) == cref_val(i) && e->key == (uint64_t)(uintptr_t)keys[i];
+    all &= e && scr_compact_ref_address(e->val) == cref_val(i) && e->key == (uint64_t)(uintptr_t)keys[i];
   }
   check(all, "cref: get and entry_str_c find every value");
   ScrStr *missing = S("absent");

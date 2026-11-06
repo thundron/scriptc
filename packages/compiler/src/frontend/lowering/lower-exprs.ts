@@ -1,3 +1,4 @@
+import { f32CallOf } from "../f32-import.js";
 import type { DiagnosticCode } from "../../diagnostics/codes.js";
 import {
   arrayClassMemberOwner,
@@ -42,6 +43,7 @@ import {
   CAUGHT,
   DYN,
   F64,
+  bytesOf,
   type IrExpr,
   type IrFunction,
   type IrLocal,
@@ -59,7 +61,7 @@ import {
   funcOf,
   isUnitType,
   typeEquals,
-  typeKey,
+  sortArms,
 } from "../../ir/ir.js";
 import {
   cjsExportAssignmentOf,
@@ -303,6 +305,32 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
   // enclosing optChain — read the bind temp instead of re-lowering.
   const chainRecv = lowerer.chainRecvByNode.get(expr);
   if (chainRecv) return { ...chainRecv, loc };
+
+  const float32 = lowerer.f32ImportsPresent
+    ? f32CallOf(lowerer.program, expr, lowerer.f32ImportBindings)
+    : null;
+  if (float32) {
+    if (float32.arity === 6) lowerer.f32FixedViewCalls.set(loc.file + ":" + loc.start, loc);
+    const params = Array.from({ length: float32.arity }, (_, index) =>
+      float32.arity === 6 && index % 2 === 0 ? bytesOf("f32") : F64,
+    );
+    const result =
+      float32.result === "void" ? VOID : float32.result === "array" ? bytesOf("f32") : F64;
+    const value = lowerer.lowerNativeCallableValue(
+      {
+        fn: float32.fn,
+        params,
+        result,
+        valueParams: params.map((type) => ({ mode: "required", type })),
+        valueName: float32.name,
+        valueLength: float32.arity,
+      },
+      "f32." + float32.name,
+      loc,
+    );
+    if (value === null) throw new InternalCompilerError("explicit f32 callable lost its fixed ABI");
+    return value;
+  }
 
   // Node islands (scope-B NI-4): member operations on island values and
   // island import bindings. Programs without islands skip it.
@@ -748,7 +776,7 @@ function lowerExprInner(lowerer: Lowerer, expr: ts.Expression): IrExpr {
           );
         } else {
           const arms = [inner, ...units];
-          arms.sort((a, b) => (typeKey(a) < typeKey(b) ? -1 : 1));
+          sortArms(arms);
           type = { kind: "union", unionId: lowerer.unions.intern(arms) };
         }
         return { kind: "awaitUnionExpr", value, promiseTag, type, loc };

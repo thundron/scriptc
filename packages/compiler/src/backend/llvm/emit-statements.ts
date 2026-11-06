@@ -2,6 +2,7 @@
 import { emitInlineArrayInit, inlineFieldTail } from "./inline-arrays.js";
 import { emitLoopBytesHeaders } from "./bytes-headers.js";
 import { noteBytesReceiver } from "./expr-bytes.js";
+import { emitProvenFloat32Math } from "./float32.js";
 import {
   type LlEmitter,
   type LlScopeEntry,
@@ -603,9 +604,21 @@ export function emitStmtBody(emitter: LlEmitter, s: IrStmt): void {
       const arr = emitter.emitStableReceiver(s.arr, [s.index, s.value]);
       noteBytesReceiver(emitter, s.arr, arr.name);
       const idx = emitter.emitExpr(s.index);
-      const v = emitter.emitExpr(s.value);
       if (s.arr.type.kind !== "bytes")
         throw new InternalCompilerError("llvm emitter bug: bytesSet on non-bytes");
+      // A statement-only Float32Array store is a rounding boundary. The
+      // value of an assignment expression must still remain binary64.
+      const rounded =
+        s.arr.type.elem === "f32"
+          ? emitProvenFloat32Math(emitter, {
+              kind: "libCall",
+              fn: "math.fround",
+              args: [s.value],
+              type: F64,
+              loc: s.value.loc,
+            })
+          : null;
+      const v = rounded ?? emitter.emitExpr(s.value);
       emitter.emitBytesSet(
         s.arr.type.elem,
         arr.name,

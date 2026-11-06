@@ -38,6 +38,10 @@ test
       const result = await exec(bin, [], {
         timeout: 30000,
         env: { ...process.env, UBSAN_OPTIONS: "halt_on_error=1", TSAN_OPTIONS: "halt_on_error=1" },
+      }).catch((error) => {
+        throw new Error(`${error.message}\n${error.stdout ?? ""}${error.stderr ?? ""}`, {
+          cause: error,
+        });
       });
       expect(result.stdout).toBe(
         "shared views preserve atomic updates, wait queues and cancellation ownership\n",

@@ -51,6 +51,7 @@ import { builtinGlobalValue } from "./property-access.js";
 import { holdsEvolvingArray } from "../lower-stmts.js";
 import { builtinNamespaceValue } from "../builtin-namespaces.js";
 import { tsUntypedGlobalValue } from "../global-values.js";
+import { lowerFiniteUnionSpreadMerge } from "./union-spreads.js";
 
 /** `{ a: 1, b: "x" }` → recordLit. The record type comes from the
  * contextual type when tsc has one (annotated declarations, arguments,
@@ -1147,6 +1148,7 @@ export function lowerObjectLiteral(
       // `k?: ...` — which desugar to one conditional field at the
       // spread's own position (any position: they introduce one fresh
       // name, collision-fenced below). Everything else stays fenced.
+      if (lowerer.spreadArmOverrides.has(spreadSourceNode(lowerer, prop.expression))) continue;
       const cs = conditionalSpreadOf(prop.expression) ?? andSpreadOf(lowerer, prop.expression);
       if (cs === "unsupported" && conditionalRecordSpreadOf(lowerer, prop.expression) === null) {
         deferredConditionalSpread ??= prop;
@@ -1446,6 +1448,13 @@ export function lowerObjectLiteral(
     return lowerDynObjectLiteral(lowerer, expr);
   }
   if (deferredConditionalSpread) {
+    const native =
+      !exact && mapped?.kind === "union" ? lowerNativeUnionSpread(lowerer, expr, mapped) : null;
+    if (native) return native;
+    if (!exact && mapped?.kind === "union") {
+      const dynamic = lowerUnionSpreadMergeDyn(lowerer, expr, mapped);
+      if (dynamic) return dynamic;
+    }
     // The checked-dynamic build copies whichever arm the conditional picks,
     // in Node's own-key order, so a shape the field desugar cannot express
     // still lands — copy then validate into the record. When the target has
@@ -1465,13 +1474,14 @@ export function lowerObjectLiteral(
     // A spread merge over UNION-typed sources (`{ ...base, ...override }`
     // with `base`, `override` of arm-union types) has one field set per
     // combination of source arms, so its own type is a union of records.
-    // No single arm of the contextual union can hold that value without
-    // dropping the fields the other arms contributed (Node keeps them
-    // all), and a runtime tag would be a guess about which arm the value
-    // "is". Build the object Node builds instead — the checked-dynamic
-    // copy — and let the union's checked conversion validate it.
+    // Plan a native layout for every finite combination before emitting
+    // the copy. If no total native plan preserves all contributed keys,
+    // auto mode can still build a checked-dynamic object and validate it
+    // into the declared union; static-only/library builds keep the fence.
     if (mapped?.kind === "union") {
       if (!exact && unionCtx?.kind === "union") {
+        const native = lowerNativeUnionSpread(lowerer, expr, unionCtx);
+        if (native) return native;
         const merged = lowerUnionSpreadMergeDyn(lowerer, expr, unionCtx);
         if (merged) return merged;
       }
@@ -1598,7 +1608,7 @@ export function lowerObjectLiteral(
     if (accessorNames.size > 0) {
       const narrowed = shape.fields.filter((f) => !accessorNames.has(f.name));
       const narrowedId = lowerer.shapes.intern(
-        narrowed.map((f) => ({ name: f.name, type: f.type })),
+        narrowed.map((f) => ({ ...f })),
         false,
         shape.indexValue,
       );
@@ -1607,6 +1617,13 @@ export function lowerObjectLiteral(
     }
   }
   const fieldTypes = new Map(shape.fields.map((f) => [f.name, f.type]));
+  // The destination slot for absence purposes: the target shape's matching
+  // field carries the optional-dyn flag even when a promotion changed the
+  // slot's type.
+  const targetSlot = (name: string, type: IrType): { type: IrType; optional?: true } => {
+    const field = shape.fields.find((candidate) => candidate.name === name);
+    return field?.optional === true ? { type, optional: true } : { type };
+  };
   // File-scope JavaScript object bindings live in the checked-dynamic tree
   // to preserve open writes and identity. The checker can infer fields
   // from later writes; those fields must remain absent when the literal
@@ -1970,7 +1987,12 @@ export function lowerObjectLiteral(
     const split = (v: IrExpr): { value: IrExpr; present: IrExpr } => {
       if (v.kind === "fieldAbsent") {
         return {
-          value: lowerer.wrappedUndefined(v.type, v.loc)!,
+          // An optional checked-dynamic slot's absent marker has no union
+          // wrapper: its ordinary value is the checked-dynamic undefined.
+          value:
+            v.type.kind === "dyn"
+              ? dynUndefinedExpr(v.loc)
+              : lowerer.wrappedUndefined(v.type, v.loc)!,
           present: { kind: "boolLit", value: false, type: BOOL, loc: v.loc },
         };
       }
@@ -2004,7 +2026,8 @@ export function lowerObjectLiteral(
       then: ref,
       else_: {
         kind: "fieldAbsent",
-        unionId: (value.type as IrType & { kind: "union" }).unionId,
+        // An optional checked-dynamic slot's state carries no union.
+        ...(value.type.kind === "union" ? { unionId: value.type.unionId } : {}),
         type: value.type,
         loc: value.loc,
       },
@@ -2045,7 +2068,12 @@ export function lowerObjectLiteral(
       }
     }
     if (ts.isSpreadAssignment(prop)) {
-      const cs = conditionalSpreadOf(prop.expression) ?? andSpreadOf(lowerer, prop.expression);
+      const overriddenSpread = lowerer.spreadArmOverrides.has(
+        spreadSourceNode(lowerer, prop.expression),
+      );
+      const cs = overriddenSpread
+        ? null
+        : (conditionalSpreadOf(prop.expression) ?? andSpreadOf(lowerer, prop.expression));
       if (cs && cs !== "unsupported") {
         widthBlocked = true;
         // `...(c ? { k: v } : {})` — one conditional field per carried
@@ -2075,7 +2103,7 @@ export function lowerObjectLiteral(
           // An 'unknown' slot holds the checked-dynamic undefined for the
           // empty arm, the absent-property read the width copy uses too.
           const absent =
-            lowerer.absentFieldValue(fieldType, locOf(prop)) ??
+            lowerer.absentFieldValue(targetSlot(name, fieldType), locOf(prop)) ??
             (fieldType.kind === "dyn" ? dynUndefinedExpr(locOf(prop)) : null);
           if (!absent) {
             const conditionalDyn = conditionalFallback();
@@ -2129,7 +2157,9 @@ export function lowerObjectLiteral(
       // once, including empty sources and those whose fields are all
       // overridden. Field snapshots above preserve the copy order.
       const srcNode = spreadSourceNode(lowerer, prop.expression);
-      const condRecord = conditionalRecordSpreadOf(lowerer, prop.expression);
+      const condRecord = overriddenSpread
+        ? null
+        : conditionalRecordSpreadOf(lowerer, prop.expression);
       let srcLowered = capture(
         condRecord !== null
           ? lowerConditionalRecordSpread(lowerer, condRecord, locOf(prop))
@@ -2320,7 +2350,8 @@ export function lowerObjectLiteral(
               loc: locOf(prop),
             });
             const canBeAbsent =
-              f.type.kind === "union" && lowerer.armTag(f.type.unionId, UNDEFINED_T) >= 0;
+              (f.type.kind === "union" && lowerer.armTag(f.type.unionId, UNDEFINED_T) >= 0) ||
+              (f.optional === true && f.type.kind === "dyn");
             if (typeEquals(f.type, targetType)) {
               thenVal = fRead();
               if (canBeAbsent) cond = fieldPresent();
@@ -2421,7 +2452,9 @@ export function lowerObjectLiteral(
             }
             const at = fields.findIndex((x) => x.name === f.name);
             const elseVal =
-              at >= 0 ? fields[at]!.value : lowerer.absentFieldValue(targetType, locOf(prop));
+              at >= 0
+                ? fields[at]!.value
+                : lowerer.absentFieldValue(targetSlot(f.name, targetType), locOf(prop));
             if (!elseVal) {
               if (canBeAbsent) {
                 // The FIELD itself can be missing from a present source:
@@ -2642,7 +2675,8 @@ export function lowerObjectLiteral(
         // absent one keeps the earlier contributor's value, or leaves the
         // target field absent.
         const canBeAbsent =
-          f.type.kind === "union" && lowerer.armTag(f.type.unionId, UNDEFINED_T) >= 0;
+          (f.type.kind === "union" && lowerer.armTag(f.type.unionId, UNDEFINED_T) >= 0) ||
+          (f.optional === true && f.type.kind === "dyn");
         if (canBeAbsent) {
           const present: IrExpr =
             obj.type.kind === "dyn"
@@ -2655,7 +2689,9 @@ export function lowerObjectLiteral(
                 }
               : lowerer.recordFieldPresent(obj, srcType.shapeId, f.name, locOf(prop));
           const otherwise =
-            at >= 0 ? fields[at]!.value : lowerer.absentFieldValue(targetType, locOf(prop));
+            at >= 0
+              ? fields[at]!.value
+              : lowerer.absentFieldValue(targetSlot(f.name, targetType), locOf(prop));
           if (otherwise) {
             value = {
               kind: "ternary",
@@ -2865,7 +2901,7 @@ export function lowerObjectLiteral(
   if (droppedNames.size > 0) {
     const narrowed = shape.fields.filter((f) => !droppedNames.has(f.name));
     const narrowedId = lowerer.shapes.intern(
-      narrowed.map((f) => ({ name: f.name, type: f.type })),
+      narrowed.map((f) => ({ ...f })),
       false,
       shape.indexValue,
     );
@@ -2878,7 +2914,7 @@ export function lowerObjectLiteral(
       if (provided.has(f.name)) continue;
       const absentHandle: IrExpr | null = null;
       const absent =
-        lowerer.absentFieldValue(f.type, loc) ??
+        lowerer.absentFieldValue(f, loc) ??
         (f.type.kind === "dyn" ? dynUndefinedExpr(loc) : null) ??
         absentHandle;
       if (!absent) shapeMismatch(expr); // only optional and 'unknown' fields may be omitted
@@ -2958,6 +2994,25 @@ function isEmptyArrayLiteral(node: ts.Node): boolean {
  * absence arm included) throws the catchable TypeError. Null when the
  * literal is not this shape, before anything is lowered except the
  * source; the caller keeps its refusal. */
+function lowerNativeUnionSpread(
+  lowerer: Lowerer,
+  expr: ts.ObjectLiteralExpression,
+  target: IrType & { kind: "union" },
+): IrExpr | null {
+  // Preserve auto mode's existing representation and compile cost. This
+  // native product is the static-only/library alternative to demotion.
+  if (lowerer.tierMode !== "static-only") return null;
+  return lowerFiniteUnionSpreadMerge(lowerer, expr, target, {
+    source: (node) => spreadSourceNode(lowerer, node),
+    name: (name) =>
+      ts.isComputedPropertyName(name)
+        ? literalComputedKey(lowerer, name)
+        : propNameText(lowerer, name),
+    build: (arm) => lowerObjectLiteral(lowerer, expr, arm, true),
+    shorthand: (prop) => lowerShorthandValue(lowerer, prop),
+  });
+}
+
 function lowerDistributedUnionSpread(
   lowerer: Lowerer,
   expr: ts.ObjectLiteralExpression,
@@ -3680,6 +3735,15 @@ function indexSignatureDestination(
     : null;
 }
 
+/** Whether the literal's checker CONTEXT is a checked-dynamic value (an
+ * `unknown`/`any` slot, or a record whose values are): that context is the
+ * value's home, so no record layout stands between the literal and its
+ * destination, and each runtime key stays where the source writes it. */
+function checkedDynamicDestination(lowerer: Lowerer, expr: ts.ObjectLiteralExpression): boolean {
+  const contextual = lowerer.checker.getContextualType(expr);
+  return contextual !== undefined && lowerer.mapTypeOf(contextual)?.kind === "dyn";
+}
+
 /** `expr` — a literal whose property name is decided at runtime — as the
  * checked-dynamic object the literal's own keys describe. No record shape can
  * hold a runtime-decided name: a record stores declared fields sorted and
@@ -3701,7 +3765,7 @@ function runtimeKeyedDynLiteral(
 ): IrExpr {
   const destination =
     indexSignatureDestination(lowerer, expected) ?? indexSignatureDestination(lowerer, type);
-  if (destination === null) {
+  if (destination === null && !checkedDynamicDestination(lowerer, expr)) {
     // A layout that keeps DECLARED fields beside an index signature
     // (`{ fixed: 1, [key]: 2 }`, inferred as `{ fixed: number; [x: string]:
     // number }`) stores the declared fields ahead of the overflow a runtime
@@ -4039,7 +4103,7 @@ function lowerDeclaredSpreadMerge(
         kind: "recordLit",
         fields: shape.fields.map((f) => ({
           name: f.name,
-          value: lowerer.absentFieldValue(f.type, loc)!,
+          value: lowerer.absentFieldValue(f, loc)!,
         })),
         type,
         loc,
@@ -4330,6 +4394,8 @@ export function lowerShorthandValue(
   // Identifier (the grammar allows nothing else in shorthand position).
   const propName = prop.name as ts.Identifier;
   const loc = locOf(propName);
+  const overridden = lowerer.chainRecvByNode.get(propName);
+  if (overridden) return { ...overridden, loc };
   const symbol = lowerer.checker.getShorthandAssignmentValueSymbol(prop);
   // Import identifiers in shorthand position carry the property's symbol,
   // so the ordinary identifier expression path cannot resolve them.
@@ -4386,14 +4452,7 @@ export function lowerShorthandValue(
       return { kind: "closure", fnName: sig.name, captures: [], type: funcType, loc };
     }
     const generic = lowerer.genericFnsBySymbol.get(resolved);
-    if (generic?.implicitParams) return lowerer.lowerGenericFnValue(propName, generic);
-    if (generic) {
-      lowerer.unsupported(
-        "SC1090",
-        prop,
-        `generic functions as values (call '${propName.text}' directly)`,
-      );
-    }
+    if (generic) return lowerer.lowerGenericFnValue(propName, generic);
     // A program class name (`{ parse, TomlError }`, an imported class
     // included): the class object, exactly the long form `{ C: C }`.
     // Generic classes keep the identifier path's contextual pinning.

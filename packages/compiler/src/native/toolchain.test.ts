@@ -30,6 +30,11 @@ test("native toolchain installation paths relocate with the manifest", () => {
     );
     expect(toolchain.helperExecutable).toBe(join(root, "llvm/bin/scriptc-llvm-codegen"));
     expect(toolchain.runtimePackRoot).toBe(join(root, "runtime"));
+    for (const value of ["", "   "])
+      expect(() => loadNativeToolchain(path, { SCRIPTC_RUNTIME_PACK: value })).toThrow(
+        "non-empty runtime pack directory",
+      );
+
     expect(toolchain.linker).toBe(join(root, "tools/linker"));
     expect(toolchain.linkerArgs).toEqual(["cc"]);
     expect(toolchain.target.name).toBe("macos-arm64");

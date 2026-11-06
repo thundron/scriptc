@@ -971,7 +971,10 @@ static void scr_stdin_service(void) {
 #else
   struct pollfd pfd = {0 /* stdin */, POLLIN, 0};
   int rc = poll(&pfd, 1, 0);
-  if (rc <= 0 || !(pfd.revents & (POLLIN | POLLHUP | POLLERR))) return;
+  /* Darwin reports POLLNVAL for valid, non-pollable descriptors such as
+   * /dev/null. install() made stdin nonblocking, so read also probes these
+   * descriptors and observes their EOF or error instead of waiting forever. */
+  if (rc <= 0 || !(pfd.revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL))) return;
 #endif
   char buf[65536];
   ssize_t n = read(0, buf, sizeof buf);

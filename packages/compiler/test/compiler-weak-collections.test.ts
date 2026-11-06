@@ -5,9 +5,12 @@ import { expect, test } from "vitest";
 
 const source = fileURLToPath(new URL("../src", import.meta.url));
 
-/** Embedded JavaScript that the compiler matches in user bundles; the
- * compiler itself never executes it. */
-const embeddedHelpers = new Set(["frontend/npm-static-bundled-cjs.ts"]);
+/** Embedded JavaScript matched in user bundles or emitted for the host;
+ * the compiler itself never executes it. */
+const embeddedHelpers = new Set([
+  "frontend/npm-static-bundled-cjs.ts",
+  "backend/wasm-shared-runtime.ts",
+]);
 
 // The compiler is itself compiled by scriptc. Caches keyed by compiler
 // objects belong to the object that owns their lifetime (a program's

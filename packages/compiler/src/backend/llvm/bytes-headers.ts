@@ -11,7 +11,12 @@
  * iteration of it makes redundant. */
 import type { IrExpr, IrStmt } from "../../ir/ir.js";
 import { everyStmt } from "../../ir/traverse.js";
-import { emitBytesData, emitBytesHeaderLength, emitBytesSharedStorage } from "./expr-bytes.js";
+import {
+  emitBytesData,
+  emitBytesHeaderLength,
+  emitBytesSharedStorage,
+  emitBytesReadOnlyShared,
+} from "./expr-bytes.js";
 import type { LlEmitter } from "./emitter.js";
 
 export interface BytesHeader {
@@ -19,6 +24,7 @@ export interface BytesHeader {
   data: string;
   /** The view's shared storage (worker programs only). */
   shared: string | null;
+  readOnly: string | null;
 }
 
 export interface BytesHeaderScope {
@@ -50,7 +56,9 @@ export function emitLoopBytesHeaders(
   everyStmt(loop, {
     expr: (e) => {
       if (e.kind === "bytesIntrinsic") receiver(e.receiver);
-      else if (e.kind === "assignExpr" || e.kind === "incDec") rebound.add(e.localId);
+      else if (e.kind === "libCall" && e.fn.startsWith("f32x4.")) {
+        for (let i = 0; i < e.args.length; i += 2) receiver(e.args[i]!);
+      } else if (e.kind === "assignExpr" || e.kind === "incDec") rebound.add(e.localId);
       return true;
     },
     stmt: (s) => {
@@ -74,7 +82,14 @@ export function emitLoopBytesHeaders(
     locals.set(id, {
       length: emitBytesHeaderLength(emitter, view),
       data: emitBytesData(emitter, view),
-      shared: emitter.mod.workers ? emitBytesSharedStorage(emitter, view) : null,
+      shared:
+        emitter.mod.workers || emitter.mod.lib?.threadInstances === true
+          ? emitBytesSharedStorage(emitter, view)
+          : null,
+      readOnly:
+        emitter.mod.workers || emitter.mod.lib?.threadInstances === true
+          ? emitBytesReadOnlyShared(emitter, view)
+          : null,
     });
   }
   if (locals.size === 0) return null;

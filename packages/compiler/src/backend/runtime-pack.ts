@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { compilerReleaseVersion } from "../library/sidecar.js";
 import type { NativeLinkFeatures } from "./native-link-info.js";
 import { nativeArtifactDependenciesStillMatch } from "./native/artifact-stamps.js";
@@ -168,16 +168,29 @@ export async function loadRuntimePack(options: {
   resolver?: (specifier: string) => string;
 }): Promise<RuntimePackSelection> {
   const packageName = options.target.runtimePackPackage;
-  const resolvePackageJson =
-    options.resolver ?? ((specifier: string) => createRequire(import.meta.url).resolve(specifier));
+  const override = (options.env ?? process.env)["SCRIPTC_RUNTIME_PACK"];
   let packagePath: string;
-  try {
-    packagePath = resolvePackageJson(`${packageName}/package.json`);
-  } catch {
-    throw new RuntimePackError(
-      `precompiled runtime package ${packageName} is not installed; reinstall scriptc with optional dependencies enabled for ${options.target.name}`,
-      "missing",
-    );
+  if (override !== undefined) {
+    // An explicit pack is authoritative, including when it is invalid. Never
+    // silently fall back to an installed pack or skip identity/hash checks.
+    if (override.length === 0)
+      throw new RuntimePackError(
+        "SCRIPTC_RUNTIME_PACK must name a runtime pack directory",
+        "invalid",
+      );
+    packagePath = join(resolve(override), "package.json");
+  } else {
+    const resolvePackageJson =
+      options.resolver ??
+      ((specifier: string) => createRequire(import.meta.url).resolve(specifier));
+    try {
+      packagePath = resolvePackageJson(`${packageName}/package.json`);
+    } catch {
+      throw new RuntimePackError(
+        `precompiled runtime package ${packageName} is not installed; reinstall scriptc with optional dependencies enabled for ${options.target.name} or set SCRIPTC_RUNTIME_PACK to its directory`,
+        "missing",
+      );
+    }
   }
   const root = dirname(packagePath);
   const manifestPath = join(root, "runtime-pack.json");

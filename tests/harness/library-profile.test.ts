@@ -53,6 +53,57 @@ function expectSc4001(json: unknown, fragment: string): void {
 }
 
 describe("library profile validation", () => {
+  test("explicit SIMD and imported memory contracts are bounded and opt-in", () => {
+    const baseline = loadLibraryProfile(writeProfile(good));
+    expect(baseline.ok && baseline.profile.wasmMemory).toBeUndefined();
+    expect(baseline.ok && baseline.profile.wasmFeatures).toBeUndefined();
+    for (const shared of [false, true]) {
+      const result = loadLibraryProfile(
+        writeProfile({
+          ...good,
+          abi: {
+            ...good.abi,
+            instance_per_thread: shared,
+            wasm_features: ["simd128"],
+            wasm_memory: { shared },
+          },
+        }),
+      );
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.profile.wasmFeatures).toEqual(["simd128"]);
+        expect(result.profile.wasmMemory).toEqual({
+          shared,
+          initialPages: 256,
+          maximumPages: 4096,
+          stackBytes: 1048576,
+        });
+      }
+    }
+    for (const wasm_features of [null, "simd128", ["threads"], ["simd128", "simd128"], [null]])
+      expectSc4001({ ...good, abi: { ...good.abi, wasm_features } }, "abi.wasm_features");
+    const bad = [
+      null,
+      [],
+      true,
+      { shared: "yes" },
+      { shared: true },
+      { initial_pages: 1 },
+      { initial_pages: 256.5 },
+      { maximum_pages: 255 },
+      { maximum_pages: 65537 },
+      { stack_bytes: 65535 },
+      { stack_bytes: 65537 },
+      { stack_bytes: 16777216 },
+      { unknown: true },
+    ];
+    for (const wasm_memory of bad)
+      expectSc4001({ ...good, abi: { ...good.abi, wasm_memory } }, "abi.wasm_memory");
+    expectSc4001(
+      { ...good, abi: { ...good.abi, instance_per_thread: true, wasm_memory: { shared: false } } },
+      "must agree",
+    );
+  });
   test("explicit npm source attempts accept package names only", () => {
     const result = loadLibraryProfile(
       writeProfile({ ...good, npm_static: ["three", "@scope/pkg", "three"] }),

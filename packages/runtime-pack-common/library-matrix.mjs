@@ -22,6 +22,7 @@ export function withLibraryRuntimeFlavors(matrix) {
     "scr_bytes_dyn.c",
     "scr_js_value.c",
     "scr_js_object.c",
+    "scr_dyn_integrity.c",
     // The buffer views registry: a library whose program resizes, grows or
     // detaches a buffer names scr_js_buffers_arm from its own object, so the
     // library flavors must carry the unit the executable flavors compile.

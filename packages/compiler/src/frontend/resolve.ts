@@ -281,19 +281,30 @@ function loadAsDirectory(base: string): string | null {
 }
 
 let projectRealmPkgJson: string | null = null;
+/** `projectRealmPkgJson === null` is a realm of its own (an entry outside
+ * every package.json), so "no package.json" and "no compile yet" need
+ * separate states. */
+let projectRealmSet = false;
 
 export function setProjectRealm(entryPath: string): void {
   projectRealmPkgJson = nearestPkgJsonPath(entryPath);
+  projectRealmSet = true;
 }
+
+/** Declaration file extensions and the runtime file Node loads for each. */
+const DTS_RUNTIME_SIBLINGS: readonly (readonly [string, string])[] = [
+  [".d.ts", ".js"],
+  [".d.mts", ".mjs"],
+  [".d.cts", ".cjs"],
+];
 
 export function projectDtsRuntimeSibling(path: string): string | null {
   if (path.includes("/node_modules/") || path.includes("\\node_modules\\")) return null;
-  if (!path.endsWith(".d.ts")) return null;
+  if (!projectRealmSet) return null;
   const owner = nearestPkgJsonPath(path);
-  if (owner === null || owner !== projectRealmPkgJson) {
-    // Source-only workspace packages are program modules too. Their generated
-    // JavaScript must not disappear behind an adjacent declaration file merely
-    // because the importing TypeScript belongs to another package realm.
+  if (owner !== projectRealmPkgJson) {
+    // Source-only workspace packages are program modules, including imports
+    // reached through another package. Installed-package admission is unchanged.
     if (owner === null) return null;
     const directory = dirname(owner),
       pkg = pkgJsonOf(directory);
@@ -307,10 +318,19 @@ export function projectDtsRuntimeSibling(path: string): string | null {
       /\.d\.(?:ts|mts|cts)$/.test(entry)
     )
       return null;
-    if (isFile(join(directory, entry).replace(/\.(?:ts|tsx|mts|cts)$/, ".js"))) return null;
+    const runtime = entry.endsWith(".mts")
+      ? entry.slice(0, -4) + ".mjs"
+      : entry.endsWith(".cts")
+        ? entry.slice(0, -4) + ".cjs"
+        : entry.replace(/\.(?:ts|tsx)$/, ".js");
+    if (isFile(join(directory, runtime))) return null;
   }
-  const sibling = path.slice(0, -".d.ts".length) + ".js";
-  return isFile(sibling) ? sibling : null;
+  for (const [declaration, runtime] of DTS_RUNTIME_SIBLINGS) {
+    if (!path.endsWith(declaration)) continue;
+    const sibling = path.slice(0, -declaration.length) + runtime;
+    return isFile(sibling) ? sibling : null;
+  }
+  return null;
 }
 
 /** Active tsconfig `paths` mappings for the program being compiled. The
@@ -778,6 +798,10 @@ function loadTargetInPass(
   } else if (/\.(js|jsx|mjs|cjs)$/.test(path) && isFile(path)) {
     return path;
   }
+  // A required JSON document is data, not JavaScript: Node reads it in every
+  // module system, so the runtime pass answers it too (mime-db's db.json, a
+  // package's own package.json).
+  if (pass === "js" && path.endsWith(".json") && isFile(path)) return path;
   const sub = (ext: string, flavor: "plain" | "x" | "m" | "c"): string | null => {
     const stem = path.slice(0, -ext.length);
     for (const r of extensionsFor(pass, flavor)) {
@@ -1100,6 +1124,7 @@ export function clearResolveCaches(): void {
   pkgJsonCache.clear();
   workspaceMembersCache.clear();
   projectRealmPkgJson = null;
+  projectRealmSet = false;
   projectPathMappings = null;
 }
 

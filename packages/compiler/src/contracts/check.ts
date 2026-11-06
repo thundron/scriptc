@@ -1625,6 +1625,10 @@ class ImmutableContracts {
               return;
             }
             case "libCall":
+              if (e.fn.startsWith("f32x4.")) {
+                if (e.args[0]) mutate(e.args[0], e.loc, `'${c.text(e.loc)}'`);
+                return; // Inputs are read only; no reference escapes or is stored.
+              }
               if (!LIB_READS.test(e.fn))
                 for (const a of e.args) escape(a, a.loc, `the library call ${e.fn}`);
               return;

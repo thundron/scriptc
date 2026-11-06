@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { chmod, mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
-import { describe, expect, test } from "vitest";
+import { basename, dirname, join, relative } from "node:path";
+import { describe, expect, test, vi } from "vitest";
 import { compilerReleaseVersion } from "../library/sidecar.js";
 import { snapshotNativeArtifactDependencies } from "./native-toolchain.js";
 import { nativeArtifactDependenciesStillMatch } from "./native/artifact-stamps.js";
@@ -28,6 +28,7 @@ import {
   LINUX_X64_GNU_TARGET,
   MACOS_ARM64_TARGET,
   WINDOWS_X64_MSVC_TARGET,
+  WASM32_WASI_TARGET,
   type NativeTargetSpec,
 } from "./targets.js";
 
@@ -107,6 +108,7 @@ async function fixture(target: NativeTargetSpec = MACOS_ARM64_TARGET) {
   const base = await artifact("artifacts/base.o", "base");
   const legacy = await artifact("artifacts/legacy.o", "legacy");
   const fileHandle = await artifact("artifacts/fileHandle.o", "fileHandle");
+  const staticPasswd = await artifact("artifacts/static.o", "static");
   const regex = await artifact("artifacts/regex.a", "regex");
   const zlib = await artifact("artifacts/zlib.a", "zlib");
   await writeFile(join(root, "license.txt"), "license");
@@ -128,6 +130,12 @@ async function fixture(target: NativeTargetSpec = MACOS_ARM64_TARGET) {
           defines: ["SCR_TEST_FILE_HANDLE"],
           ...fileHandle,
         },
+        {
+          id: "static",
+          when: { staticLink: true },
+          defines: ["SCR_STATIC_PASSWD"],
+          ...staticPasswd,
+        },
       ],
     },
   ];
@@ -143,14 +151,14 @@ async function fixture(target: NativeTargetSpec = MACOS_ARM64_TARGET) {
       object_format: target.objectFormat,
       minimum_os: target.minimumOs,
     },
-    runtime_abi: { version: 48, marker: "scr_runtime_abi_v48" },
+    runtime_abi: { version: 49, marker: "scr_runtime_abi_v49" },
     compiler: {
       command: "clang",
       identity: "fixture clang",
       target: target.llvmTriple,
     },
     macros: {
-      executable: ["SCR_TEST_FILE_HANDLE", "SCR_TEXT_DECODER_LEGACY"],
+      executable: ["SCR_TEST_FILE_HANDLE", "SCR_TEXT_DECODER_LEGACY", "SCR_STATIC_PASSWD"],
       excluded: ["SCR_LIB", "SCR_THREAD_INSTANCES", "SCR_RC_AUDIT"],
       sanitizer: "external-toolchain-required",
     },
@@ -424,6 +432,103 @@ describe("runtime pack manifests", () => {
     expect((await createNativeLinkPlan({ ...options, hugeText: false })).hugeText).toBeUndefined();
   });
 
+  test.each([MACOS_ARM64_TARGET, WASM32_WASI_TARGET])(
+    "explicit pack selection is authoritative across library modes ($name)",
+    async (target) => {
+      const first = await fixture(target);
+      const second = await fixture(target);
+      for (const pack of [first, second]) {
+        await writeFile(
+          join(pack.root, "runtime-pack.json"),
+          JSON.stringify({
+            ...pack.manifest,
+            flavors: {
+              ...pack.manifest.flavors,
+              "library-release": pack.manifest.flavors.release,
+              "library-thread-release": pack.manifest.flavors.release,
+            },
+          }),
+        );
+      }
+      const selections = [];
+      for (const pack of [first, second]) {
+        for (const mode of ["executable", "library", "library-thread"] as const) {
+          const selection = await loadRuntimePack({
+            target,
+            features: BASE,
+            optimization: "release",
+            mode,
+            env: { SCRIPTC_RUNTIME_PACK: relative(process.cwd(), pack.root) },
+            resolver: () => {
+              throw new Error("must not resolve an installed pack");
+            },
+          });
+          expect(selection.root).toBe(pack.root);
+          expect(selection.dependencyPaths).toContain(pack.packagePath);
+          expect(selection.sourceDependencies.every((d) => d.path.startsWith(pack.root))).toBe(
+            true,
+          );
+          selections.push(selection);
+        }
+      }
+      expect(selections[0]!.sourceDependencies).not.toEqual(selections[3]!.sourceDependencies);
+    },
+  );
+
+  test("the library loader honors the process environment without caller forwarding", async () => {
+    const { root, manifest } = await fixture();
+    await writeFile(
+      join(root, "runtime-pack.json"),
+      JSON.stringify({
+        ...manifest,
+        flavors: { "library-release": manifest.flavors.release },
+      }),
+    );
+    vi.stubEnv("SCRIPTC_RUNTIME_PACK", root);
+    try {
+      const selection = await loadRuntimePack({
+        target: MACOS_ARM64_TARGET,
+        features: BASE,
+        optimization: "release",
+        mode: "library",
+        resolver: () => {
+          throw new Error("must not resolve an installed pack");
+        },
+      });
+      expect(selection.root).toBe(root);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  test("invalid overrides cannot fall back or bypass identity and hash verification", async () => {
+    const installed = await fixture();
+    const explicit = await fixture(WASM32_WASI_TARGET);
+    const options = {
+      target: MACOS_ARM64_TARGET,
+      features: BASE,
+      optimization: "release" as const,
+      resolver: () => installed.packagePath,
+    };
+    await expect(
+      loadRuntimePack({ ...options, env: { SCRIPTC_RUNTIME_PACK: "" } }),
+    ).rejects.toThrow("must name");
+    await expect(
+      loadRuntimePack({
+        ...options,
+        env: { SCRIPTC_RUNTIME_PACK: join(explicit.root, "missing") },
+      }),
+    ).rejects.toBeInstanceOf(RuntimePackError);
+    await expect(
+      loadRuntimePack({ ...options, env: { SCRIPTC_RUNTIME_PACK: explicit.root } }),
+    ).rejects.toBeInstanceOf(RuntimePackError);
+    const valid = await fixture();
+    await writeFile(join(valid.root, "artifacts/base.o"), "tampered");
+    await expect(
+      loadRuntimePack({ ...options, env: { SCRIPTC_RUNTIME_PACK: valid.root } }),
+    ).rejects.toThrow("mismatch");
+  });
+
   test("selection chooses the most-specific variant and feature archive", async () => {
     const { packagePath } = await fixture();
     const resolver = () => packagePath;
@@ -446,6 +551,31 @@ describe("runtime pack manifests", () => {
       "fileHandle.o",
     ]);
     expect(fileHandle.archives.map((path) => path.split("/").at(-1))).toEqual(["zlib.a"]);
+  });
+
+  test("a static link selects the static executable's unit variant", async () => {
+    const { packagePath, root } = await fixture(LINUX_X64_GNU_TARGET);
+    const options = {
+      target: LINUX_X64_GNU_TARGET,
+      programObject: join(root, "program.o"),
+      outPath: join(root, "program"),
+      features: BASE,
+      ffi: null,
+      optimization: "release" as const,
+      resolver: () => packagePath,
+    };
+    const dynamic = await createNativeLinkPlan(options);
+    const staticPlan = await createNativeLinkPlan({ ...options, staticLink: true });
+    expect(dynamic.runtimePack.features.staticLink).toBe(false);
+    expect(dynamic.runtimePack.selectedRuntimeArtifacts.map((a) => a.path)).toEqual([
+      "artifacts/base.o",
+    ]);
+    // The link mode, not a program fact, selects the pack's /etc/passwd
+    // build of the os unit: a static executable cannot load NSS modules.
+    expect(staticPlan.runtimePack.features.staticLink).toBe(true);
+    expect(staticPlan.runtimePack.selectedRuntimeArtifacts.map((a) => a.path)).toEqual([
+      "artifacts/static.o",
+    ]);
   });
 
   test("a stale manifest reports its identity independently from the package", async () => {

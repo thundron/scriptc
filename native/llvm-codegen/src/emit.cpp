@@ -989,10 +989,10 @@ compileUnoptimizedPartitions(const EmitOptions &Options,
       Objects[I].assign(Hit->getBufferStart(), Hit->getBufferEnd());
       return;
     }
-    // Target-machine selectors retain tracking metadata references. Their
-    // destructors must run while the partition's LLVMContext is still alive.
-    LLVMContext Context;
     std::string LookupError;
+    // The context must outlive the target machine: the subtarget caches the
+    // GlobalISel selector, whose builder holds metadata handles into it.
+    LLVMContext Context;
     std::unique_ptr<TargetMachine> Machine =
         createTargetMachine(Options.Target, Options.OptLevel, LookupError);
     if (!Machine)
@@ -1046,10 +1046,10 @@ compileOptimizedPartitions(const EmitOptions &Options,
       }
       return;
     }
-    // Target-machine selectors retain tracking metadata references. Their
-    // destructors must run while the partition's LLVMContext is still alive.
-    LLVMContext Context;
     std::string LookupError;
+    // The context must outlive the target machine: the subtarget caches the
+    // GlobalISel selector, whose builder holds metadata handles into it.
+    LLVMContext Context;
     std::unique_ptr<TargetMachine> Machine =
         createTargetMachine(Options.Target, Options.OptLevel, LookupError);
     if (!Machine)
@@ -1652,8 +1652,10 @@ emitSplitCodegen(const EmitOptions &Options, Module &M, TargetMachine &Machine,
         Failures.set(std::move(*Failure));
       return;
     }
-    LLVMContext Context;
     std::string LookupError;
+    // The context must outlive the target machine: the subtarget caches the
+    // GlobalISel selector, whose builder holds metadata handles into it.
+    LLVMContext Context;
     std::unique_ptr<TargetMachine> PartMachine =
         createTargetMachine(Options.Target, Options.OptLevel, LookupError);
     if (!PartMachine)

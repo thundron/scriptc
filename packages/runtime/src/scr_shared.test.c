@@ -105,6 +105,83 @@ static void short_shared(void) {
   scr_bytes_release(owner);
 }
 
+static atomic_uint f32_ready;
+static atomic_bool f32_go;
+static void *raw_f32_reader(void *pointer) {
+  /* Raw host leases must need no source-language GC context. */
+  double owner = *(double *)pointer;
+  double lease = scriptc_shared_f32_retain(owner);
+  assert(lease > 0);
+  atomic_fetch_add_explicit(&f32_ready, 1, memory_order_release);
+  while (!atomic_load_explicit(&f32_go, memory_order_acquire)) sched_yield();
+  for (unsigned i = 0; i < 10000; i++) {
+    double copy = scriptc_shared_f32_retain(lease);
+    assert(copy > 0);
+    uintptr_t address = scriptc_shared_f32_data(copy);
+    uint32_t value = 0;
+    assert(address);
+    scr_shared_load(&value, (const void *)address, sizeof(value));
+    assert(value == UINT32_C(0x3fa00000));
+    assert(scriptc_shared_f32_release(copy) == 0);
+  }
+  assert(scriptc_shared_f32_retain(owner) == 0);
+  assert(scriptc_shared_f32_release(lease) == 0);
+  return NULL;
+}
+
+static unsigned observer_a_calls, observer_b_calls;
+static void observer_a(void *object) { (void)object; observer_a_calls++; scr_weak_observer_remove(observer_a); }
+static void observer_b(void *object) { (void)object; observer_b_calls++; }
+static void raw_f32_registry(void) {
+  void (*saved_hook)(void *) = scr_weak_dispose_hook;
+  scr_weak_observer_install(observer_a);scr_weak_observer_install(observer_b);
+  scr_weak_observer_install(observer_b); /* idempotent */
+  int token = 0;scr_weak_dispose(&token);
+  assert(observer_a_calls == 1 && observer_b_calls == 1);
+  scr_weak_dispose(&token);
+  assert(observer_a_calls == 1 && observer_b_calls == 2);
+  scr_weak_observer_remove(observer_b);
+  assert(scr_weak_dispose_hook == saved_hook);
+  double held = scr_array_buffers_held(true);
+  for (size_t i = 0; i < 1000; i++) {
+    double handle = scriptc_shared_f32_new(4);
+    assert(handle > 0);
+    ScrBytes *left = scr_shared_f32_view(handle), *right = scr_shared_f32_view(handle);
+    ScrBytes *input = scr_shared_f32_readonly_view(handle);
+    ScrBytes *part = scr_bytes_subarray(input, 1, 3);
+    assert(left != right && left->backing == right->backing);
+    assert(!left->shared_readonly && !right->shared_readonly && !left->backing->shared_readonly);
+    assert(input->shared_readonly && input->backing == left->backing);
+    assert(part->shared_readonly && part->data == input->data + sizeof(float));
+    assert(scriptc_shared_f32_release(handle) == 0);
+    scr_bytes_release(left);scr_bytes_release(right);
+    assert(input->len == 4 && part->len == 2);
+    scr_bytes_release(input);scr_bytes_release(part);
+    assert(scr_array_buffers_held(true) == held && scr_weak_dispose_hook == saved_hook);
+  }
+  double owner = scriptc_shared_f32_new(1);
+  assert(owner > 0 && scr_array_buffers_held(true) == held + 4);
+  uint32_t value = UINT32_C(0x3fa00000);
+  scr_shared_store((void *)scriptc_shared_f32_data(owner), &value, sizeof(value));
+  pthread_t readers[4];
+  for (size_t i = 0; i < 4; i++) assert(pthread_create(&readers[i], NULL, raw_f32_reader, &owner) == 0);
+  while (atomic_load_explicit(&f32_ready, memory_order_acquire) != 4) sched_yield();
+  assert(scriptc_shared_f32_release(owner) == 0);
+  atomic_store_explicit(&f32_go, true, memory_order_release);
+  for (size_t i = 0; i < 4; i++) assert(pthread_join(readers[i], NULL) == 0);
+  assert(scr_array_buffers_held(true) == held);
+  double handles[4096];
+  for (size_t i = 0; i < 4096; i++) {handles[i] = scriptc_shared_f32_new(0); assert(handles[i] > 0);}
+  assert(scriptc_shared_f32_new(1) == 0);
+  double stale = handles[0];
+  assert(scriptc_shared_f32_release(stale) == 0);
+  double replacement = scriptc_shared_f32_new(1);
+  assert(replacement > 0 && replacement != stale && scriptc_shared_f32_length(stale) == -1);
+  for (size_t i = 1; i < 4096; i++) assert(scriptc_shared_f32_release(handles[i]) == 0);
+  assert(scriptc_shared_f32_release(replacement) == 0);
+  assert(scr_array_buffers_held(true) == held);
+}
+
 int main(void) {
   scr_init();
   scr_lib_init(0, NULL);
@@ -159,6 +236,28 @@ int main(void) {
   assert(scr_atomics_notify(values, 0, INFINITY) == 0);
   scr_bytes_release(values);
   scr_bytes_release(storage);
+  double handle = scriptc_shared_f32_new(16);
+  assert(handle > 0 && scriptc_shared_f32_length(handle) == 16);
+  ScrBytes *view = scr_shared_f32_view(handle);
+  assert(view && view->elem == SCR_BYTES_F32 && view->len == 16);
+  double lease = scriptc_shared_f32_retain(handle);
+  assert(lease > 0 && lease != handle);
+  uintptr_t pointer = scriptc_shared_f32_data(lease);
+  assert(pointer != 0);
+  assert(scriptc_shared_f32_release(handle) == 0);
+  assert(scriptc_shared_f32_release(handle) == -1);
+  assert(scriptc_shared_f32_length(handle) == -1);
+  assert(scriptc_shared_f32_data(lease) == pointer);
+  scr_bytes_set(view, 0, 1.25);
+  assert(scr_bytes_get(view, 0) == 1.25);
+  assert(scriptc_shared_f32_release(lease) == 0);
+  // A context-local view is still an owner after every handle is gone.
+  assert(scr_bytes_get(view, 0) == 1.25);
+  scr_bytes_release(view);
+  assert(scriptc_shared_f32_new(-1) == 0);
+  assert(scriptc_shared_f32_new(NAN) == 0);
+  assert(scriptc_shared_f32_release(INFINITY) == -1);
+  raw_f32_registry();
   scr_context_cleanup();
   puts("shared views preserve atomic updates, wait queues and cancellation ownership");
 }

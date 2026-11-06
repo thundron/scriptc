@@ -16,11 +16,17 @@
     ".": {
       "types": "./index.d.ts",
       "default": "./index.js"
+    },
+    "./f32": {
+      "types": "./f32.d.ts",
+      "default": "./f32.js"
     }
   },
   "files": [
     "index.js",
     "index.d.ts",
+    "f32.js",
+    "f32.d.ts",
     "README.md"
   ],
   "dependencies": {

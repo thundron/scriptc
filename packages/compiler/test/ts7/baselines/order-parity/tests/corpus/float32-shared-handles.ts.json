@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/float32-shared-handles.ts"
+ ],
+ "diags": []
+}

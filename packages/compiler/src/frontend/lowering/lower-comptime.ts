@@ -360,7 +360,10 @@ export function comptimeValueToIr(
         if (!absent) fail(`an object missing field '${field.name}'`);
         fields.push({ name: field.name, value: absent });
       }
-      return { kind: "recordLit", fields, type: expected, loc };
+      return lowerer.keyOrder.literal(
+        { kind: "recordLit", fields, type: expected, loc },
+        ownKeys.map((name) => ({ kind: "key", name, definite: true })),
+      );
     }
     case "union": {
       const arms = lowerer.unions.get(expected.unionId)!.arms; // bakeable-checked

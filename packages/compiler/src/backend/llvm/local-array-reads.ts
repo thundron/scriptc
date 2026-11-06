@@ -2,6 +2,7 @@ import {
   isRefCounted,
   typeEquals,
   type IrExpr,
+  type IrBytesElem,
   type IrFunction,
   type IrLocal,
   type IrStmt,
@@ -17,6 +18,7 @@ import { SCR_ARR_FIELD, loadArrCount, scrArrStateAt } from "./common.js";
 import { indexInteger } from "./integer-values.js";
 import { READ_FALLBACK } from "./dense-array-access.js";
 import { compactRefLoadLines } from "./classes.js";
+import { emitOptionalBytesGet } from "./expr-bytes.js";
 
 /** The dense slot load of a reference read from an array of type
  * `arrayType`: a pointer, or a compact class reference (SCR_ELEM_CREF). */
@@ -37,6 +39,8 @@ export interface LocalArrayRead {
    * owned copies retain and release through the union's NULL-tolerant
    * entry points. */
   nullableElement?: boolean;
+  /** A numeric typed-array read: scalar payload, no reference owner. */
+  bytesElement?: IrBytesElem;
 }
 
 /** Whether a union is held as its reference arm's plain pointer
@@ -59,6 +63,7 @@ interface ArrayReadShape {
   presentTag: number;
   missingTag: number;
   nullableElement?: boolean;
+  bytesElement?: IrBytesElem;
 }
 
 /** f64 and bool elements copy their slot bits into the box payload. They
@@ -143,12 +148,122 @@ function inlineArrayRead(
   return { type: value.type, element, presentTag, missingTag, array, index };
 }
 
+/** Recognize the exact typed-array optional-read body. Float arrays need a
+ * separate presence bit: a genuine NaN must never stand for undefined. */
+function bytesReadShape(
+  fn: IrFunction,
+  unions: ReadonlyMap<string, IrUnionDef>,
+): ArrayReadShape | null {
+  if (
+    fn.async ||
+    fn.generator ||
+    fn.captures ||
+    fn.classCaptures ||
+    fn.params.length !== 2 ||
+    fn.params[0]!.type.kind !== "bytes" ||
+    fn.params[1]!.type.kind !== "f64" ||
+    fn.returnType.kind !== "union" ||
+    fn.locals.some((local) => local.boxed || local.tdz)
+  )
+    return null;
+  const receiver = fn.params[0]!,
+    index = fn.params[1]!;
+  if (receiver.type.kind !== "bytes") return null;
+  const unionId = fn.returnType.unionId;
+  const arms = unions.get(unionId)?.arms;
+  if (!arms || arms.length !== 2) return null;
+  const presentTag = arms.findIndex((arm) => arm.kind === "f64");
+  const missingTag = arms.findIndex((arm) => arm.kind === "undefinedT");
+  if (presentTag < 0 || missingTag < 0) return null;
+  const binding = (expr: IrExpr, id: string): boolean =>
+    expr.kind === "varRef" && expr.localId === id;
+  const wrapped = (expr: IrExpr, tag: number): expr is IrExpr & { kind: "unionWrap" } =>
+    expr.kind === "unionWrap" && expr.unionId === unionId && expr.tag === tag;
+  const missing = (expr: IrExpr): boolean =>
+    wrapped(expr, missingTag) && expr.value.kind === "unitLit" && expr.value.unit === "undefined";
+  const read = (expr: IrExpr): boolean =>
+    expr.kind === "bytesIntrinsic" &&
+    expr.method === "get" &&
+    binding(expr.receiver, receiver.localId) &&
+    expr.args.length === 1 &&
+    binding(expr.args[0]!, index.localId);
+  const ret = fn.body[fn.body.length - 1];
+  if (ret?.kind !== "return" || ret.value?.kind !== "ternary") return null;
+  const value = ret.value;
+  if (fn.body.length === 1 && fn.locals.length === 2) {
+    if (!missing(value.else_) || !wrapped(value.then, presentTag) || !read(value.then.value))
+      return null;
+    const condition = value.cond;
+    if (condition.kind !== "logical" || condition.op !== "&&") return null;
+    const positive = condition.left,
+      rest = condition.right;
+    if (
+      positive.kind !== "bin" ||
+      positive.op !== ">=" ||
+      !binding(positive.left, index.localId) ||
+      positive.right.kind !== "numLit" ||
+      positive.right.value !== 0 ||
+      rest.kind !== "logical" ||
+      rest.op !== "&&"
+    )
+      return null;
+    const below = rest.left,
+      integral = rest.right;
+    if (
+      below.kind !== "bin" ||
+      below.op !== "<" ||
+      !binding(below.left, index.localId) ||
+      below.right.kind !== "bytesIntrinsic" ||
+      below.right.method !== "length" ||
+      below.right.args.length !== 0 ||
+      !binding(below.right.receiver, receiver.localId) ||
+      integral.kind !== "bin" ||
+      integral.op !== "===" ||
+      !binding(integral.right, index.localId) ||
+      integral.left.kind !== "libCall" ||
+      integral.left.fn !== "math.trunc" ||
+      integral.left.args.length !== 1 ||
+      !binding(integral.left.args[0]!, index.localId)
+    )
+      return null;
+  } else if (fn.body.length === 2 && fn.locals.length === 3) {
+    const init = fn.body[0]!;
+    const elem = receiver.type.elem;
+    if (
+      elem === "f16" ||
+      elem === "f32" ||
+      elem === "f64" ||
+      init.kind !== "varDecl" ||
+      init.init?.kind !== "bytesIntrinsic" ||
+      !read(init.init) ||
+      init.init.invalidNaN !== true ||
+      !missing(value.then) ||
+      !wrapped(value.else_, presentTag) ||
+      !binding(value.else_.value, init.localId) ||
+      value.cond.kind !== "libCall" ||
+      value.cond.fn !== "num.isNaN" ||
+      value.cond.args.length !== 1 ||
+      !binding(value.cond.args[0]!, init.localId)
+    )
+      return null;
+  } else return null;
+  return {
+    type: fn.returnType,
+    element: arms[presentTag]!,
+    presentTag,
+    missingTag,
+    bytesElement: receiver.type.elem,
+  };
+}
+
 /** Recognize the complete optional-array-read body, not the helper's name. */
 function arrayReadShape(
   fn: IrFunction,
   unions: ReadonlyMap<string, IrUnionDef>,
   nullable?: NullablePointerUnion,
 ): ArrayReadShape | null {
+  const bytes = bytesReadShape(fn, unions);
+  if (bytes) return bytes;
   if (
     fn.async ||
     fn.generator ||
@@ -591,7 +706,8 @@ function emitDenseReferenceArrayRead(
   if (loadType === "cref") {
     const ref = B.tmp();
     B.line(`${ref} = load i32, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
-    for (const line of compactRefLoadLines(ref, raw, `${raw}.r`)) B.line(line.trimStart());
+    for (const line of compactRefLoadLines(host.compactRefBase, ref, raw, `${raw}.r`))
+      B.line(line.trimStart());
   } else {
     B.line(`${raw} = load ${loadType}, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
   }
@@ -649,7 +765,8 @@ export function emitBorrowedArrayRead(
       );
       host.markMemoryPointer(valuePtr, "array:elements");
       B.line(`${ref} = load i32, ptr ${valuePtr}${host.fieldAliasAttachment(valuePtr)}`);
-      for (const line of compactRefLoadLines(ref, value, `${value}.r`)) B.line(line.trimStart());
+      for (const line of compactRefLoadLines(host.compactRefBase, ref, value, `${value}.r`))
+        B.line(line.trimStart());
       B.line(`store ptr ${value}, ptr ${slot}`);
       return;
     }
@@ -703,6 +820,25 @@ export function emitLocalArrayRead(
   inline = true,
 ): { slot: string; type: IrType } | null {
   const B = host.B;
+  if (read.bytesElement !== undefined) {
+    const array = host.emitStableReceiver(read.array, [read.index]);
+    const index = host.emitExpr(read.index);
+    const result = emitOptionalBytesGet(host, read.bytesElement, array.name, index, read.index);
+    const box = B.slot(),
+      tag = B.slot(),
+      payload = B.slot();
+    B.entryAllocas.push(`${box} = alloca %ScrUnion`);
+    B.entryAllocas.push(`${tag} = getelementptr inbounds %ScrUnion, ptr ${box}, i32 0, i32 1`);
+    B.entryAllocas.push(`${payload} = getelementptr inbounds %ScrUnion, ptr ${box}, i32 0, i32 5`);
+    const selected = B.tmp();
+    B.line(
+      `${selected} = select i1 ${result.present}, i32 ${read.presentTag}, i32 ${read.missingTag}`,
+    );
+    B.line(`store i32 ${selected}, ptr ${tag}`);
+    B.line(`store double ${result.value.name}, ptr ${payload}`);
+    B.line(`store ptr ${box}, ptr ${localSlot}`);
+    return null;
+  }
   const array = host.emitStableReceiver(read.array, [read.index]);
   const loopIndex = inline ? host.emitIntegerLoopIndex(read.index) : null;
   const index = host.emitExpr(read.index);

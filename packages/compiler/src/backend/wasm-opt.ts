@@ -12,11 +12,23 @@ const FEATURES = [
   "--enable-mutable-globals",
 ];
 
-export async function optimizeWasmIfAvailable(wasmPath: string): Promise<void> {
+export async function optimizeWasmIfAvailable(
+  wasmPath: string,
+  features: readonly "simd128"[] = [],
+  shared = false,
+): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "scriptc-wasm-opt-"));
   const output = join(dir, "optimized.wasm");
   try {
-    await execFileAsync("wasm-opt", ["-Oz", ...FEATURES, wasmPath, "-o", output]);
+    await execFileAsync("wasm-opt", [
+      "-Oz",
+      ...FEATURES,
+      ...(features.includes("simd128") ? ["--enable-simd"] : []),
+      ...(shared ? ["--enable-threads"] : []),
+      wasmPath,
+      "-o",
+      output,
+    ]);
     await copyFile(output, wasmPath);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;

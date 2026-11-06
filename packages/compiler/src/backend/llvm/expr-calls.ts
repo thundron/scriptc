@@ -672,7 +672,7 @@ export function emitCallExpr(
           }
           case "bytes":
           case "mutable-bytes": {
-            if (host.mod.workers) {
+            if (host.mod.workers || host.mod.lib?.threadInstances === true) {
               host.declare(`declare void @scr_bytes_require_unshared(ptr)`);
               B.line(`call void @scr_bytes_require_unshared(ptr ${arg.name})`);
               host.emitPendingCheck();

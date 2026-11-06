@@ -1,5 +1,5 @@
 import { execFile, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, openSync, closeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -9,7 +9,9 @@ import {
   compile,
   compileC,
   deserializeModule,
+  deserializeModuleBytes,
   serializeModule,
+  serializeModuleParts,
   validateModule,
 } from "@scriptc/compiler";
 import { emitLlvmModule } from "../../packages/compiler/src/backend/llvm/emitter.js";
@@ -28,14 +30,10 @@ const entry = join(root, "tests/fixtures/self-hosting/llvm-emitter.ts");
 const execFileAsync = promisify(execFile);
 const runOptions = { cwd: root, timeout: 60_000, maxBuffer: 256 * 1024 * 1024 };
 const sanitize = process.env["SCRIPTC_SAN"] === "1";
-// The bootstrap builds the compiler once and then emits the compiler's own
-// module twice: 435 MB of IR to 269 MB of LLVM each time. On one idle core
-// the plain native emitter emits it in 91 s (0.4 s read, 15 s decode, 75 s
-// emission) and the ASan build in 252 s; the fixed point takes 395 s plain
-// and 811 s sanitized. CI runners run these steps at more than three times
-// that rate, which is what carried the old 300 s and 900 s per-stage bounds
-// and the matching test budgets. Each bound here allows about twice the CI
-// time and still stops a stage that hangs.
+// The bootstrap builds the compiler once and emits its own IR twice.
+// The artifacts can exceed V8's single-string limit, so read IR as bytes
+// and serialize it in parts. Keep the per-stage and whole-test bounds
+// separate so a stalled stage cannot consume the entire test budget.
 const seedTimeout = sanitize ? 1_200_000 : 900_000;
 const emitTimeout = sanitize ? 1_800_000 : 600_000;
 const testTimeout = sanitize ? 5_400_000 : 3_600_000;
@@ -169,7 +167,7 @@ function buildSeed(): Promise<IrModule> {
     if (!("binaryPath" in built)) throw new Error("bootstrap did not produce an executable");
     expect(built.backend).toBe(backend);
     expect(built.irPath).toBeDefined();
-    const ownIr = deserializeModule(readFileSync(built.irPath!, "utf8"));
+    const ownIr = deserializeModuleBytes(readFileSync(built.irPath!));
     expect(ownIr.functions.length).toBeGreaterThan(800);
     expect(validateModule(ownIr)).toEqual([]);
     progress("seed built");
@@ -183,7 +181,12 @@ const emit = async (
   name: string,
   request = llvmEmitterRequest(),
 ): Promise<string> => {
-  writeFileSync(input, serializeModule(mod, true));
+  const descriptor = openSync(input, "w");
+  try {
+    for (const part of serializeModuleParts(mod)) writeFileSync(descriptor, part);
+  } finally {
+    closeSync(descriptor);
+  }
   writeFileSync(config, JSON.stringify(request));
   const result = await execFileAsync(stage, [input, output, config], {
     ...runOptions,

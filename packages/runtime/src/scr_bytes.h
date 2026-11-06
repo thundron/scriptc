@@ -1,4 +1,4 @@
-/* scriptc runtime — typed arrays and Buffer (scr_bytes.c). Included by
+/* scriptc runtime — typed arrays and Buffer (scr_bytes.c, scr_shared.c). Included by
  * scr_runtime.h, which says where new declarations go. */
 #ifndef SCR_BYTES_H
 #define SCR_BYTES_H
@@ -87,6 +87,9 @@ typedef struct ScrBytes {
    * value that held this view (see scr_dyn_trace_v). In padding, so the
    * offsets compiled code uses hold. */
   bool properties_traced;
+  /* Explicit immutable-input promise on this view, not a buffer freeze.
+   * Shared writers through any alias must be excluded while it is read. */
+  bool shared_readonly;
 #if SIZE_MAX > UINT32_MAX
   uint16_t held_hi; /* bits 32-47 of the counted storage, in padding */
 #endif
@@ -100,8 +103,13 @@ typedef struct ScrBytes {
 #endif
 } ScrBytes;
 #if SIZE_MAX > UINT32_MAX
-_Static_assert(offsetof(ScrBytes, data) == 24 && offsetof(ScrBytes, shared) == 48 && sizeof(ScrBytes) == 64,
+_Static_assert(offsetof(ScrBytes, data) == 24 && offsetof(ScrBytes, shared) == 48 &&
+               offsetof(ScrBytes, shared_readonly) == 45 && sizeof(ScrBytes) == 64,
                "the counted storage sits in padding: compiled code reads data at 24 and shared at 48");
+#else
+_Static_assert(offsetof(ScrBytes, data) == 12 && offsetof(ScrBytes, shared) == 28 &&
+               offsetof(ScrBytes, shared_readonly) == 25 && sizeof(ScrBytes) == 40,
+               "the read-only promise sits in padding: data at 12 and shared at 28");
 #endif
 
 /* The bytes of storage an owner counts in process.memoryUsage()'s
@@ -287,6 +295,7 @@ ScrBytes *scr_bytes_take_data(uint8_t *data, size_t len); /* +1, consumes malloc
 double scr_array_buffers_held(bool shared);
 void scr_array_buffers_sub(bool shared, size_t n);
 void scr_array_buffers_share(size_t n);
+void scr_array_buffers_add_shared(size_t n);
 
 /* Same-element-kind copy, preserving the raw representation. Cross-kind
  * construction uses scr_bytes_convert. Borrows src. Never throws. */
@@ -759,5 +768,19 @@ ScrBytes *scr_bytes_concat_len(const ScrArr *list, double total);
  * the result is one fresh copy of their concatenation. Borrows the list.
  * Never throws. */
 ScrBytes *scr_bytes_concat(const ScrArr *list); /* +1 */
+
+
+/* Opaque neutral binary32 buffer handles. View wrappers own a reference;
+ * raw host leases use a distinct handle so owner release cannot free a copy
+ * in progress. The raw API reports invalid requests without guest exceptions. */
+double scriptc_shared_f32_new(double length);
+int32_t scriptc_shared_f32_release(double handle);
+double scriptc_shared_f32_retain(double handle);
+uintptr_t scriptc_shared_f32_data(double handle);
+double scriptc_shared_f32_length(double handle);
+double scr_shared_f32_new(double length);
+ScrBytes *scr_shared_f32_view(double handle);
+ScrBytes *scr_shared_f32_readonly_view(double handle);
+void scr_shared_f32_release_handle(double handle);
 
 #endif /* SCR_BYTES_H */

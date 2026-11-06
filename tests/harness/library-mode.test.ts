@@ -203,6 +203,17 @@ platformTest(
   },
 );
 
+platformTest("finite union spreads preserve native library layouts and own keys", async () => {
+  const sanitize = flavor === "san";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const { archive, outDir } = await buildLibrary("finite-union-spread", "llvm", { sanitize });
+    const result = runProbe(buildProbe("finite-union-spread", archive, outDir, { sanitize }));
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("100 native union-spread calls passed\n");
+  }
+});
+
 /* ── K2 + K1 + K8: scalars ─────────────────────────────────────────────── */
 
 const SCALARS_EXPECTED = `scalars ready

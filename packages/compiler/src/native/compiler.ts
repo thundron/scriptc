@@ -1,4 +1,4 @@
-import { emitLibraryWasmGlue } from "../backend/wasm-glue.js";
+import { emitLibraryWasmGlue, emitLibraryWasmTypes } from "../backend/wasm-glue.js";
 import type { NativeOptimization } from "../backend/optimization.js";
 import { compilationTiming } from "../timing.js";
 import {
@@ -581,6 +581,13 @@ export class NativeCompiler {
         return { ok: true, artifact: { kind: "ir", path: output } };
       }
       const { llvm, features } = prepared;
+      // The runtime pack's selection belongs to the link, not to the program:
+      // a static executable needs the os unit's /etc/passwd build
+      // (SCR_STATIC_PASSWD), and the executable cache keys the selection, so
+      // the static link names it here as the link plan does for the
+      // JavaScript compiler.
+      const linkFeatures =
+        options.staticLink === true ? { ...features, staticLink: true } : features;
       // The executable and object caches key the same LLVM text.
       let llvmDigest: string | undefined;
       const digestLlvm = (): string => (llvmDigest ??= prepared.llvmDigest ?? partsDigest(llvm));
@@ -604,7 +611,7 @@ export class NativeCompiler {
           toolchain.runtimePackRoot,
           target,
           toolchain.compilerVersion,
-          features,
+          linkFeatures,
           optimization,
           "executable",
           this.runtimePackStore(),
@@ -621,7 +628,7 @@ export class NativeCompiler {
               ffi,
               {
                 root: toolchain.runtimePackRoot,
-                features,
+                features: linkFeatures,
                 flavor: optimization,
                 select: selectPack,
               },
@@ -676,7 +683,7 @@ export class NativeCompiler {
                   toolchain.runtimePackRoot,
                   target,
                   toolchain.compilerVersion,
-                  features,
+                  linkFeatures,
                   optimization,
                   "executable",
                   this.runtimePackStore(),
@@ -988,6 +995,7 @@ export class NativeCompiler {
           runtime,
           optimization: profile.optimization,
           exports: libraryWasmExports(profile),
+          ...(profile.wasmMemory === undefined ? {} : { memory: profile.wasmMemory }),
         });
       } else {
         archiveNativeLibrary({
@@ -1020,6 +1028,10 @@ export class NativeCompiler {
           join(dirname(archivePath), basename(archivePath, ".wasm") + ".mjs"),
           emitLibraryWasmGlue(profile, basename(archivePath, ".wasm")),
         );
+      writeFileSync(
+        join(dirname(archivePath), basename(archivePath, ".wasm") + ".d.mts"),
+        emitLibraryWasmTypes(profile, basename(archivePath, ".wasm")),
+      );
       return {
         ok: true,
         archivePath,

@@ -17,6 +17,7 @@ import { optimizationField, type NativeOptimization } from "./backend/optimizati
 import { targetCpuField, targetCpuTargetRefusal } from "./backend/target-cpu.js";
 import { compilationTiming, type CompilationTiming, type TimingClock } from "./timing.js";
 import { prepareExecutableModule, type PreparedExecutableModule } from "./executable/prepare.js";
+import type { LowerStats } from "./frontend/lowering/lowerer.js";
 import { nodeIslandOptionsKey } from "./node-islands/policy.js";
 import { setIslandResolver } from "./node-islands/resolve.js";
 import {
@@ -69,7 +70,10 @@ export type {
   AnalyzeResult,
 } from "./compile-types.js";
 import { compilePackedLibrary } from "./backend/library-pack.js";
-import { emitLibraryWasmGlue as libraryWasmGlue } from "./backend/wasm-glue.js";
+import {
+  emitLibraryWasmGlue as libraryWasmGlue,
+  emitLibraryWasmTypes,
+} from "./backend/wasm-glue.js";
 import { optimizeWasmIfAvailable } from "./backend/wasm-opt.js";
 import { node24FetchCompatProfile } from "./compat/fetch-profile.js";
 import { libFnSignatures } from "./ir/builtin-signatures.js";
@@ -111,9 +115,10 @@ import {
   llvmInputBytes,
   type LlvmInput,
   NativeCodegenError,
+  readProfileFunctionNames,
   writeLlvmSource,
 } from "./backend/native-codegen.js";
-import { nativePartitionPaths, nativeProgramPartitions } from "./backend/native-codegen-core.js";
+import { nativeBuildPartitions, nativePartitionPaths } from "./backend/native-codegen-core.js";
 import { privateSiblingPath } from "./backend/build-cache.js";
 import {
   nativeCodegenTarget,
@@ -599,6 +604,8 @@ interface CompileWarningSink {
   warnings: ScrDiagnostic[];
   sourceTexts: Map<string, string> | null;
   islands?: { packages: string[]; modules: string[] };
+  /** What the build's frontend pass lowered (CompileWarnings.stats). */
+  stats?: LowerStats;
 }
 
 /** The package.json texts type patch warnings point into, re-read for a
@@ -658,12 +665,14 @@ function withCompileWarnings<T extends CompileRequestResult>(
 ): T {
   if (!result.ok) return result;
   const islands = sink.islands === undefined ? {} : { islands: sink.islands };
-  if (sink.warnings.length === 0) return { ...result, ...islands };
+  const stats = sink.stats === undefined ? {} : { stats: sink.stats };
+  if (sink.warnings.length === 0) return { ...result, ...islands, ...stats };
   return {
     ...result,
     warnings: sink.warnings,
     sourceTexts: sink.sourceTexts ?? new Map(),
     ...islands,
+    ...stats,
   };
 }
 
@@ -845,6 +854,7 @@ async function compileExecutableNative(
     ...(features.eventTarget ? { eventTarget: true } : {}),
     ...(features.wasm ? { wasm: true } : {}),
     ...(features.warningReplace ? { warningReplace: true } : {}),
+    ...(features.promiseRejectDyn ? { promiseRejectDyn: true } : {}),
     ...(jsObjectModelFact(features) ? { jsObjectModel: true } : {}),
     ...(features.mutableBuffers === true ? { mutableBuffers: true } : {}),
     ...(features.stdioExtended ? { stdioExtended: true } : {}),
@@ -874,6 +884,7 @@ async function compileExecutableNative(
     ...(features.handleProps ? { handleProps: true } : {}),
     ...(features.childLifecycle ? { childLifecycle: true } : {}),
     ...(features.childOptionExt ? { childOptionExt: true } : {}),
+    ...(features.childErrorFields ? { childErrorFields: true } : {}),
     ...(features.declAdopt ? { declAdopt: true } : {}),
     ...(features.typeOrigins ? { typeOrigins: true } : {}),
     ...(features.dynForAwait ? { dynForAwait: true } : {}),
@@ -883,6 +894,9 @@ async function compileExecutableNative(
     ...(features.mime ? { mime: true } : {}),
     ...(features.largePages ? { largePages: true } : {}),
     ...(features.webStreams ? { webStreams: true } : {}),
+    // The C-source link (a sanitized build) compiles the runtime itself, so it
+    // needs the same Blob/File body define the runtime pack selects.
+    ...(features.webBodies ? { webBodies: true } : {}),
     ...(features.abortSignal ? { abortSignal: true } : {}),
     ...(features.utilTiming ? { utilTiming: true } : {}),
     ...(features.dynBuffer ? { dynBuffer: true } : {}),
@@ -891,7 +905,6 @@ async function compileExecutableNative(
     ...(features.dataViewPrototypeValue ? { dataViewPrototypeValue: true } : {}),
     ...(features.hostAbsentGlobals ? { hostAbsentGlobals: true } : {}),
     ...(features.arrayLikeDispatch ? { arrayLikeDispatch: true } : {}),
-    ...(features.builtinPrototypeValue ? { builtinPrototypeValue: true } : {}),
     ...(features.builtinMethodValue ? { builtinMethodValue: true } : {}),
     ...(features.computedRequire ? { computedRequire: true } : {}),
     events: features.events,
@@ -945,9 +958,8 @@ interface NativeProgramObject {
   linkPath: string;
   /** Further partition objects linked after linkPath. */
   partitionPaths: string[];
-  /** The partitions the helper compiled: one for a module small enough to
-   * stay whole (nativeProgramPartitions). Absent when the link took one
-   * object the helper did not compile from partitions. */
+  /** The partitions the helper compiled (nativeBuildPartitions). Absent when
+   * the link took one object the helper did not compile from partitions. */
   partitions?: number;
   artifactPath: string;
   dependencies: NativeArtifactDependency[];
@@ -968,9 +980,12 @@ async function emitNativeProgramObject(
   const linkPath = `${privateSiblingPath(artifactPath, "native-program-object")}.o`;
   // The validated program-object artifact is a single object by contract.
   const target = nativeCodegenTarget();
-  const llvmBytes = llvmInputBytes(llvm);
   const single = opts.nativeProgramObject === true || target === null;
-  const partitions = single ? 1 : nativeProgramPartitions(llvmBytes, opts.optimization === "dev");
+  const partitions = nativeBuildPartitions(llvmInputBytes(llvm), {
+    singleObject: single,
+    cpuDispatch: opts.cpuDispatch === true,
+    unoptimized: opts.optimization === "dev",
+  });
   try {
     const artifact = await emitNativeArtifact({
       outputPath: linkPath,
@@ -1045,6 +1060,29 @@ async function readNativeProfile(
     use,
     ...(recordBlocks === undefined ? {} : { recordBlocks: resolve(recordBlocks) }),
   };
+}
+
+/** The program functions a `--cpu-dispatch` build's profile names, when the
+ * build uses one: emission copies only these, with the functions whose loop
+ * x86-64-v3 widens. The profile names a function of a source file
+ * `<file>;<name>`, and a profile collected before the build stopped copying
+ * while recording names its copies `<name>.base`/`<name>.v3`, so both are
+ * dropped here. Undefined without a profile, or when the helper cannot
+ * report its functions. */
+async function cpuCopyFunctions(
+  opts: CompileRequestOptions,
+): Promise<ReadonlySet<string> | undefined> {
+  if (opts.cpuDispatch !== true || opts.profileUse === undefined) return undefined;
+  const names = await readProfileFunctionNames(resolve(opts.profileUse));
+  if (names === null) return undefined;
+  const functions = new Set<string>();
+  for (const name of names) {
+    const local = name.slice(name.lastIndexOf(";") + 1).replace(/\.(?:base|v3)$/, "");
+    if (local !== "") functions.add(local);
+  }
+  // A profile the helper read but that names no function of the program
+  // leaves the build its own rule rather than copying nothing.
+  return functions.size === 0 ? undefined : functions;
 }
 
 /** The digest of the request's function layout file, which keys the
@@ -1134,6 +1172,8 @@ interface PreparedExecutable {
   nativeFeatures: EarlyExecutableNativeFeatures;
   programSplit: ReturnType<typeof splitLlvmProgram>;
   sourceTexts: Map<string, string>;
+  /** What this build's frontend pass lowered (see CompileWarnings.stats). */
+  stats: LowerStats;
   /** The Node islands the build ran, reported with its result (a runner
    * reads them to tell an island result from a native one). */
   islands?: { packages: string[]; modules: string[] };
@@ -1226,6 +1266,7 @@ async function prepareExecutableInput(
     warningSink.warnings = prepared.warnings;
     warningSink.sourceTexts = sourceTexts;
   }
+  if (warningSink !== undefined) warningSink.stats = prepared.stats;
   if (warningSink !== undefined && prepared.islands !== undefined)
     warningSink.islands = prepared.islands;
 
@@ -1326,6 +1367,7 @@ async function prepareExecutableInput(
   const backend = "llvm" as const;
   const useRuntimePack =
     opts.nativeProgramObject === true || usesPrecompiledRuntimePack(opts, backend);
+  const cpuCopyFunctionNames = await cpuCopyFunctions(opts);
   let llvmSource: string | readonly string[];
   try {
     llvmSource = emitLlvmModuleSource(mod, {
@@ -1348,6 +1390,8 @@ async function prepareExecutableInput(
       ...(opts.exceptions === "rare" ? { rareExceptions: true } : {}),
       ...targetCpuField(opts.targetCpu),
       ...(opts.cpuDispatch === true ? { cpuDispatch: true } : {}),
+      ...(opts.profileGenerate === undefined ? {} : { profileGenerate: true }),
+      ...(cpuCopyFunctionNames === undefined ? {} : { cpuCopyFunctions: cpuCopyFunctionNames }),
     });
   } catch (err) {
     if (!(err instanceof LlvmUnsupportedError)) throw err;
@@ -1388,6 +1432,7 @@ async function prepareExecutableInput(
     nativeFeatures,
     programSplit,
     sourceTexts,
+    stats: prepared.stats,
     ...(prepared.islands === undefined ? {} : { islands: prepared.islands }),
   };
 }
@@ -1575,6 +1620,8 @@ type FrontendProcessResult =
       sourceTexts: [string, string][];
       warnings: ScrDiagnostic[];
       islands?: { packages: string[]; modules: string[] };
+      /** The frontend pass's lowering coverage (CompileWarnings.stats). */
+      stats: LowerStats;
       frontend: FrontendInputSnapshot;
     }
   | {
@@ -1637,10 +1684,14 @@ async function prepareExecutableInputInChild(
   }
   if (warningSink !== undefined && result.kind === "prepared" && result.islands !== undefined)
     warningSink.islands = result.islands;
+  if (warningSink !== undefined && result.kind === "prepared") warningSink.stats = result.stats;
   if (result.kind === "diagnostics")
     return { ok: false, diagnostics: result.diagnostics, sourceTexts };
   return {
-    llvmSource: { file: result.nativeInputPath, bytes: result.llvmBytes },
+    llvmSource: {
+      file: result.nativeInputPath,
+      bytes: result.llvmBytes,
+    },
     llvmPath: result.llvmPath,
     llvmSourcePath: result.nativeInputPath,
     irPath: result.irPath,
@@ -1648,6 +1699,7 @@ async function prepareExecutableInputInChild(
     nativeFeatures: result.nativeFeatures,
     programSplit: null,
     sourceTexts,
+    stats: result.stats,
     ...(result.islands === undefined ? {} : { islands: result.islands }),
   };
 }
@@ -1727,6 +1779,7 @@ export async function runFrontendProcess(requestPath: string, resultPath: string
         sourceTexts: [...prepared.sourceTexts],
         warnings: warnings.warnings,
         ...(prepared.islands === undefined ? {} : { islands: prepared.islands }),
+        stats: prepared.stats,
         frontend,
       };
     } else if (!prepared.ok) {
@@ -2518,6 +2571,7 @@ function libraryNativeFeatures(mod: IrModule, backend: "llvm"): EarlyLibraryNati
     dynInvoke: features.dynInvoke,
     ...(features.dynBuffer ? { dynBuffer: true } : {}),
     ...(features.dynTier ? { dynTier: true } : {}),
+    ...(features.dynIntegrityQueries ? { dynIntegrityQueries: true } : {}),
     ...(features.declAdopt ? { declAdopt: true } : {}),
     ...(features.typeOrigins ? { typeOrigins: true } : {}),
     mutableBuffers: features.mutableBuffers,
@@ -2528,6 +2582,7 @@ function libraryNativeFeatures(mod: IrModule, backend: "llvm"): EarlyLibraryNati
 async function emitLibraryWasmGlue(profile: LibraryProfile, wasmPath: string): Promise<void> {
   const stem = basename(wasmPath, ".wasm");
   await writeFile(join(dirname(wasmPath), `${stem}.mjs`), libraryWasmGlue(profile, stem));
+  await writeFile(join(dirname(wasmPath), `${stem}.d.mts`), emitLibraryWasmTypes(profile, stem));
 }
 
 async function compileLibraryNative(
@@ -2545,11 +2600,18 @@ async function compileLibraryNative(
         outPath: archivePath,
         optimization: profile.optimization,
         ...features,
+        threadInstances: profile.instancePerThread,
+        ...(profile.wasmMemory === undefined ? {} : { wasmMemory: profile.wasmMemory }),
       },
       wasmTarget,
       libraryWasmExports(profile),
     );
-    if (profile.optimization === "release") await optimizeWasmIfAvailable(archivePath);
+    if (profile.optimization === "release")
+      await optimizeWasmIfAvailable(
+        archivePath,
+        profile.wasmFeatures ?? [],
+        profile.wasmMemory?.shared === true,
+      );
     await emitLibraryWasmGlue(profile, archivePath);
     return;
   }
@@ -2625,6 +2687,7 @@ async function compileLibraryNative(
     dynInvoke: features.dynInvoke,
     ...(features.dynBuffer === true ? { dynBuffer: true } : {}),
     ...(features.dynTier === true ? { dynTier: true } : {}),
+    ...(features.dynIntegrityQueries === true ? { dynIntegrityQueries: true } : {}),
     ...(features.declAdopt === true ? { declAdopt: true } : {}),
     ...(features.typeOrigins === true ? { typeOrigins: true } : {}),
     ...(features.mutableBuffers === true ? { mutableBuffers: true } : {}),

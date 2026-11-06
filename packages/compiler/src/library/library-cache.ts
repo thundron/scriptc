@@ -68,6 +68,7 @@ export interface EarlyLibraryNativeFeatures {
   /** Buffer.prototype methods on checked-dynamic values (scr_bytes_dyn.c). */
   dynBuffer?: boolean;
   dynTier?: boolean;
+  dynIntegrityQueries?: boolean;
   declAdopt?: boolean;
   typeOrigins?: boolean;
   regex: boolean;

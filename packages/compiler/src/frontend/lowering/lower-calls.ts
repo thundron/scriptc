@@ -35,6 +35,7 @@ import { lowerArrayCallbackCall } from "./containers/array-callback-call.js";
 import { dynUndefinedExpr, nodeThrowExpr, countedFor, numLit, varRef } from "../../ir/build.js";
 import { lowerBuiltinCall } from "./builtin-calls.js";
 import { threadsImportOf } from "../threads-import.js";
+import { f32CallOf } from "../f32-import.js";
 import { nodeApiCalleeOf } from "../node-api-import.js";
 import { lowerIslandSuperCall, lowerIslandSuperMethodCall } from "./lower-node-island.js";
 import { lowerNodeApiCall } from "./lower-node-island.js";
@@ -95,6 +96,7 @@ import {
   UNDEFINED_T,
   VOID,
   arrayOf,
+  bytesOf,
   canBoxFuncIntoDyn,
   canConvertToDyn,
   canDynCheckTo,
@@ -440,6 +442,27 @@ function lowerCallableMemberCall(lowerer: Lowerer, call: ts.CallExpression): IrE
 
 export function lowerCall(lowerer: Lowerer, expr: ts.CallExpression): IrExpr {
   const loc = locOf(expr);
+  const float32 = lowerer.f32ImportsPresent
+    ? f32CallOf(lowerer.program, expr.expression, lowerer.f32ImportBindings)
+    : null;
+  if (float32) {
+    if (
+      expr.arguments.nodes.length !== float32.arity ||
+      expr.arguments.nodes.some(ts.isSpreadElement)
+    )
+      lowerer.noLowering(`explicit f32 arithmetic requires ${float32.arity} arguments`, expr);
+    const vector = float32.arity === 6;
+    if (vector) lowerer.f32FixedViewCalls.set(loc.file + ":" + loc.start, loc);
+    return {
+      kind: "libCall",
+      fn: float32.fn,
+      args: expr.arguments.nodes.map((argument, i) =>
+        lowerer.lowerExprExpecting(argument, vector && i % 2 === 0 ? bytesOf("f32") : F64),
+      ),
+      type: float32.result === "void" ? VOID : float32.result === "array" ? bytesOf("f32") : F64,
+      loc,
+    };
+  }
   // A JavaScript source calling a member that resizes, grows or detaches a
   // buffer is the mutableBuffers fact (buffers.ts, t262-dc §2.4). The
   // receiver may be a checked-dynamic value, so the callee's name decides;

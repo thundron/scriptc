@@ -275,6 +275,10 @@ void scr_array_buffers_sub(bool shared, size_t n) {
   else scr_array_buffers_local -= n;
 }
 
+void scr_array_buffers_add_shared(size_t n) {
+  __atomic_fetch_add(&scr_array_buffers_shared, n, __ATOMIC_RELAXED);
+}
+
 void scr_array_buffers_share(size_t n) {
   scr_array_buffers_local -= n;
   __atomic_fetch_add(&scr_array_buffers_shared, n, __ATOMIC_RELAXED);

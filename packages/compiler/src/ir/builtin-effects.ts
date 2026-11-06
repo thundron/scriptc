@@ -8,6 +8,9 @@ import type { IrLibFn } from "./builtin-signatures.js";
  * seed on `dynCheck` and `awaitExpr` nodes, which throw on validation
  * failure / promise rejection). */
 export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
+  "shared.f32New",
+  "shared.f32View",
+  "shared.f32Release",
   // The copied error of a synchronous call into Node (@scriptc/node).
   "nodeIsland.callSync",
   // Island module evaluation and member operations run JavaScript.

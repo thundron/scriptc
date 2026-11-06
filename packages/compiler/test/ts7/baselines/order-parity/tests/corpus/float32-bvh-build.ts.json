@@ -1,0 +1,7 @@
+{
+ "order": [
+  "<repo>/tests/library-mode/float32-bvh/lib.ts",
+  "<repo>/tests/corpus/float32-bvh-build.ts"
+ ],
+ "diags": []
+}

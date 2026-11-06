@@ -91,8 +91,20 @@ function connect(): Client {
   clients.push(client);
   return client;
 }
-afterEach(() => {
-  for (const client of clients.splice(0)) client.child.kill("SIGKILL");
+async function stopClient(client: Client): Promise<void> {
+  if (client.child.exitCode !== null || client.child.signalCode !== null) return;
+  // Let the server stop its detached command groups before it exits.
+  // SIGKILLing only the server bypasses that cleanup after a failed test.
+  const force = setTimeout(() => client.child.kill("SIGKILL"), 2000);
+  try {
+    client.child.kill("SIGTERM");
+    await client.exited;
+  } finally {
+    clearTimeout(force);
+  }
+}
+afterEach(async () => {
+  await Promise.all(clients.splice(0).map(stopClient));
 });
 
 function alive(pid: number): boolean {
@@ -212,7 +224,7 @@ test("SIGTERM stops running programs before the server exits", async () => {
   await waitFor(() => existsSync(join(work, "pid.txt")));
   const pid = Number(readFileSync(join(work, "pid.txt"), "utf8"));
   rmSync(join(work, "pid.txt"));
-  client.child.kill("SIGTERM");
+  await stopClient(client);
   expect(await client.exited).toBe(143);
   await waitFor(() => !alive(pid), 10_000);
 });

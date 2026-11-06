@@ -12,6 +12,7 @@ import { localizeLibraryObjects } from "./native/object-merge.js";
 import { type LibArchiveOptions } from "./native/contracts.js";
 import { loadRuntimePack, RuntimePackError, stageRuntimePackArtifacts } from "./runtime-pack.js";
 import { executableOptimizationLinkerArgs, type NativeTargetSpec } from "./targets.js";
+import { wasmMemoryLinkFlags } from "./wasm-library.js";
 
 const run = promisify(execFile);
 
@@ -33,6 +34,7 @@ export function libraryArchiveFeatures(options: LibArchiveOptions): NativeLinkFe
     dynInvoke: options.dynInvoke ?? false,
     ...(options.dynBuffer === true ? { dynBuffer: true } : {}),
     ...(options.dynTier === true ? { dynTier: true } : {}),
+    ...(options.dynIntegrityQueries === true ? { dynIntegrityQueries: true } : {}),
     ...(options.declAdopt === true ? { declAdopt: true } : {}),
     ...(options.typeOrigins === true ? { typeOrigins: true } : {}),
     // A program that resizes, grows or detaches a buffer names the views
@@ -115,6 +117,7 @@ export async function compilePackedLibrary(
           "-target",
           target.linkerTargetTriple,
           "-mexec-model=reactor",
+          ...wasmMemoryLinkFlags(options.wasmMemory),
           "-Wl,--gc-sections",
           ...executableOptimizationLinkerArgs(target.platform, optimization),
           ...wasmExports.map((name) => `-Wl,--export=${name}`),

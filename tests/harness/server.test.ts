@@ -52,7 +52,11 @@ function runLane(cmd: string, args: string[], driver: string | null): Promise<Pr
     let driverDone: Promise<void> = Promise.resolve();
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error(`server program timed out\nstderr so far:\n${errText}`));
+      reject(
+        new Error(
+          `server program timed out: ${JSON.stringify([cmd, ...args])}\nstdout so far:\n${Buffer.concat(out).toString("utf8")}\nstderr so far:\n${errText}`,
+        ),
+      );
     }, 60_000);
     child.stdout.on("data", (c: Buffer) => out.push(c));
     child.stderr.on("data", (c: Buffer) => {

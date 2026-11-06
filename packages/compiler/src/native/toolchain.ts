@@ -114,6 +114,9 @@ export function loadNativeToolchain(
   env: NodeJS.ProcessEnv = {},
   cwd: string = process.cwd(),
 ): NativeToolchain {
+  const runtimeOverride = env["SCRIPTC_RUNTIME_PACK"];
+  if (runtimeOverride !== undefined && runtimeOverride.trim() === "")
+    throw new Error("SCRIPTC_RUNTIME_PACK must name a non-empty runtime pack directory");
   // Package managers can launch the compiler through a directory junction.
   // Installed asset paths are relative to the physical manifest location.
   const manifestPath = realpathSync(path);

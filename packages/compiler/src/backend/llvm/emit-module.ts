@@ -282,7 +282,12 @@ function readRange(dir: string, range: number): { result: ChunkResult; texts: st
 function functionAttributes(emitter: LlEmitter, hasNoInlineRecordClone: boolean): string[] {
   const cpu = targetCpuAttribute(emitter.targetCpu);
   const asan = emitter.sanitizeAttributes ? " sanitize_address" : "";
-  const common = `${asan}${emitter.wasi ? "" : " uwtable"}`;
+  const features: string[] = [];
+  if (emitter.wasi && emitter.mod.lib?.wasmFeatures?.includes("simd128")) features.push("+simd128");
+  if (emitter.wasi && emitter.mod.lib?.wasmMemory?.shared)
+    features.push("+atomics", "+bulk-memory", "+mutable-globals");
+  const simd = features.length > 0 ? ` "target-features"="${features.join(",")}"` : "";
+  const common = `${asan}${emitter.wasi ? "" : " uwtable"}${simd}`;
   const base = `${common}${cpu}` || ` "scriptc-function"`;
   return [
     `attributes #0 = {${base} }`,
@@ -2323,6 +2328,21 @@ export function emitLibDefs(
     `}`,
     ``,
   );
+  if (emitter.wasi && lib.wasmMemory?.shared) {
+    // A managed pthread exits with no library frames active. Drop its private
+    // roots/runtime caches without re-running module initializers. Neutral
+    // shared bytes survive until their final handle/view owner releases them.
+    out.push(
+      `define void @scriptc_thread_dispose() ${FN_ATTRS} {`,
+      `entry:`,
+      ...globalReleaseLines("ct"),
+      ...zeroStores,
+      `  call void @scr_library_reset()`,
+      `  ret void`,
+      `}`,
+      ``,
+    );
+  }
   if (lib.callbacks !== undefined && lib.callbacks.length > 0) {
     // Host-callback channels: the per-channel name constants (the
     // registration dispatch's strcmp operands), the per-channel

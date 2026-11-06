@@ -7,6 +7,7 @@ import { RuntimePackError } from "../backend/runtime-pack-core.js";
 import type { NativeRuntimePack } from "../backend/runtime-pack-native.js";
 import { executableOptimizationLinkerArgs } from "../backend/targets.js";
 import type { NativeToolchain } from "./toolchain.js";
+import { wasmMemoryLinkFlags } from "../backend/wasm-library.js";
 
 function archiver(toolchain: NativeToolchain): { executable: string; args: string[] } {
   if (toolchain.archiver !== undefined)
@@ -133,6 +134,7 @@ export function archiveNativeLibrary(options: {
 }
 
 export function linkNativeWasmLibrary(options: {
+  memory?: import("../ir/ir.js").IrWasmMemory;
   toolchain: NativeToolchain;
   programObject: string;
   outputPath: string;
@@ -146,6 +148,7 @@ export function linkNativeWasmLibrary(options: {
     "-target",
     toolchain.target.linkerTargetTriple,
     "-mexec-model=reactor",
+    ...wasmMemoryLinkFlags(options.memory),
     ...executableOptimizationLinkerArgs("wasi", options.optimization),
     ...options.exports.map((name) => `-Wl,--export=${name}`),
     options.programObject,

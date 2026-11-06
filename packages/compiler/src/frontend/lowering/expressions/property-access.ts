@@ -1891,6 +1891,30 @@ export function lowerPropertyAccessExpr(
     const t = ambientUndefReadType(lowerer, expr) ?? contextualUndefReadType(lowerer, expr) ?? F64;
     return throwAfterEach([recvLowered], nullishReadTypeError(unit, expr.name.text, t, loc), loc);
   }
+  // A JavaScript alias may add a key absent from a plain data layout.
+  // Its live box preserves those own keys as well as missing-key reads.
+  // Reserved slots belong to opaque or accessor layouts, not data bags.
+  if (isJsSourceFile(ts.getSourceFileOfNode(expr)) && recvLowered.type.kind === "record") {
+    const shape = lowerer.shapes.get(recvLowered.type.shapeId);
+    if (
+      shape &&
+      !shape.tuple &&
+      !shape.indexValue &&
+      !shape.fields.some((field) => field.name.startsWith("%")) &&
+      lowerer.dynConvertible(recvLowered.type)
+    ) {
+      return lowerer.maybeNarrow(
+        {
+          kind: "dynKeyGet",
+          value: lowerer.coerceToExpected(recvLowered, DYN),
+          key: { kind: "strLit", value: expr.name.text, type: STRING, loc },
+          type: DYN,
+          loc,
+        },
+        expr,
+      );
+    }
+  }
   // The site is about to be refused: a checker-narrowed receiver still
   // stores the wider union, whose other arms may be what refuse the member
   // (the OAuth arm's index signature beside `ApiKeyCredential.key`). Read

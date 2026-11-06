@@ -31,6 +31,7 @@ test("library pack modes preserve pure runtime features and exclude ambient even
       expect(sources).toContain("scr_library.c");
       expect(sources).toContain("scr_decl_adopt.c");
       expect(sources).toContain("scr_type_origin.c");
+      expect(sources).toContain("scr_dyn_integrity.c");
       for (const source of [
         "scr_async.c",
         "scr_crypto_async.c",

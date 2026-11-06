@@ -27,6 +27,74 @@ function rebuild(): Program {
 
 Under Node.js, `run(fn)` returns `fn()` and `release()` does nothing.
 
+## Binary32 arithmetic
+
+Import explicit single-precision operations from `@scriptc/experimental/f32`. Each operation rounds its operands and result to binary32. Ordinary `number` expressions and embedding arguments remain binary64; operations do not enable fast math or multiply-add fusion. `min` and `max` propagate NaNs and preserve the JavaScript signed-zero rules. NaN payload bits are not part of the contract.
+
+```ts
+import { add, mul, add4 } from "@scriptc/experimental/f32";
+
+const value = add(mul(1.1, 2.2), 1.1);
+const left = new Float32Array([1, 2, 3, 4]);
+const right = new Float32Array([5, 6, 7, 8]);
+const output = new Float32Array(4);
+add4(output, 0, left, 0, right, 0);
+```
+
+Scalar exports are `round`, `add`, `sub`, `mul`, `div`, `rem`, `sqrt`, `abs`, `neg`, `min`, and `max`. The four-lane forms are `add4`, `sub4`, `mul4`, `div4`, `min4`, and `max4`; their arguments are `(output, outputIndex, left, leftIndex, right, rightIndex)`. They read all input lanes before writing output, including overlapping views. Invalid element indices retain JavaScript's NaN/ignored-write behavior. Programs that resize or detach ArrayBuffers cannot use these vector operations.
+
+## Wasm SIMD and shared-memory jobs
+
+A library profile can opt into SIMD with `abi.wasm_features: ["simd128"]`. Use explicit four-lane operations for binary32 vector computation. The generated host checks SIMD support before instantiation; build a separate scalar artifact for hosts without it.
+
+For a shared-memory library, add these fields inside the profile's `abi` object:
+
+```json
+{
+  "instance_per_thread": true,
+  "wasm_features": ["simd128"],
+  "wasm_memory": {
+    "shared": true,
+    "initial_pages": 256,
+    "maximum_pages": 4096,
+    "stack_bytes": 1048576
+  }
+}
+```
+
+The generated `.mjs` and `.d.mts` files expose `createRuntime`. In browsers, host it in a dedicated Worker with cross-origin isolation (`Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`). GPU ownership stays with your existing page or engine Worker; the pthread workers run CPU jobs. A scalar counterpart uses the same source and exports, with `instance_per_thread: false`, `wasm_memory.shared: false`, and no SIMD feature.
+
+For a profile exporting `work(handle, start, end)`, submit its buffer as an object so the runtime retains a lease until the job finishes:
+
+```ts
+import { createRuntime } from "./kernel-threaded.mjs";
+import { createRuntime as createScalarRuntime } from "./kernel-scalar.mjs";
+
+const threadedBytes = await (await fetch("./kernel-threaded.wasm")).arrayBuffer();
+const scalarBytes = await (await fetch("./kernel-scalar.wasm")).arrayBuffer();
+const runtime = await createRuntime(threadedBytes, {}, {
+  workers: 4,
+  fallback: () => createScalarRuntime(scalarBytes),
+});
+try {
+  const buffer = runtime.buffer(1024); // Float32 elements, not bytes
+  buffer.writeFloat32(new Float32Array(1024));
+  await runtime.call("work", [buffer, 0, buffer.length]);
+  const snapshot = buffer.readFloat32(); // owned copy
+  buffer.release();
+} finally {
+  await runtime.close();
+}
+```
+
+Inside compiled source, `shared(handle)` returns a context-local Float32Array view. `allocateShared(length)` and `releaseShared(handle)` manage raw, runtime-scoped handles; existing views remain valid after a handle is released. Raw numeric handles require caller-managed job lifetimes. Shared backing is atomic-owned; mutable objects, closures, globals, and GC roots remain private to each worker. Shared element accesses use atomic loads/stores, while vector arithmetic can operate on gathered lanes.
+
+Jobs carry at most 64 KiB of serialized control data; use buffer handles for bulk geometry. `workers` accepts 1–64, and the pending queue defaults to eight jobs per worker. `timeoutMs` and an `AbortSignal` bound shared jobs. Once a job is admitted, a timeout or abort discards the pool and its memory, as does a trap or close with pending jobs; create a fresh runtime afterward. Scalar calls execute synchronously in their hosting context and cannot be interrupted by its own timer. `memoryBytes` reports linear-memory size, not process RSS. Host-import returns remain scalar-only, and callback buffers remain read-only.
+
+Profiles with host callbacks also need `workerHostModule`, a module exporting `createHost({slot, memory})`, to supply each worker's callbacks. Shared source initialization runs in each worker, not in the controller. The generated `requiredFeatures`, `memoryABI`, and runtime `capabilities` describe the selected artifact and execution mode.
+
+Building the WASI runtime pack with its `build:native` script includes pthread library flavors. The build uses SHA-256-pinned WASI SDK 31, or an explicit `WASI_SDK_PATH`; a non-pinned SDK also needs `WASI_THREADS_LICENSE_FILE`. `SCRIPTC_WASI_THREADS=0` builds a scalar-only development pack. Consumers need neither the SDK nor another application runtime dependency: the pack carries the threaded libc, CRT, compiler builtins, and redistribution notices.
+
 In scriptc builds, `SCRIPTC_REGION_STATS=1` reports every release attempt on stderr.
 
 ## InternTable

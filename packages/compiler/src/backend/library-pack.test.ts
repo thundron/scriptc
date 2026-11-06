@@ -19,6 +19,13 @@ describe("library archive runtime gates", () => {
     });
   });
 
+  test("checked-dynamic integrity queries select their runtime unit only when used", () => {
+    expect(libraryArchiveFeatures({ ...base, dynIntegrityQueries: true }).dynIntegrityQueries).toBe(
+      true,
+    );
+    expect(libraryArchiveFeatures(base).dynIntegrityQueries).not.toBe(true);
+  });
+
   test("a program that leaves buffers alone selects neither build", () => {
     const features = libraryArchiveFeatures(base);
     expect(features.mutableBuffers).toBeUndefined();

@@ -249,6 +249,7 @@
  * else). Only the INTERIOR of `determinism` keeps a reserved-and-ignored
  * surface beyond the three ask-5 keys. */
 import { isNativeOptimization, type NativeOptimization } from "../backend/optimization.js";
+import type { IrWasmMemory } from "../ir/ir.js";
 import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { libProfileDiag, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
@@ -431,6 +432,9 @@ export interface LibraryProfile {
    * the unchanged entry family (see the header contract). False (the
    * default) keeps one instance per linked archive. */
   instancePerThread: boolean;
+  /** Optional wasm target features. Baseline modules remain scalar. */
+  wasmFeatures?: "simd128"[];
+  wasmMemory?: IrWasmMemory;
   /** The host-callback registration symbol (see the header contract):
    * non-null exactly when `callbacks` declares channels. */
   callbackRegisterSymbol: string | null;
@@ -620,6 +624,8 @@ export function loadLibraryProfile(
       "result_reset_symbol",
       "localize_runtime",
       "instance_per_thread",
+      "wasm_features",
+      "wasm_memory",
       "callback_register_symbol",
     ]);
     const a = abi as Record<string, unknown>;
@@ -654,6 +660,65 @@ export function loadLibraryProfile(
       a["instance_per_thread"] === undefined
         ? false
         : req<boolean>(a["instance_per_thread"], "abi.instance_per_thread", "boolean");
+    const rawWasmFeatures = a["wasm_features"];
+    let wasmFeatures: "simd128"[] | undefined;
+    if (rawWasmFeatures !== undefined) {
+      if (
+        !Array.isArray(rawWasmFeatures) ||
+        rawWasmFeatures.some((feature) => feature !== "simd128") ||
+        new Set(rawWasmFeatures).size !== rawWasmFeatures.length
+      )
+        throw new ProfileError(
+          "'abi.wasm_features' must be an array of unique supported features ('simd128')",
+        );
+      if (rawWasmFeatures.length > 0) wasmFeatures = rawWasmFeatures as "simd128"[];
+    }
+    const rawMemory = a["wasm_memory"];
+    let wasmMemory: IrWasmMemory | undefined;
+    if (rawMemory !== undefined) {
+      if (!rawMemory || typeof rawMemory !== "object" || Array.isArray(rawMemory))
+        throw new ProfileError("'abi.wasm_memory' must be an object");
+      rejectUnknownKeys(rawMemory, "abi.wasm_memory", [
+        "shared",
+        "initial_pages",
+        "maximum_pages",
+        "stack_bytes",
+      ]);
+      const memory = rawMemory as Record<string, unknown>;
+      const shared =
+        memory["shared"] === undefined
+          ? false
+          : req<boolean>(memory["shared"], "abi.wasm_memory.shared", "boolean");
+      const initialPages =
+        memory["initial_pages"] === undefined
+          ? 256
+          : req<number>(memory["initial_pages"], "abi.wasm_memory.initial_pages", "number");
+      const maximumPages =
+        memory["maximum_pages"] === undefined
+          ? 4096
+          : req<number>(memory["maximum_pages"], "abi.wasm_memory.maximum_pages", "number");
+      const stackBytes =
+        memory["stack_bytes"] === undefined
+          ? 1048576
+          : req<number>(memory["stack_bytes"], "abi.wasm_memory.stack_bytes", "number");
+      if (
+        !Number.isInteger(initialPages) ||
+        !Number.isInteger(maximumPages) ||
+        initialPages < 2 ||
+        maximumPages < initialPages ||
+        maximumPages > 65536 ||
+        !Number.isInteger(stackBytes) ||
+        stackBytes < 65536 ||
+        stackBytes % 16 !== 0 ||
+        stackBytes >= initialPages * 65536
+      )
+        throw new ProfileError(
+          "'abi.wasm_memory' needs bounded memory32 page counts and an aligned stack smaller than initial memory",
+        );
+      if (shared !== instancePerThread)
+        throw new ProfileError("'abi.wasm_memory.shared' and 'abi.instance_per_thread' must agree");
+      wasmMemory = { shared, initialPages, maximumPages, stackBytes };
+    }
     const callbackRegisterSymbol = symbolField(
       a["callback_register_symbol"],
       "abi.callback_register_symbol",
@@ -1054,6 +1119,8 @@ export function loadLibraryProfile(
         resultResetSymbol,
         localizeRuntime,
         instancePerThread,
+        ...(wasmFeatures === undefined ? {} : { wasmFeatures }),
+        ...(wasmMemory === undefined ? {} : { wasmMemory }),
         callbackRegisterSymbol,
         callbacks,
         exports: entries,

@@ -1,4 +1,4 @@
-import { emitLibraryWasmGlue } from "../backend/wasm-glue.js";
+import { emitLibraryWasmGlue, emitLibraryWasmTypes } from "../backend/wasm-glue.js";
 import type { NativeOptimization } from "../backend/optimization.js";
 import { compilationTiming } from "../timing.js";
 import {
@@ -995,6 +995,7 @@ export class NativeCompiler {
           runtime,
           optimization: profile.optimization,
           exports: libraryWasmExports(profile),
+          ...(profile.wasmMemory === undefined ? {} : { memory: profile.wasmMemory }),
         });
       } else {
         archiveNativeLibrary({
@@ -1027,6 +1028,10 @@ export class NativeCompiler {
           join(dirname(archivePath), basename(archivePath, ".wasm") + ".mjs"),
           emitLibraryWasmGlue(profile, basename(archivePath, ".wasm")),
         );
+      writeFileSync(
+        join(dirname(archivePath), basename(archivePath, ".wasm") + ".d.mts"),
+        emitLibraryWasmTypes(profile, basename(archivePath, ".wasm")),
+      );
       return {
         ok: true,
         archivePath,

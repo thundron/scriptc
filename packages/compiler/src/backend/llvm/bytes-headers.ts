@@ -74,7 +74,10 @@ export function emitLoopBytesHeaders(
     locals.set(id, {
       length: emitBytesHeaderLength(emitter, view),
       data: emitBytesData(emitter, view),
-      shared: emitter.mod.workers ? emitBytesSharedStorage(emitter, view) : null,
+      shared:
+        emitter.mod.workers || emitter.mod.lib?.threadInstances === true
+          ? emitBytesSharedStorage(emitter, view)
+          : null,
     });
   }
   if (locals.size === 0) return null;

@@ -1,0 +1,20 @@
+{
+  "profile_format": 1,
+  "name": "float32-lanes",
+  "entry": "lib.ts",
+  "emission": "llvm",
+  "abi": {
+    "prefix": "fl_",
+    "init_symbol": "fl_init",
+    "sink_register_symbol": "fl_set_panic_sink",
+    "collect_symbol": "fl_collect",
+    "result_reset_symbol": null,
+    "wasm_features": ["simd128"]
+  },
+  "exports": [
+    { "export": "run", "symbol": "fl_run", "params": ["f64"], "returns": "f64" },
+    { "export": "element", "symbol": "fl_element", "params": ["f64"], "returns": "f64" },
+    { "export": "overlap", "symbol": "fl_overlap", "params": [], "returns": "f64" },
+    { "export": "signedZero", "symbol": "fl_signed_zero", "params": [], "returns": "f64" }
+  ]
+}

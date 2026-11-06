@@ -413,6 +413,8 @@ export interface ValidatedNativeArtifact {
 }
 
 export interface LibArchiveOptions {
+  /** Optional explicit memory ABI of a Wasm library. */
+  wasmMemory?: import("../../ir/ir.js").IrWasmMemory;
   /** The program TU (.c or .ll — clang compiles either with -c). */
   cPath: string;
   /** Invocation-owned program source to compile under `cPath`'s public
@@ -471,6 +473,7 @@ export interface LibArchiveOptions {
   dynBuffer?: boolean;
   /** See CompileOptions.dynTier: the scr_js_* units. */
   dynTier?: boolean;
+  dynIntegrityQueries?: boolean;
   declAdopt?: boolean;
   typeOrigins?: boolean;
   regex?: boolean;

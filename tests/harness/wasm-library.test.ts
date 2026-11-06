@@ -1,8 +1,16 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { WASI } from "node:wasi";
+import ts from "typescript";
+import {
+  allocateShared as allocateReference,
+  shared as referenceView,
+  releaseShared as releaseReference,
+} from "@scriptc/experimental/f32";
+import { build as referenceBvhBuild } from "../library-mode/float32-bvh/lib.ts";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import {
   compileLibrary as compileNodeLibrary,
@@ -34,6 +42,21 @@ vi.mock("../../packages/compiler/src/frontend/pipeline-native.js", async () => {
 
 const fixture = join(import.meta.dirname, "../library-mode/wasm");
 const hasZig = spawnSync("zig", ["version"]).status === 0;
+const sharedFixture = join(import.meta.dirname, "../library-mode/shared-f32-jobs");
+const hasThreadPack = (() => {
+  try {
+    return (
+      JSON.parse(
+        readFileSync(
+          join(import.meta.dirname, "../../packages/runtime-wasm32-wasi/runtime-pack.json"),
+          "utf8",
+        ),
+      ).flavors["library-thread-release"] !== undefined
+    );
+  } catch {
+    return false;
+  }
+})();
 type Api = Record<string, (...args: number[]) => number> & { memory: WebAssembly.Memory };
 
 describe.skipIf(!hasZig).each(["node", "native"] as const)(
@@ -96,6 +119,24 @@ describe.skipIf(!hasZig).each(["node", "native"] as const)(
       if (oldTarget === undefined) delete process.env["SCRIPTC_TARGET"];
       else process.env["SCRIPTC_TARGET"] = oldTarget;
       if (directory) await rm(directory, { recursive: true, force: true });
+    });
+
+    test("checked-dynamic integrity queries link in library runtime packs", async () => {
+      const source = join(import.meta.dirname, "../library-mode/checked-adoption");
+      const raw = JSON.parse(await readFile(join(source, "profile.json"), "utf8"));
+      raw.entry = join(source, "main.ts");
+      const profilePath = join(directory, "integrity-profile.json");
+      await writeFile(profilePath, JSON.stringify(raw));
+      const result = await compileLibrary({ profilePath, outDir: join(directory, "integrity") });
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
+      const host = await import(pathToFileURL(result.archivePath.replace(/\.wasm$/, ".mjs")).href);
+      const api = await host.instantiateFromBytes(await readFile(result.archivePath));
+      for (const text of ["{}", "[]", '{"x":42}', "null", "42", '"text"']) {
+        const value: unknown = JSON.parse(text);
+        expect(api.n_sealed(text)).toBe(Object.isSealed(value) ? 1 : 0);
+        expect(api.n_extensible(text)).toBe(Object.isExtensible(value) ? 1 : 0);
+      }
     });
 
     function instantiate(adjust?: (value: number, api: Api) => number) {
@@ -179,6 +220,481 @@ export function unsigned(): number { return 9007199254740991; }
       expect(() => api.r_cast('{"x":"wrong"}')).toThrow();
     });
 
+    async function managedArtifact(name: string, shared: boolean, maximumPages = 4096) {
+      const raw = JSON.parse(await readFile(join(sharedFixture, "profile.json"), "utf8"));
+      raw.entry = join(sharedFixture, "lib.ts");
+      raw.abi.instance_per_thread = shared;
+      raw.abi.wasm_features = shared ? ["simd128"] : [];
+      raw.abi.wasm_memory.shared = shared;
+      raw.abi.wasm_memory.maximum_pages = maximumPages;
+      const path = join(directory, name + ".json");
+      await writeFile(path, JSON.stringify(raw));
+      const result = await compileLibrary({
+        profilePath: path,
+        outDir: directory,
+        outPath: join(directory, name + ".wasm"),
+      });
+      if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
+      const bytes = await readFile(result.archivePath);
+      const glue = await import(
+        pathToFileURL(result.archivePath.replace(/\.wasm$/, ".mjs")).href + "?max=" + maximumPages
+      );
+      return { bytes, glue };
+    }
+
+    test.runIf(hasThreadPack)(
+      "real pthreads share f32 bytes, isolate globals, retain job buffers and join teardown",
+      async () => {
+        const { bytes, glue } = await managedArtifact("managed-shared", true);
+        const module = new WebAssembly.Module(bytes);
+        expect(WebAssembly.Module.imports(module)).toContainEqual({
+          module: "wasi",
+          name: "thread-spawn",
+          kind: "function",
+        });
+        expect(WebAssembly.Module.exports(module)).toContainEqual({
+          name: "wasi_thread_start",
+          kind: "function",
+        });
+        expect(glue.requiredFeatures).toEqual(["simd128", "threads"]);
+        expect(glue.memoryABI).toMatchObject({
+          shared: true,
+          initialPages: 256,
+          maximumPages: 4096,
+        });
+        const typed = join(directory, "typed-managed.mts");
+        await writeFile(
+          typed,
+          `
+import {createRuntime} from './managed-shared.mjs';
+const runtime=await createRuntime(new Uint8Array());
+const buffer=runtime.buffer(8);
+const number:number=await runtime.call('run',[buffer,0,8,1]);
+const text:string=await runtime.call('text',['hi']);
+const bytes:Uint8Array<ArrayBuffer>=await runtime.call('bytes',[new Uint8Array()]);
+const snapshot:Float32Array<ArrayBuffer>=buffer.readFloat32();
+// @ts-expect-error no undeclared export
+runtime.call('missing',[]);
+// @ts-expect-error wrong ABI argument class
+runtime.call('text',[123]);
+// @ts-expect-error returned strings are not numbers
+const wrong:number=await runtime.call('text',['hi']);
+void [number,text,bytes,snapshot,wrong];await runtime.close();
+`,
+        );
+        const program = ts.createProgram([typed], {
+          noEmit: true,
+          strict: true,
+          module: ts.ModuleKind.NodeNext,
+          target: ts.ScriptTarget.ES2024,
+          skipLibCheck: true,
+          types: [],
+        });
+        expect(
+          ts
+            .getPreEmitDiagnostics(program)
+            .map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n")),
+        ).toEqual([]);
+        const browserHost = join(directory, "browser-buffer-source.mjs");
+        await writeFile(
+          browserHost,
+          `
+const decode=TextDecoder.prototype.decode;
+TextDecoder.prototype.decode=function(value,...rest){if(value?.buffer instanceof SharedArrayBuffer)throw new TypeError("browser TextDecoder rejects shared BufferSource");return decode.call(this,value,...rest);};
+const random=crypto.getRandomValues;
+crypto.getRandomValues=function(value){if(value.buffer instanceof SharedArrayBuffer)throw new TypeError("browser crypto rejects shared BufferSource");return random.call(this,value);};
+export function createHost(){return {};}
+`,
+        );
+        const runtime = await glue.createRuntime(
+          bytes,
+          {},
+          { workers: 2, workerHostModule: pathToFileURL(browserHost).href },
+        );
+        try {
+          expect(runtime.capabilities).toMatchObject({
+            mode: "threads",
+            sharedMemory: true,
+            simd: true,
+            workers: 2,
+          });
+          expect(await Promise.all([runtime.call("state", []), runtime.call("state", [])])).toEqual(
+            [1111, 1111],
+          );
+          for (const value of [-0, NaN, Infinity, -Infinity, 1.25])
+            expect(Object.is(await runtime.call("echo", [value]), value)).toBe(true);
+          expect(await runtime.call("text", ["é\0"])).toBe("é\0λ\0😀");
+          expect(await runtime.call("cstring", ["hello"])).toBe("hello✓");
+          const returned = await runtime.call("bytes", [new Uint8Array([0, 127, 128, 255])]);
+          expect(Array.from(returned)).toEqual([0, 127, 128, 255]);
+          expect(await runtime.call("randomOkay", [])).toBe(1);
+          const data = runtime.buffer(64),
+            input = Float32Array.from({ length: 64 }, (_, i) => i / 4);
+          data.writeFloat32(input);
+          expect(
+            await Promise.all([
+              runtime.call("run", [data, 0, 32, 1.5]),
+              runtime.call("run", [data, 32, 64, 2.5]),
+            ]),
+          ).toEqual([1, 1]);
+          const snapshot = data.readFloat32();
+          expect(Array.from(snapshot)).toEqual(
+            Array.from(input, (v, i) => Math.fround(v + (i < 32 ? 1.5 : 2.5))),
+          );
+          const large = runtime.buffer(8 * 1024 * 1024);
+          large.writeUint32(new Uint32Array([0x80000000, 0x7fc00000, 0x7f800000]));
+          expect(Array.from(large.readUint32(0, 3))).toEqual([0x80000000, 0x7fc00000, 0x7f800000]);
+          expect(Object.is(large.readFloat32(0, 1)[0], -0)).toBe(true);
+          expect(large.readFloat32(1, 1)[0]).toBeNaN();
+          large.release();
+          expect(Array.from(data.readFloat32())).toEqual(Array.from(snapshot));
+          await expect(runtime.call("constructor", [])).rejects.toThrow("unknown wasm export");
+          await expect(runtime.call("sum", [{}])).rejects.toThrow("ABI scalars");
+          for (let i = 0; i < 4200; i++)
+            await expect(
+              runtime.call("sum", [data], { signal: { aborted: false } }),
+            ).rejects.toThrow("AbortSignal");
+          expect(await runtime.call("sum", [data])).toBeGreaterThan(0);
+          const handle = data.handle;
+          const pending = runtime.call("run", [data, 0, 64, 1]);
+          data.release();
+          await expect(pending).resolves.toBeGreaterThan(1);
+          await expect(runtime.call("sum", [data])).rejects.toThrow("released");
+          expect(await runtime.call("valid", [handle])).toBe(-1);
+          expect(Array.from(snapshot)).toEqual(
+            Array.from(input, (v, i) => Math.fround(v + (i < 32 ? 1.5 : 2.5))),
+          );
+        } finally {
+          await runtime.close();
+        }
+        await runtime.close();
+        await expect(runtime.call("sum", [1])).rejects.toThrow("closed");
+        // Fresh memory must not inherit prior globals, handles, or shutdown state.
+        for (let i = 0; i < 3; i++) {
+          const fresh = await glue.createRuntime(bytes, {}, { workers: 2 });
+          try {
+            const data = fresh.buffer(4);
+            expect(await fresh.call("run", [data, 0, 4, 1])).toBe(1);
+            expect(Array.from(data.readFloat32())).toEqual([1, 1, 1, 1]);
+            data.release();
+          } finally {
+            await fresh.close();
+          }
+        }
+      },
+      120000,
+    );
+
+    test.runIf(hasThreadPack)(
+      "timeout, abort, queue bounds and traps discard all shared worker contexts",
+      async () => {
+        const { bytes, glue } = await managedArtifact("managed-failures", true);
+        const slowHost = join(directory, "slow-worker-host.mjs");
+        await writeFile(
+          slowHost,
+          "await new Promise(resolve=>setTimeout(resolve,10000));export function createHost(){return {}};",
+        );
+        for (const hostModule of [
+          pathToFileURL(join(directory, "missing-worker-host.mjs")).href,
+          pathToFileURL(slowHost).href,
+        ])
+          await expect(
+            glue.createRuntime(
+              bytes,
+              {},
+              { workers: 2, startupTimeoutMs: 100, workerHostModule: hostModule },
+            ),
+          ).rejects.toThrow();
+        for (const kind of ["timeout", "abort", "close", "trap"]) {
+          const runtime = await glue.createRuntime(bytes, {}, { workers: 1, maxQueuedJobs: 1 });
+          const controller = new AbortController();
+          try {
+            if (kind === "trap") {
+              await expect(runtime.call("run", [0, 0, 4, 1])).rejects.toThrow();
+            } else {
+              const pending = runtime.call("forever", [], {
+                timeoutMs: kind === "timeout" ? 50 : 3000,
+                signal: controller.signal,
+              });
+              const rejected = expect(pending).rejects.toThrow();
+              const queued = runtime.call("valid", [0]);
+              const queuedRejected = expect(queued).rejects.toThrow();
+              await expect(runtime.call("valid", [0])).rejects.toThrow("queue is full");
+              if (kind === "abort") controller.abort();
+              if (kind === "close") await runtime.close();
+              await rejected;
+              await queuedRejected;
+            }
+            await expect(runtime.call("valid", [0])).rejects.toThrow("closed");
+          } finally {
+            await runtime.close();
+          }
+        }
+      },
+      120000,
+    );
+
+    test.runIf(hasThreadPack)(
+      "controller helper traps poison the shared memory before any reuse",
+      async () => {
+        const { bytes, glue } = await managedArtifact("managed-controller-traps", true);
+        for (const name of [
+          "scriptc_shared_f32_retain",
+          "scriptc_shared_f32_data",
+          "scriptc_shared_f32_release",
+        ]) {
+          const actual = WebAssembly.instantiate.bind(WebAssembly);
+          const instantiate = vi
+            .spyOn(WebAssembly, "instantiate")
+            .mockImplementation(async (module, imports) => {
+              const instance = await actual(module, imports);
+              return {
+                exports: {
+                  ...instance.exports,
+                  [name]() {
+                    throw new Error("controller helper trapped");
+                  },
+                },
+              } as WebAssembly.Instance;
+            });
+          let runtime;
+          try {
+            runtime = await glue.createRuntime(bytes, {}, { workers: 2 });
+          } finally {
+            instantiate.mockRestore();
+          }
+          try {
+            const data = runtime.buffer(4);
+            expect(() => data.readFloat32()).toThrow("controller helper trapped");
+            expect(runtime.memoryBytes).toBe(0);
+            await expect(runtime.call("valid", [0])).rejects.toThrow("closed");
+          } finally {
+            await runtime.close();
+          }
+        }
+      },
+      120000,
+    );
+
+    test("explicit private memory is a scalar equivalent and memory bounds invalidate link caches", async () => {
+      for (const maximum of [4096, 8192, 4096]) {
+        const { bytes, glue } = await managedArtifact("managed-private", false, maximum);
+        const runtime = await glue.createRuntime(bytes);
+        try {
+          expect(runtime.capabilities).toMatchObject({
+            mode: "scalar",
+            sharedMemory: false,
+            simd: false,
+          });
+          const data = runtime.buffer(8);
+          data.writeFloat32(new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]));
+          expect(await runtime.call("run", [data, 0, 8, 10])).toBe(1);
+          expect(Array.from(data.readFloat32())).toEqual([11, 12, 13, 14, 15, 16, 17, 18]);
+          const pending = runtime.call("run", [data, 0, 8, 1]);
+          data.release();
+          await expect(pending).resolves.toBe(2);
+        } finally {
+          await runtime.close();
+        }
+      }
+      if (hasThreadPack) {
+        const shared = await managedArtifact("managed-fallback-shared", true);
+        const scalar = await managedArtifact("managed-fallback-scalar", false);
+        vi.stubGlobal("SharedArrayBuffer", undefined);
+        try {
+          let reason = "";
+          const runtime = await shared.glue.createRuntime(
+            shared.bytes,
+            {},
+            {
+              fallback: (why: string) => {
+                reason = why;
+                return scalar.glue.createRuntime(scalar.bytes);
+              },
+            },
+          );
+          try {
+            expect(reason).toContain("isolation");
+            expect(runtime.capabilities.sharedMemory).toBe(false);
+          } finally {
+            await runtime.close();
+          }
+        } finally {
+          vi.unstubAllGlobals();
+        }
+        const validate = vi.spyOn(WebAssembly, "validate").mockReturnValue(false);
+        try {
+          const runtime = await shared.glue.createRuntime(
+            shared.bytes,
+            {},
+            { fallback: () => scalar.glue.createRuntime(scalar.bytes) },
+          );
+          try {
+            expect(runtime.capabilities.simd).toBe(false);
+          } finally {
+            await runtime.close();
+          }
+        } finally {
+          validate.mockRestore();
+        }
+        const actualValidate = WebAssembly.validate.bind(WebAssembly);
+        const atomics = vi.spyOn(WebAssembly, "validate").mockImplementation((bytes) => {
+          const view =
+            bytes instanceof ArrayBuffer
+              ? new Uint8Array(bytes)
+              : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+          return view.includes(254) ? false : actualValidate(bytes);
+        });
+        try {
+          let reason = "";
+          const runtime = await shared.glue.createRuntime(
+            shared.bytes,
+            {},
+            {
+              fallback: (why: string) => {
+                reason = why;
+                return scalar.glue.createRuntime(scalar.bytes);
+              },
+            },
+          );
+          try {
+            expect(reason).toContain("threads/atomics");
+            expect(runtime.capabilities.sharedMemory).toBe(false);
+          } finally {
+            await runtime.close();
+          }
+        } finally {
+          atomics.mockRestore();
+        }
+      }
+    }, 120000);
+
+    test.each(["scalar", "simd", "threads"])(
+      "binary32 BVH forest matches Node bit-for-bit (%s)",
+      async (mode, context) => {
+        if (mode === "threads" && !hasThreadPack) context.skip();
+        const source = join(import.meta.dirname, "../library-mode/float32-bvh");
+        const profile = JSON.parse(await readFile(join(source, "profile.json"), "utf8"));
+        profile.entry = join(source, "lib.ts");
+        profile.abi.instance_per_thread = mode === "threads";
+        profile.abi.wasm_memory.shared = mode === "threads";
+        profile.abi.wasm_features = mode === "scalar" ? [] : ["simd128"];
+        const path = join(directory, "bvh-" + mode + ".json");
+        await writeFile(path, JSON.stringify(profile));
+        const result = await compileLibrary({
+          profilePath: path,
+          outDir: directory,
+          outPath: join(directory, "bvh-" + mode + ".wasm"),
+        });
+        if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
+        if (spawnSync("wasm-dis", ["--version"]).status === 0) {
+          const disassembly = execFileSync("wasm-dis", [result.archivePath], {
+            encoding: "utf8",
+            maxBuffer: 8 * 1024 * 1024,
+          });
+          if (mode === "scalar") expect(disassembly).not.toContain("f32x4.");
+          else
+            for (const op of ["add", "mul", "min", "max"])
+              expect(disassembly).toContain("f32x4." + op);
+          if (mode === "threads") expect(disassembly).toContain("i32.atomic.load");
+        }
+        const glue = await import(
+          pathToFileURL(result.archivePath.replace(/\.wasm$/, ".mjs")).href
+        );
+        const runtime = await glue.createRuntime(
+          await readFile(result.archivePath),
+          {},
+          { workers: 4 },
+        );
+        const count = 256,
+          jobs = 4,
+          stride = (count * 2 - 1) * 16,
+          triangles = new Float32Array(jobs * count * 12);
+        let seed = 12345;
+        for (let i = 0; i < triangles.length; i++) {
+          seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+          triangles[i] = i % 4 === 3 ? 0 : (seed / 4294967296) * 200 - 100;
+        }
+        const input = allocateReference(triangles.length),
+          output = allocateReference(jobs * stride);
+        try {
+          referenceView(input).set(triangles);
+          const areas = Array.from({ length: jobs }, (_, job) =>
+            referenceBvhBuild(input, job * count, count, output, job * stride),
+          );
+          const expected = new Uint32Array(referenceView(output).buffer).slice();
+          const inBuffer = runtime.buffer(triangles.length),
+            outBuffer = runtime.buffer(jobs * stride);
+          inBuffer.writeFloat32(triangles);
+          expect(
+            await Promise.all(
+              Array.from({ length: jobs }, (_, job) =>
+                runtime.call("build", [inBuffer, job * count, count, outBuffer, job * stride]),
+              ),
+            ),
+          ).toEqual(areas);
+          const actual = outBuffer.readUint32();
+          expect(actual).toEqual(expected);
+          const bounds = new Float32Array(actual.buffer);
+          for (let job = 0; job < jobs; job++) {
+            const base = job * stride;
+            expect(actual[base + 15]).toBe(count);
+            for (let n = 0; n < count - 1; n++) {
+              const p = base + n * 16,
+                l = base + actual[p + 12]! * 16,
+                r = base + actual[p + 13]! * 16;
+              for (let axis = 0; axis < 3; axis++) {
+                expect(bounds[p + axis]).toBe(Math.min(bounds[l + axis]!, bounds[r + axis]!));
+                expect(bounds[p + 4 + axis]).toBe(
+                  Math.max(bounds[l + 4 + axis]!, bounds[r + 4 + axis]!),
+                );
+              }
+            }
+          }
+          // Reuse the live pool and backing allocations, not only fresh instances.
+          expect(await runtime.call("build", [inBuffer, 0, count, outBuffer, 0])).toBe(areas[0]);
+          expect(outBuffer.readUint32()).toEqual(expected);
+          if (mode === "threads" && Number(process.env.SCRIPTC_WASM_STRESS) > 0) {
+            const rounds = Number(process.env.SCRIPTC_WASM_STRESS);
+            expect(Number.isSafeInteger(rounds) && rounds <= 100000).toBe(true);
+            const batch = async () => {
+              const allocated = Array.from({ length: jobs }, (_, job) => {
+                const input = runtime.buffer(count * 12),
+                  output = runtime.buffer(stride);
+                input.writeFloat32(triangles.subarray(job * count * 12, (job + 1) * count * 12));
+                return { input, output };
+              });
+              try {
+                const values = await Promise.all(
+                  allocated.map(({ input, output }) =>
+                    runtime.call("build", [input, 0, count, output, 0]),
+                  ),
+                );
+                expect(values.every((value) => Number.isFinite(value) && value > 0)).toBe(true);
+              } finally {
+                for (const { input, output } of allocated) {
+                  input.release();
+                  output.release();
+                }
+              }
+            };
+            for (let i = 0; i < 16; i++) await batch();
+            const bytes = runtime.memoryBytes;
+            for (let i = 0; i < Math.ceil(rounds / jobs); i++) await batch();
+            expect(runtime.memoryBytes).toBe(bytes);
+            expect(outBuffer.readUint32()).toEqual(expected);
+          }
+          inBuffer.release();
+          outBuffer.release();
+        } finally {
+          releaseReference(input);
+          releaseReference(output);
+          await runtime.close();
+        }
+      },
+      120000,
+    );
+
     test("exports only the callable ABI and requires named host imports", () => {
       expect(
         WebAssembly.Module.exports(module)
@@ -253,6 +769,74 @@ export function unsigned(): number { return 9007199254740991; }
         { encoding: "utf8" },
       );
       expect({ values, echo, bytes, reports }).toEqual(JSON.parse(reference));
+    });
+
+    test("SIMD profile changes are cache-isolated, Node-exact and feature-checked", async () => {
+      const source = join(import.meta.dirname, "../library-mode/float32-lanes/lib.ts");
+      const settings = JSON.parse(
+        await readFile(
+          join(import.meta.dirname, "../library-mode/float32-lanes/profile.json"),
+          "utf8",
+        ),
+      );
+      settings.entry = source;
+      const profilePath = join(directory, "float32-profile.json");
+      const reference = JSON.parse(
+        execFileSync(
+          process.execPath,
+          [
+            "--input-type=module",
+            "-e",
+            `
+        const m = await import(${JSON.stringify(pathToFileURL(source).href)});
+        const values = [m.run(0.123), ...Array.from({length: 32}, (_, i) => m.element(i)), m.overlap(), m.signedZero()];
+        console.log(JSON.stringify(values));
+      `,
+          ],
+          { encoding: "utf8" },
+        ),
+      );
+      // Same path and output: changing only the feature flag must not hit an
+      // incompatible frontend/object/artifact cache entry.
+      for (const enabled of [false, true, false]) {
+        if (enabled) settings.abi.wasm_features = ["simd128"];
+        else delete settings.abi.wasm_features;
+        await writeFile(profilePath, JSON.stringify(settings));
+        const result = await compileLibrary({ profilePath, outDir: directory });
+        if (!result.ok) throw new Error(JSON.stringify(result.diagnostics));
+        const llvm = await readFile(result.llvmPath, "utf8");
+        expect(llvm.includes('"target-features"="+simd128"')).toBe(enabled);
+        expect(llvm).toContain("fadd <4 x float>");
+        const bytes = await readFile(result.archivePath);
+        expect(WebAssembly.validate(bytes)).toBe(true);
+        const stem = result.archivePath.slice(0, -5);
+        const glue = await import(
+          pathToFileURL(stem + ".mjs").href + `?simd=${enabled}-${Date.now()}`
+        );
+        expect(glue.requiredFeatures ?? []).toEqual(enabled ? ["simd128"] : []);
+        const api = await glue.instantiateFromBytes(bytes, {
+          panic(message: string) {
+            throw new Error(message);
+          },
+        });
+        const values = [
+          api.fl_run(0.123),
+          ...Array.from({ length: 32 }, (_, i) => api.fl_element(i)),
+          api.fl_overlap(),
+          api.fl_signed_zero(),
+        ];
+        expect(values).toEqual(reference);
+        if (enabled) {
+          const validate = vi.spyOn(WebAssembly, "validate").mockReturnValue(false);
+          try {
+            await expect(glue.instantiateFromBytes(bytes, {})).rejects.toThrow(
+              "requires WebAssembly SIMD128",
+            );
+          } finally {
+            validate.mockRestore();
+          }
+        }
+      }
     });
 
     test("instances isolate state and initialization resets the session", () => {

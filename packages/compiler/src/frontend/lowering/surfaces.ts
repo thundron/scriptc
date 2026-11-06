@@ -2280,8 +2280,8 @@ const DNS_ERROR_CODES: Record<string, string> = {
 
 /** Builtin-module CONSTANTS (value reads of named imports): each lowers to
  * a literal of its value's kind. The bare-module values are the TARGET
- * platform's (builtinModuleConstOf swaps the win32 values in under a win32
- * triple — Node's own platform conditionals); the named namespaces answer
+ * platform's (builtinModuleConstOf applies target-specific overrides,
+ * following Node's platform conditionals); the named namespaces answer
  * THEIR platform's constants everywhere. Worker metadata uses these names
  * for inventory but reads the current runtime context in its dedicated
  * lowering. Cluster metadata describes a directly-run native executable. */
@@ -2312,9 +2312,9 @@ export const BUILTIN_MODULE_CONSTS: Record<
   zlib: Object.fromEntries(
     Object.entries(ZLIB_CONSTANTS).filter(([name]) => !name.startsWith("BROTLI")),
   ),
-  // node:dns's getaddrinfo hints are libuv's normalized flags (uv.h's
-  // UV_AI_*), the same numbers on every platform. The error codes are the
-  // module's exported strings; node:dns/promises exports the same ones.
+  // getaddrinfo hints use the target's AI_* values: Linux defaults here,
+  // with Darwin and Winsock overrides below. Resolver errors are strings;
+  // node:dns/promises exports those strings, but not the hint flags.
   dns: { ADDRCONFIG: 32, ALL: 16, V4MAPPED: 8, ...DNS_ERROR_CODES },
   "dns/promises": { ...DNS_ERROR_CODES },
 };
@@ -3157,6 +3157,15 @@ function buildAmbientSurfaceFns(): readonly AmbientSurfaceRow[] {
   ];
 }
 
+/** Darwin's netdb.h and Winsock use high-bit getaddrinfo hint flags,
+ * unlike Linux's low-bit values. Never read the compiling host's flags. */
+const DARWIN_TARGET_CONSTS: Record<
+  string,
+  Record<string, string | number | boolean | undefined> | undefined
+> = {
+  dns: { ADDRCONFIG: 0x400, ALL: 0x100, V4MAPPED: 0x800 },
+};
+
 /** The win32-target overrides of the bare modules' constants: path's
  * constants ARE the path/win32 namespace's, and os.EOL is CRLF (Node's
  * `isWindows ? '\r\n' : '\n'`). */
@@ -3166,6 +3175,7 @@ const WIN32_TARGET_CONSTS: Record<
 > = {
   path: BUILTIN_MODULE_CONSTS["path/win32"],
   os: { EOL: "\r\n", devNull: "\\\\.\\nul" },
+  dns: DARWIN_TARGET_CONSTS["dns"],
 };
 
 /** builtinModuleFns() with the platform-conditional modules bound per
@@ -3305,15 +3315,21 @@ export function builtinFenceHintOf(module: string, member: string): string | und
   return hint === undefined && module === "v8" ? V8_MEMBER_REASON : hint;
 }
 
-/** BUILTIN_MODULE_CONSTS with the win32-target overrides applied — the
+/** BUILTIN_MODULE_CONSTS with target-specific overrides applied — the
  * constants twin of builtinModuleFnsOf. */
 export function builtinModuleConstOf(
   lowerer: Lowerer,
   module: string,
   member: string,
 ): string | number | boolean | undefined {
-  if (lowerer.targetPlatform === "win32") {
-    const mod = ownEntry(WIN32_TARGET_CONSTS, module);
+  const overrides =
+    lowerer.targetPlatform === "win32"
+      ? WIN32_TARGET_CONSTS
+      : lowerer.targetPlatform === "darwin"
+        ? DARWIN_TARGET_CONSTS
+        : undefined;
+  if (overrides) {
+    const mod = ownEntry(overrides, module);
     const w = mod ? ownEntry(mod, member) : undefined;
     if (w !== undefined) return w;
   }

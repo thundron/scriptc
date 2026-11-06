@@ -70,7 +70,10 @@ export type {
   AnalyzeResult,
 } from "./compile-types.js";
 import { compilePackedLibrary } from "./backend/library-pack.js";
-import { emitLibraryWasmGlue as libraryWasmGlue } from "./backend/wasm-glue.js";
+import {
+  emitLibraryWasmGlue as libraryWasmGlue,
+  emitLibraryWasmTypes,
+} from "./backend/wasm-glue.js";
 import { optimizeWasmIfAvailable } from "./backend/wasm-opt.js";
 import { node24FetchCompatProfile } from "./compat/fetch-profile.js";
 import { libFnSignatures } from "./ir/builtin-signatures.js";
@@ -2568,6 +2571,7 @@ function libraryNativeFeatures(mod: IrModule, backend: "llvm"): EarlyLibraryNati
     dynInvoke: features.dynInvoke,
     ...(features.dynBuffer ? { dynBuffer: true } : {}),
     ...(features.dynTier ? { dynTier: true } : {}),
+    ...(features.dynIntegrityQueries ? { dynIntegrityQueries: true } : {}),
     ...(features.declAdopt ? { declAdopt: true } : {}),
     ...(features.typeOrigins ? { typeOrigins: true } : {}),
     mutableBuffers: features.mutableBuffers,
@@ -2578,6 +2582,7 @@ function libraryNativeFeatures(mod: IrModule, backend: "llvm"): EarlyLibraryNati
 async function emitLibraryWasmGlue(profile: LibraryProfile, wasmPath: string): Promise<void> {
   const stem = basename(wasmPath, ".wasm");
   await writeFile(join(dirname(wasmPath), `${stem}.mjs`), libraryWasmGlue(profile, stem));
+  await writeFile(join(dirname(wasmPath), `${stem}.d.mts`), emitLibraryWasmTypes(profile, stem));
 }
 
 async function compileLibraryNative(
@@ -2595,11 +2600,18 @@ async function compileLibraryNative(
         outPath: archivePath,
         optimization: profile.optimization,
         ...features,
+        threadInstances: profile.instancePerThread,
+        ...(profile.wasmMemory === undefined ? {} : { wasmMemory: profile.wasmMemory }),
       },
       wasmTarget,
       libraryWasmExports(profile),
     );
-    if (profile.optimization === "release") await optimizeWasmIfAvailable(archivePath);
+    if (profile.optimization === "release")
+      await optimizeWasmIfAvailable(
+        archivePath,
+        profile.wasmFeatures ?? [],
+        profile.wasmMemory?.shared === true,
+      );
     await emitLibraryWasmGlue(profile, archivePath);
     return;
   }
@@ -2675,6 +2687,7 @@ async function compileLibraryNative(
     dynInvoke: features.dynInvoke,
     ...(features.dynBuffer === true ? { dynBuffer: true } : {}),
     ...(features.dynTier === true ? { dynTier: true } : {}),
+    ...(features.dynIntegrityQueries === true ? { dynIntegrityQueries: true } : {}),
     ...(features.declAdopt === true ? { declAdopt: true } : {}),
     ...(features.typeOrigins === true ? { typeOrigins: true } : {}),
     ...(features.mutableBuffers === true ? { mutableBuffers: true } : {}),

@@ -1,0 +1,118 @@
+{
+  "profile_format": 2,
+  "name": "shared-f32-jobs",
+  "entry": "lib.ts",
+  "emission": "llvm",
+  "abi": {
+    "prefix": "sfj_",
+    "init_symbol": "sfj_init",
+    "sink_register_symbol": "sfj_set_panic_sink",
+    "collect_symbol": "sfj_collect",
+    "result_reset_symbol": null,
+    "instance_per_thread": true,
+    "wasm_features": [
+      "simd128"
+    ],
+    "wasm_memory": {
+      "shared": true,
+      "initial_pages": 256,
+      "maximum_pages": 4096,
+      "stack_bytes": 1048576
+    }
+  },
+  "exports": [
+    {
+      "export": "run",
+      "symbol": "sfj_run",
+      "params": [
+        "f64",
+        "f64",
+        "f64",
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "sum",
+      "symbol": "sfj_sum",
+      "params": [
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "allocate",
+      "symbol": "sfj_allocate",
+      "params": [
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "release",
+      "symbol": "sfj_release",
+      "params": [
+        "f64"
+      ],
+      "returns": "void"
+    },
+    {
+      "export": "valid",
+      "symbol": "sfj_valid",
+      "params": [
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "forever",
+      "symbol": "sfj_forever",
+      "params": [],
+      "returns": "void"
+    },
+    {
+      "export": "echo",
+      "symbol": "sfj_echo",
+      "params": [
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "text",
+      "symbol": "sfj_text",
+      "params": [
+        "string"
+      ],
+      "returns": "string"
+    },
+    {
+      "export": "cstring",
+      "symbol": "sfj_cstring",
+      "params": [
+        "cstring"
+      ],
+      "returns": "cstring"
+    },
+    {
+      "export": "bytes",
+      "symbol": "sfj_bytes",
+      "params": [
+        "bytes"
+      ],
+      "returns": "bytes"
+    },
+    {
+      "export": "randomOkay",
+      "symbol": "sfj_random_okay",
+      "params": [],
+      "returns": "f64"
+    },
+    {
+      "export": "state",
+      "symbol": "sfj_state",
+      "params": [],
+      "returns": "f64"
+    }
+  ]
+}

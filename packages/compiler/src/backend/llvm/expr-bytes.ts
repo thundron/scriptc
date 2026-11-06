@@ -386,7 +386,11 @@ function emitBytesLoad(
   owned: boolean,
 ): LlValue {
   // `owned`: an enclosing version guard proved the view thread-owned.
-  if (host.mod.workers && !owned && !plainSharedElement(host, elem, expr)) {
+  if (
+    (host.mod.workers || host.mod.lib?.threadInstances === true) &&
+    !owned &&
+    !plainSharedElement(host, elem, expr)
+  ) {
     const idx = emitBytesIndex(host, receiver, index, expr, invalid, inBounds);
     return emitSharedOrLocalLoad(host, elem, receiver, idx);
   }
@@ -695,7 +699,7 @@ function emitScopedBytesSet(
   const done = B.newLabel("bytes.store.done");
   const data = host.emitBytesData(receiver);
   const idx = emitBytesIndex(host, receiver, index, indexExpr, done, inBounds);
-  if (host.mod.workers && !owned && elem === "f16") {
+  if ((host.mod.workers || host.mod.lib?.threadInstances === true) && !owned && elem === "f16") {
     host.declare(`declare void @scr_bytes_shared_set(ptr, ${host.sizeType}, double)`);
     const local = emitSharedBytesSplit(host, receiver);
     B.line(
@@ -760,7 +764,11 @@ function emitScopedBytesSet(
     ty = "i32";
     operand = stored!;
   }
-  if (host.mod.workers && !owned && !plainSharedElement(host, elem, indexExpr)) {
+  if (
+    (host.mod.workers || host.mod.lib?.threadInstances === true) &&
+    !owned &&
+    !plainSharedElement(host, elem, indexExpr)
+  ) {
     // A shared view's element takes a relaxed atomic store of its width.
     const local = emitSharedBytesSplit(host, receiver);
     const p = B.tmp();

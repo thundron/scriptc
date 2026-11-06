@@ -1542,6 +1542,13 @@ export interface IrLibCallback {
   unregisteredTrap: string;
 }
 
+export interface IrWasmMemory {
+  shared: boolean;
+  initialPages: number;
+  maximumPages: number;
+  stackBytes: number;
+}
+
 export interface IrLibSection {
   /** The profile's identity string (artifact header comments only). */
   profileName: string;
@@ -1561,6 +1568,10 @@ export interface IrLibSection {
    * thread-local storage, matching the runtime objects compiled with
    * -DSCR_THREAD_INSTANCES: one full instance per embedder thread. */
   threadInstances: boolean;
+  /** Explicit optional wasm features; absent for baseline/scalar modules. */
+  wasmFeatures?: "simd128"[];
+  /** Explicit imported-memory ABI for managed library workers. */
+  wasmMemory?: IrWasmMemory;
   /** The host-callback registration symbol; present exactly when
    * `callbacks` is (the profile pairs them — SC4001 otherwise). Both
    * fields stay ABSENT on callback-free profiles so their serialized IR

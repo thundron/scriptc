@@ -4284,7 +4284,7 @@ static void scr_dispose_observers(void *object) {
 #ifdef SCR_JS_OBJECT_MODEL
 /* scr_js_buffers_arm: the registry must see frees even in a program that
  * creates no weak collection, so it installs the one dispose hook. */
-void scr_js_dispose_hook_install(void) { scr_weak_dispose_hook = &scr_dispose_observers; }
+void scr_js_dispose_hook_install(void) { scr_weak_observer_install(&scr_dispose_observers); }
 #endif
 
 /* Keeps live entries plus deleted markers at most half the table: grows
@@ -4412,7 +4412,7 @@ static void scr_record_source_put(const ScrRecordSource *entry) {
   if (scr_record_sources[slot].rec == SCR_RECORD_SOURCE_DELETED) scr_record_source_deleted--;
   scr_record_sources[slot] = *entry;
   scr_record_source_count++;
-  scr_weak_dispose_hook = &scr_dispose_observers;
+  scr_weak_observer_install(&scr_dispose_observers);
 }
 
 /* The own property descriptor of `key` on `source`, or NULL when it has no
@@ -4603,7 +4603,7 @@ void scr_record_link(void *copy, void *source, void (*release)(void *), uint32_t
   if (scr_record_links[slot].copy == SCR_RECORD_LINK_DELETED) scr_record_link_deleted--;
   scr_record_links[slot] = (ScrRecordLink){ copy, source, release, pair };
   scr_record_link_count++;
-  scr_weak_dispose_hook = &scr_dispose_observers;
+  scr_weak_observer_install(&scr_dispose_observers);
 }
 
 uint32_t scr_record_link_pair(const void *copy) {
@@ -21150,7 +21150,7 @@ static ScrDyn *scr_weak_collection_new(ScrDyn *seed, bool is_set) {
   };
   ScrDynHandleTag tag = is_set ? SCR_DYNH_WEAK_SET : SCR_DYNH_WEAK_MAP;
   scr_weak_observing = true;
-  scr_weak_dispose_hook = &scr_dispose_observers;
+  scr_weak_observer_install(&scr_dispose_observers);
   scr_dyn_handle_install(tag, is_set ? &set_ops : &map_ops);
   static ScrCycType cyc_type = { &scr_weak_map_trace, &scr_weak_map_gcfree, SCR_CYC_KIND_WEAK_MAP };
   ScrWeakMap *map = scr_cyc_alloc(sizeof *map, &cyc_type);

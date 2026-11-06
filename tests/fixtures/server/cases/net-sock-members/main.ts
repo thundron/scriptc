@@ -1,8 +1,8 @@
 /* The socket member follow-ups: setTimeout + the 'timeout' event (the
  * isPortListening shape — connect, arm the idle timer, destroy on
  * whichever of connect/timeout fires), remoteAddress on both ends of a
- * live connection (the accepted side of a dual-stack listener reads the
- * v4-mapped form), the undefined arm after destroy, and `writable`
+ * live connection (the accepted side of a mapped-loopback listener reads
+ * the v4-mapped form), the undefined arm after destroy, and `writable`
  * through the write half's whole life (true connected, false after end()
  * — Node's stream flag; the proxy's "may I still answer 502" guard).
  * Ping-pong ordered: the server side drives the shutdown. */
@@ -29,7 +29,9 @@ const server = createServer((sock) => {
   });
 });
 
-server.listen(0, () => {
+// Bind the mapped loopback address explicitly. On Darwin, a wildcard
+// IPv6 ephemeral port can overlap a parallel IPv4 listener's port.
+server.listen(0, "::ffff:127.0.0.1", () => {
   const port = server.address().port;
   // Leg 1: a connection that answers — 'connect' wins, timeout never fires.
   const alive = connect(port, "127.0.0.1");
@@ -63,7 +65,7 @@ function idleLeg(): void {
   const quiet = createServer((s) => {
     s.on("data", () => {});
   });
-  quiet.listen(0, () => {
+  quiet.listen(0, "127.0.0.1", () => {
     const sock = connect(quiet.address().port, "127.0.0.1");
     sock.setTimeout(250);
     sock.once("connect", () => console.log("idle connected"));

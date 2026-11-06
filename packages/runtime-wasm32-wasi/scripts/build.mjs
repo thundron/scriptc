@@ -1,3 +1,4 @@
+import { ensureWasiSdk } from "./wasi-sdk.mjs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 process.env.SCRIPTC_RUNTIME_PACK_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -51,4 +52,12 @@ process.env.SCRIPTC_RUNTIME_PACK_CONFIG = JSON.stringify({
     { name: "wasi-emulated-process-clocks", predicate: true },
   ],
 });
+if (
+  process.env.SCRIPTC_WASI_THREADS !== undefined &&
+  !["0", "1"].includes(process.env.SCRIPTC_WASI_THREADS)
+)
+  throw new Error("SCRIPTC_WASI_THREADS must be 0 or 1");
+const threads = process.env.SCRIPTC_WASI_THREADS !== "0";
+if (threads) process.env.WASI_SDK_PATH = await ensureWasiSdk();
 await import("../../runtime-pack-common/scripts/build.mjs");
+if (threads) await import("./build-threads.mjs");

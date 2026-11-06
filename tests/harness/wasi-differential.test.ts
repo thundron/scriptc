@@ -112,6 +112,13 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
   });
 
   test.each([
+    "float32-arithmetic.ts",
+    "float32-vector-lanes.ts",
+    "float32-shared-handles.ts",
+    "float32-function-values.ts",
+    "float32-bvh-build.ts",
+    "record-alias-expando.js",
+    "json-module-own-keys/main.ts",
     "js-prototype-host-boundary.js",
     "js-regex-record-captures.js",
     "js-callable-proxy.js",

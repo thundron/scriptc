@@ -334,6 +334,31 @@ export function validateModule(mod: IrModule): IrValidationError[] {
   // a violation here is a compiler bug like any other validation error.
   if (mod.lib !== undefined) {
     const entryLoc: SrcLoc = { file: mod.sourceFile, start: 0, end: 0 };
+    if (
+      mod.lib.wasmFeatures !== undefined &&
+      (!Array.isArray(mod.lib.wasmFeatures) ||
+        mod.lib.wasmFeatures.some((feature) => feature !== "simd128") ||
+        new Set(mod.lib.wasmFeatures).size !== mod.lib.wasmFeatures.length)
+    )
+      errors.push({ message: "invalid library wasm target features", loc: entryLoc });
+    const memory = mod.lib.wasmMemory;
+    if (
+      memory !== undefined &&
+      (!memory ||
+        typeof memory !== "object" ||
+        typeof memory.shared !== "boolean" ||
+        !Number.isInteger(memory.initialPages) ||
+        !Number.isInteger(memory.maximumPages) ||
+        memory.initialPages < 2 ||
+        memory.maximumPages < memory.initialPages ||
+        memory.maximumPages > 65536 ||
+        !Number.isInteger(memory.stackBytes) ||
+        memory.stackBytes < 65536 ||
+        memory.stackBytes % 16 !== 0 ||
+        memory.stackBytes >= memory.initialPages * 65536 ||
+        memory.shared !== mod.lib.threadInstances)
+    )
+      errors.push({ message: "invalid library wasm memory contract", loc: entryLoc });
     for (const e of mod.lib.exports) {
       const fn = functionsByName.get(e.fnName);
       if (!fn) {

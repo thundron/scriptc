@@ -18,6 +18,18 @@
         "string"
       ],
       "returns": "f64"
+    },
+    {
+      "export": "sealed",
+      "symbol": "n_sealed",
+      "params": ["string"],
+      "returns": "f64"
+    },
+    {
+      "export": "extensible",
+      "symbol": "n_extensible",
+      "params": ["string"],
+      "returns": "f64"
     }
   ]
 }

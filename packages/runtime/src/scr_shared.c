@@ -488,3 +488,249 @@ double scr_atomics_notify_dyn(const ScrDyn *array, double index, double count) {
   ScrBytes *bytes = scr_atomics_dyn_array(array, true);
   return bytes ? scr_atomics_notify(bytes, index, count) : 0;
 }
+
+/* Opaque binary32 storage handles for shared-memory library jobs. Only neutral
+ * ScrSharedBytes storage crosses contexts; wrappers and GC graphs stay local.
+ * Generations never wrap, so a released handle cannot name a reused slot. */
+#define SCR_SHARED_F32_SLOTS 4096u
+typedef struct {
+  uint32_t generation;
+  ScrSharedBytes *storage;
+} ScrSharedF32Slot;
+static ScrSharedF32Slot scr_shared_f32_slots[SCR_SHARED_F32_SLOTS];
+static size_t scr_shared_f32_next;
+
+/* Threaded libraries park contended registry callers instead of spinning
+ * against an active job. Scalar WASI keeps no pthread dependency. */
+#if defined(SCR_WORKERS) || (defined(SCR_LIB) && defined(SCR_THREAD_INSTANCES))
+#ifdef _WIN32
+static SRWLOCK scr_shared_f32_lock = SRWLOCK_INIT;
+static void scr_shared_f32_enter(void) { AcquireSRWLockExclusive(&scr_shared_f32_lock); }
+static void scr_shared_f32_leave(void) { ReleaseSRWLockExclusive(&scr_shared_f32_lock); }
+#else
+static pthread_mutex_t scr_shared_f32_lock = PTHREAD_MUTEX_INITIALIZER;
+static void scr_shared_f32_enter(void) { (void)pthread_mutex_lock(&scr_shared_f32_lock); }
+static void scr_shared_f32_leave(void) { (void)pthread_mutex_unlock(&scr_shared_f32_lock); }
+#endif
+#else
+static atomic_flag scr_shared_f32_lock = ATOMIC_FLAG_INIT;
+static void scr_shared_f32_enter(void) {
+  while (atomic_flag_test_and_set_explicit(&scr_shared_f32_lock, memory_order_acquire)) {}
+}
+static void scr_shared_f32_leave(void) {
+  atomic_flag_clear_explicit(&scr_shared_f32_lock, memory_order_release);
+}
+#endif
+static bool scr_shared_f32_key(double handle, size_t *slot, uint32_t *generation) {
+  if (!isfinite(handle) || handle <= 0 || handle >= 17592186048512.0 || floor(handle) != handle) return false;
+  uint64_t key = (uint64_t)handle - 1;
+  uint64_t gen = key / SCR_SHARED_F32_SLOTS;
+  if (!gen || gen > UINT32_MAX) return false;
+  *slot = (size_t)(key % SCR_SHARED_F32_SLOTS);
+  *generation = (uint32_t)gen;
+  return true;
+}
+static ScrSharedBytes *scr_shared_f32_lookup(double handle) {
+  size_t index; uint32_t generation;
+  if (!scr_shared_f32_key(handle, &index, &generation)) return NULL;
+  scr_shared_f32_enter();
+  ScrSharedF32Slot *slot = &scr_shared_f32_slots[index];
+  ScrSharedBytes *storage = slot->generation == generation ? slot->storage : NULL;
+  if (storage) scr_shared_retain(storage);
+  scr_shared_f32_leave();
+  return storage;
+}
+
+/* Raw host entries report invalid requests without leaving a pending guest
+ * exception. Source-language entries below turn failures into RangeErrors. */
+double scriptc_shared_f32_new(double length) {
+  if (!isfinite(length) || length < 0 || length > 1073741823.0 || floor(length) != length) return 0;
+  size_t size = (size_t)length * sizeof(float);
+  /* Raw hosts have no GC context. Allocate neutral storage directly: only
+   * source views below enter an instance's RC graph. */
+  ScrSharedBytes *storage = malloc(sizeof(*storage));
+  if (!storage) return 0;
+  size_t mapped = 0;
+  uint8_t *data = scr_shared_storage(size, &mapped);
+  if (!data) { free(storage); return 0; }
+  atomic_init(&storage->references, 1);
+  storage->length = size;
+  storage->data = data;
+  storage->mapped = mapped;
+  storage->held = size;
+  scr_array_buffers_add_shared(size);
+  double handle = 0;
+  scr_shared_f32_enter();
+  for (size_t n = 0; n < SCR_SHARED_F32_SLOTS; n++) {
+    size_t i = (scr_shared_f32_next + n) % SCR_SHARED_F32_SLOTS;
+    ScrSharedF32Slot *slot = &scr_shared_f32_slots[i];
+    if (slot->storage || slot->generation == UINT32_MAX) continue;
+    slot->generation++;
+    slot->storage = storage;
+    handle = (double)((uint64_t)slot->generation * SCR_SHARED_F32_SLOTS + i + 1);
+    scr_shared_f32_next = (i + 1) % SCR_SHARED_F32_SLOTS;
+    break;
+  }
+  scr_shared_f32_leave();
+  if (!handle) scr_shared_release(storage);
+  return handle;
+}
+int32_t scriptc_shared_f32_release(double handle) {
+  size_t index; uint32_t generation;
+  if (!scr_shared_f32_key(handle, &index, &generation)) return -1;
+  scr_shared_f32_enter();
+  ScrSharedF32Slot *slot = &scr_shared_f32_slots[index];
+  ScrSharedBytes *storage = slot->generation == generation ? slot->storage : NULL;
+  if (storage) slot->storage = NULL;
+  scr_shared_f32_leave();
+  if (!storage) return -1;
+  scr_shared_release(storage);
+  return 0;
+}
+uintptr_t scriptc_shared_f32_data(double handle) {
+  ScrSharedBytes *storage = scr_shared_f32_lookup(handle);
+  if (!storage) return 0;
+  uintptr_t data = (uintptr_t)storage->data;
+  scr_shared_release(storage);
+  return data;
+}
+double scriptc_shared_f32_retain(double handle) {
+  ScrSharedBytes *storage = scr_shared_f32_lookup(handle);
+  if (!storage) return 0;
+  double lease = 0;
+  scr_shared_f32_enter();
+  for (size_t n = 0; n < SCR_SHARED_F32_SLOTS; n++) {
+    size_t i = (scr_shared_f32_next + n) % SCR_SHARED_F32_SLOTS;
+    ScrSharedF32Slot *slot = &scr_shared_f32_slots[i];
+    if (slot->storage || slot->generation == UINT32_MAX) continue;
+    slot->generation++;
+    slot->storage = storage;
+    lease = (double)((uint64_t)slot->generation * SCR_SHARED_F32_SLOTS + i + 1);
+    scr_shared_f32_next = (i + 1) % SCR_SHARED_F32_SLOTS;
+    break;
+  }
+  scr_shared_f32_leave();
+  if (!lease) scr_shared_release(storage);
+  return lease;
+}
+double scriptc_shared_f32_length(double handle) {
+  ScrSharedBytes *storage = scr_shared_f32_lookup(handle);
+  if (!storage) return -1;
+  double length = (double)(storage->length / sizeof(float));
+  scr_shared_release(storage);
+  return length;
+}
+
+double scr_shared_f32_new(double length) {
+  double handle = scriptc_shared_f32_new(length);
+  if (!handle) scr_throw_error_msg(SCR_ERR_RANGE, "shared float32 allocation failed", sizeof("shared float32 allocation failed") - 1);
+  return handle;
+}
+typedef struct ScrSharedF32Owner {
+  ScrSharedBytes *storage; /* borrowed from owner, never a cross-context graph */
+  ScrBytes *owner; /* weak, local to this source instance */
+  struct ScrSharedF32Owner *next;
+} ScrSharedF32Owner;
+static SCR_TL ScrSharedF32Owner *scr_shared_f32_owners;
+static void scr_shared_f32_owner_disposed(void *object) {
+  ScrSharedF32Owner **entry = &scr_shared_f32_owners;
+  while (*entry) {
+    if ((*entry)->owner == object) {
+      ScrSharedF32Owner *removed = *entry;
+      *entry = removed->next;
+      free(removed);
+      if (!scr_shared_f32_owners) scr_weak_observer_remove(scr_shared_f32_owner_disposed);
+      return;
+    }
+    entry = &(*entry)->next;
+  }
+}
+static ScrBytes *scr_shared_f32_local_owner(ScrSharedBytes *storage) {
+  for (ScrSharedF32Owner *entry = scr_shared_f32_owners; entry; entry = entry->next)
+    if (entry->storage == storage) return scr_bytes_retain(entry->owner);
+  ScrSharedF32Owner *entry = malloc(sizeof(*entry));
+  if (!entry) {
+    scr_throw_error_msg(SCR_ERR_RANGE, "shared float32 view allocation failed", sizeof("shared float32 view allocation failed") - 1);
+    return NULL;
+  }
+  ScrBytes *owner = scr_shared_wrap(storage);
+  *entry = (ScrSharedF32Owner){storage, owner, scr_shared_f32_owners};
+  scr_shared_f32_owners = entry;
+  scr_weak_observer_install(scr_shared_f32_owner_disposed);
+  return owner;
+}
+ScrBytes *scr_shared_f32_view(double handle) {
+  ScrSharedBytes *storage = scr_shared_f32_lookup(handle);
+  if (!storage) {
+    scr_throw_error_msg(SCR_ERR_RANGE, "invalid shared float32 handle", sizeof("invalid shared float32 handle") - 1);
+    return NULL;
+  }
+  ScrBytes *owner = scr_shared_f32_local_owner(storage);
+  ScrBytes *view = owner ? scr_bytes_buffer_view(owner, SCR_BYTES_F32, 0, true,
+    (double)(storage->length / sizeof(float))) : NULL;
+  scr_bytes_release(owner);
+  scr_shared_release(storage);
+  return view;
+}
+void scr_shared_f32_release_handle(double handle) {
+  if (scriptc_shared_f32_release(handle) != 0)
+    scr_throw_error_msg(SCR_ERR_RANGE, "invalid shared float32 handle", sizeof("invalid shared float32 handle") - 1);
+}
+
+#if (defined(__wasm__) || defined(__wasi__)) && defined(SCR_LIB) && defined(SCR_THREAD_INSTANCES)
+/* The host dispatches coarse jobs to persistent pthread contexts. libc owns
+ * each worker's independent stack/TLS, and joins reclaim them. The entry
+ * import runs only after wasi_thread_start has installed that context. */
+__attribute__((import_module("scriptc:threads"), import_name("worker_entry")))
+extern void scr_wasm_worker_entry(int32_t slot);
+#define SCR_WASM_POOL_LIMIT 64
+static pthread_t scr_wasm_pool_threads[SCR_WASM_POOL_LIMIT];
+static bool scr_wasm_pool_active[SCR_WASM_POOL_LIMIT];
+static atomic_bool scr_wasm_memory_claimed;
+int32_t scriptc_memory_claim(void) {
+  bool expected = false;
+  return atomic_compare_exchange_strong_explicit(&scr_wasm_memory_claimed, &expected, true,
+    memory_order_acq_rel, memory_order_acquire) ? 0 : -1;
+}
+static void *scr_wasm_pool_entry(void *argument) {
+  scr_wasm_worker_entry((int32_t)(uintptr_t)argument);
+  return NULL;
+}
+int32_t scriptc_thread_spawn(int32_t slot, uint32_t stack_bytes) {
+  if (slot < 0 || slot >= SCR_WASM_POOL_LIMIT) return 22;
+  scr_shared_f32_enter();
+  if (scr_wasm_pool_active[slot]) { scr_shared_f32_leave(); return 16; }
+  scr_wasm_pool_active[slot] = true;
+  scr_shared_f32_leave();
+  pthread_attr_t attributes;
+  int result = pthread_attr_init(&attributes);
+  if (!result) {
+    result = pthread_attr_setstacksize(&attributes, stack_bytes);
+    if (!result)
+      result = pthread_create(&scr_wasm_pool_threads[slot], &attributes,
+        scr_wasm_pool_entry, (void *)(uintptr_t)slot);
+    pthread_attr_destroy(&attributes);
+  }
+  if (result) {
+    scr_shared_f32_enter();
+    scr_wasm_pool_active[slot] = false;
+    scr_shared_f32_leave();
+  }
+  return result;
+}
+int32_t scriptc_thread_join(int32_t slot) {
+  if (slot < 0 || slot >= SCR_WASM_POOL_LIMIT) return 22;
+  scr_shared_f32_enter();
+  bool active = scr_wasm_pool_active[slot];
+  pthread_t thread = scr_wasm_pool_threads[slot];
+  scr_shared_f32_leave();
+  if (!active) return 22;
+  int result = pthread_join(thread, NULL);
+  if (!result) {
+    scr_shared_f32_enter();
+    scr_wasm_pool_active[slot] = false;
+    scr_shared_f32_leave();
+  }
+  return result;
+}
+#endif

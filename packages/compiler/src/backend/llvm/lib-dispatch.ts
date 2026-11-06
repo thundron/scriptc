@@ -1345,6 +1345,7 @@ export function emitLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlValue {
     case "qs":
       return host.emitPathUrlLibCall(e);
     case "math":
+    case "f32x4":
     case "num":
     case "str":
     case "regexp":
@@ -1430,6 +1431,7 @@ export function emitLibCall(host: LlvmEmitterContext, e: LibCallExpr): LlValue {
       if (e.fn === "array.foreignThrow") return emitArrayForeignThrow(host, e);
       return host.emitGenericLibCall(e);
     case "collection":
+    case "shared":
     case "record":
     case "disposable":
     case "punycode":

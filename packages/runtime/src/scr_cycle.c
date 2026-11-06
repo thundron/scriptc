@@ -165,6 +165,38 @@ void scr_weak_dispose(void *object) {
   if (scr_weak_dispose_hook) scr_weak_dispose_hook(object);
 }
 
+#define SCR_WEAK_OBSERVER_LIMIT 8
+static SCR_TL void (*scr_weak_observers[SCR_WEAK_OBSERVER_LIMIT])(void *);
+static SCR_TL size_t scr_weak_observer_count;
+static void scr_weak_dispatch(void *object) {
+  /* A callback may unregister itself or free another observed object. */
+  void (*callbacks[SCR_WEAK_OBSERVER_LIMIT])(void *);
+  size_t count = scr_weak_observer_count;
+  for (size_t i = 0; i < count; i++) callbacks[i] = scr_weak_observers[i];
+  for (size_t i = 0; i < count; i++) callbacks[i](object);
+}
+void scr_weak_observer_install(void (*observer)(void *)) {
+  if (!observer || scr_weak_dispose_hook == observer) return;
+  if (scr_weak_dispose_hook != scr_weak_dispatch) {
+    scr_weak_observer_count = 0;
+    if (scr_weak_dispose_hook) scr_weak_observers[scr_weak_observer_count++] = scr_weak_dispose_hook;
+  }
+  for (size_t i = 0; i < scr_weak_observer_count; i++) if (scr_weak_observers[i] == observer) return;
+  if (scr_weak_observer_count == SCR_WEAK_OBSERVER_LIMIT) scr_trap("scriptc: too many weak observers\n");
+  scr_weak_observers[scr_weak_observer_count++] = observer;
+  scr_weak_dispose_hook = scr_weak_observer_count == 1 ? observer : scr_weak_dispatch;
+}
+void scr_weak_observer_remove(void (*observer)(void *)) {
+  if (scr_weak_dispose_hook == observer) {scr_weak_dispose_hook = NULL; scr_weak_observer_count = 0; return;}
+  if (scr_weak_dispose_hook != scr_weak_dispatch) return;
+  for (size_t i = 0; i < scr_weak_observer_count; i++) if (scr_weak_observers[i] == observer) {
+    for (size_t j = i + 1; j < scr_weak_observer_count; j++) scr_weak_observers[j - 1] = scr_weak_observers[j];
+    scr_weak_observer_count--;
+    scr_weak_dispose_hook = scr_weak_observer_count == 0 ? NULL : scr_weak_observer_count == 1 ? scr_weak_observers[0] : scr_weak_dispatch;
+    return;
+  }
+}
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

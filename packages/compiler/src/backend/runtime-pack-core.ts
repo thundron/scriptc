@@ -87,6 +87,8 @@ export interface RuntimePackManifest {
 }
 
 export interface RuntimeFeatureSet extends NativeLinkFeatures {
+  /** Link-plan fact, not a source or environment opt-in. */
+  wasmThreads?: boolean;
   workers: boolean;
   youngNursery: boolean;
   eventTarget: boolean;
@@ -516,6 +518,8 @@ export function selectRuntimePackArtifacts(
   mode: RuntimePackMode = "executable",
 ): RuntimePackArtifacts {
   const features = effectiveRuntimeFeatures(requested, env);
+  if (mode === "library-thread" && manifest.target.object_format === "wasm")
+    features.wasmThreads = true;
   if (features.workers && (mode !== "executable" || manifest.target.object_format === "wasm"))
     throw new RuntimePackError("worker threads require a native static executable", "unsupported");
   const key = runtimePackFlavorKey(manifest, flavor, mode);

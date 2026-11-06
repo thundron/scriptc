@@ -61,6 +61,7 @@ import { THREADS_MODULE } from "./threads-import.js";
 import { NODE_API_MODULE } from "./node-api-import.js";
 import { erasedTypeOnlyImport } from "./type-only-imports.js";
 import { EXPERIMENTAL_MODULE } from "./experimental-import.js";
+import { F32_MODULE } from "./f32-import.js";
 import { readProjectConfig } from "../project-config.js";
 import { recordFrontendIslandReads, setFrontendIslands } from "../node-islands/boundary.js";
 import { typePatchDiagnostics } from "./type-patches/layer.js";
@@ -415,6 +416,7 @@ function detectAutoPackages(
         spec === CONTRACT_TYPES_MODULE ||
         spec === THREADS_MODULE ||
         spec === EXPERIMENTAL_MODULE ||
+        spec === F32_MODULE ||
         spec === NODE_API_MODULE
       )
         continue;

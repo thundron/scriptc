@@ -1,3 +1,4 @@
+import { f32ImportsOf } from "../f32-import.js";
 import { programCreatesWrappers, routeWrapperConsumers } from "./primitive-wrappers.js";
 import type { DiagnosticCode } from "../../diagnostics/codes.js";
 import { markInferredFactChecks, shapeOverlayFileNames } from "../shape-inference/index.js";
@@ -4230,6 +4231,10 @@ export class Lowerer {
    * (buffers.ts, t262-dc §2.4). Sets IrModule.bytesHeadersMutable and arms
    * the scr_js_buffers views registry in %main. */
   buffersMutable = false;
+  /** SIMD memory operations currently require fixed, non-detachable views. */
+  readonly f32FixedViewCalls = new Map<string, SrcLoc>();
+  readonly f32ImportsPresent: boolean;
+  readonly f32ImportBindings: ReadonlyMap<ts.SourceFile, ReadonlySet<string>>;
   readonly liftedFns: IrFunction[] = [];
   /** `for … of` and `for await` loops over untyped iterables, by their
    * generator-kind local (generator-dynamic-dispatch.ts steps the program's
@@ -4610,6 +4615,7 @@ export class Lowerer {
       setTable("sloppyRecordWrites", this.sloppyRecordWrites),
       setTable("recordFieldDeletes", this.recordFieldDeletes),
       setTable("freezableArrays", this.freezableArrays),
+      irDataTable("f32FixedViewCalls", this.f32FixedViewCalls),
       checkedTable("moduleOrder", () => this.moduleOrder.length),
       checkedTable("diags", () => this.diags.length),
       // The shared-module plan runs inside the first unit that lowers a
@@ -4878,6 +4884,8 @@ export class Lowerer {
     "generalNodeStreams",
     "dynNodeStreams",
     "targetPlatform",
+    "f32ImportsPresent",
+    "f32ImportBindings",
     "startupCrash",
     "projectCheckJs",
     "libraryCallbacks",
@@ -5444,6 +5452,8 @@ export class Lowerer {
     readonly moduleOrder: ts.SourceFile[],
     mode: LowererMode = {},
   ) {
+    this.f32ImportBindings = f32ImportsOf(moduleOrder);
+    this.f32ImportsPresent = this.f32ImportBindings.size !== 0;
     // The mode's options, sorted by name; the values derived from them follow.
     this.alreadyFlushed = mode.alreadyFlushed ?? new Set();
     // Lenient forms are IR types of the other pass's shape tables: only the
@@ -10377,6 +10387,16 @@ export class Lowerer {
     // A mutable-buffers program arms the views registry before any buffer
     // exists, so every buffer in it is detachable from the start.
     const buffersMutable = this.buffersMutable && installMutableBuffersArm(functions);
+    if (buffersMutable)
+      for (const loc of this.f32FixedViewCalls.values())
+        this.diags.push(
+          unsupportedDiag(
+            "SC1090",
+            loc,
+            "f32 vector operations in a program that can resize or detach ArrayBuffers",
+            "use fixed, non-detachable Float32Array views for vector operations",
+          ),
+        );
     installFetchBodyWebStreams(this, functions);
     returnDispatchReceivers(this, functions);
 

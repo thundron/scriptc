@@ -9891,6 +9891,41 @@ export function lowerExprStatement(lowerer: Lowerer, expr: ts.Expression): IrStm
         }
         if (!expr.left.questionDotToken) {
           const recv = tryLowerExpression(lowerer, expr.left.expression);
+          // JavaScript aliases can add own keys absent from the inferred
+          // closed layout. Box the live record so later aliases observe
+          // those keys without changing its declared native slots.
+          const propertyName = expr.left.name.text;
+          const shape =
+            isJsSourceFile(ts.getSourceFileOfNode(expr)) && recv?.type.kind === "record"
+              ? lowerer.shapes.get(recv.type.shapeId)
+              : undefined;
+          if (
+            recv &&
+            shape &&
+            !shape.tuple &&
+            !shape.indexValue &&
+            !shape.fields.some((field) => field.name.startsWith("%")) &&
+            !OBJECT_PROTOTYPE_KEYS.has(propertyName) &&
+            !shape.fields.some((field) => field.name === propertyName) &&
+            lowerer.dynConvertible(recv.type)
+          ) {
+            const loc = locOf(expr);
+            return {
+              kind: "exprStmt",
+              expr: {
+                kind: "libCall",
+                fn: "dyn.keySet",
+                args: [
+                  lowerer.coerceToExpected(recv, DYN),
+                  { kind: "strLit", value: expr.left.name.text, type: STRING, loc },
+                  lowerer.lowerExprExpecting(expr.right, DYN),
+                ],
+                type: VOID,
+                loc,
+              },
+              loc,
+            };
+          }
           if (
             recv &&
             (recv.type.kind === "dyn" ||

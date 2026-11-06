@@ -257,6 +257,8 @@ function resolveLibrarySection(
     collectSymbol: profile.collectSymbol,
     resultResetSymbol: profile.resultResetSymbol,
     threadInstances: profile.instancePerThread,
+    ...(profile.wasmFeatures === undefined ? {} : { wasmFeatures: profile.wasmFeatures }),
+    ...(profile.wasmMemory === undefined ? {} : { wasmMemory: profile.wasmMemory }),
     // Host-callback channels: declaration order is the runtime slot
     // assignment, and the unregistered-call trap text is assembled HERE,
     // once, for consistent constant bytes (a DETECTED
@@ -564,6 +566,14 @@ export function prepareLibrary(
       diagnostics: decorateLibraryRefusals(diagnostics, profile),
       sourceTexts: fe.sourceTexts(),
     });
+    if (profile.wasmMemory !== undefined && buildPlatform !== "wasi")
+      return fail([
+        targetRefusalDiag(buildPlatform, "the explicit Wasm memory ABI", {
+          file: profilePath,
+          start: 0,
+          end: 0,
+        }),
+      ]);
     // Report the package-specific refusal before general preflight errors.
     const npmRefused = fe.npmStatic.filter((s) => s.status === "refused");
     if (npmRefused.length > 0) {
@@ -817,6 +827,24 @@ export function libraryWasmExports(profile: LibraryProfile): string[] {
     profile.initSymbol,
     "scriptc_alloc",
     "scriptc_free",
+    ...(profile.wasmMemory === undefined
+      ? []
+      : [
+          "scriptc_shared_f32_new",
+          "scriptc_shared_f32_release",
+          "scriptc_shared_f32_retain",
+          "scriptc_shared_f32_data",
+          "scriptc_shared_f32_length",
+        ]),
+    ...(profile.wasmMemory?.shared
+      ? [
+          "wasi_thread_start",
+          "scriptc_thread_spawn",
+          "scriptc_thread_join",
+          "scriptc_thread_dispose",
+          "scriptc_memory_claim",
+        ]
+      : []),
     ...(profile.collectSymbol === null ? [] : [profile.collectSymbol]),
     ...(profile.resultResetSymbol === null ? [] : [profile.resultResetSymbol]),
     ...(profile.sidecar === null
@@ -830,7 +858,23 @@ export function libraryWasmRefusal(
   profile: LibraryProfile,
   sanitize: boolean,
 ): ScrDiagnostic | null {
-  const reserved = new Set(["scriptc_alloc", "scriptc_free", "memory", "_initialize", "_start"]);
+  const reserved = new Set([
+    "scriptc_alloc",
+    "scriptc_free",
+    "memory",
+    "_initialize",
+    "_start",
+    "scriptc_shared_f32_new",
+    "scriptc_shared_f32_release",
+    "scriptc_shared_f32_retain",
+    "scriptc_shared_f32_data",
+    "scriptc_shared_f32_length",
+    "wasi_thread_start",
+    "scriptc_thread_spawn",
+    "scriptc_thread_join",
+    "scriptc_thread_dispose",
+    "scriptc_memory_claim",
+  ]);
   const symbols = [
     profile.initSymbol,
     profile.sinkRegisterSymbol,
@@ -843,8 +887,8 @@ export function libraryWasmRefusal(
   ];
   const surface = sanitize
     ? "sanitized library builds"
-    : profile.instancePerThread
-      ? "thread-instanced libraries (instantiate separate Wasm instances instead)"
+    : profile.instancePerThread && !profile.wasmMemory?.shared
+      ? "thread-instanced libraries without the shared-memory Wasm ABI"
       : profile.localizeRuntime
         ? "runtime localization (Wasm instances already isolate their runtime)"
         : symbols.some((symbol) => symbol != null && reserved.has(symbol))

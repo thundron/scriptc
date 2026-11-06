@@ -110,15 +110,21 @@ static ScrStr *scr_fs_win_utf8(const WCHAR *text, size_t length) {
 #else /* !_WIN32 */
 
 #include <arpa/inet.h>
+#if !defined(__wasi__)
 #include <ifaddrs.h>
 #include <net/if.h>
+#endif
 #include <netinet/in.h>
 #include <pthread.h>
+#if !defined(__wasi__)
 #include <pwd.h>
+#endif
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/utsname.h>
+#if !defined(__wasi__)
 #include <termios.h>
+#endif
 #include <unistd.h>
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
 #include <net/if_dl.h>
@@ -2364,6 +2370,11 @@ ScrIfaddrs *scr_os_ifaddrs(void) {
   }
   free(adapters);
   return s;
+}
+#elif defined(__wasi__)
+ScrIfaddrs *scr_os_ifaddrs(void) {
+  scr_trap("scriptc: network interface enumeration is unavailable on WASI\n");
+  return NULL;
 }
 #else
 /* libuv's uv__ifaddr_exclude for the address pass, plus the explicit

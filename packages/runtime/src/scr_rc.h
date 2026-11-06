@@ -741,6 +741,11 @@ static inline void *scr_cyc_alloc_inline(size_t size, ScrCycType *type) {
   scr_cyc_live++;
   return h + 1;
 }
+/* Optional weak observers share the existing free hook. A single observer
+ * keeps the direct-call path; no observer keeps the ordinary NULL fast path. */
+void scr_weak_observer_install(void (*observer)(void *));
+void scr_weak_observer_remove(void (*observer)(void *));
+
 /* scr_weak_dispose's NULL test inline, for the runtime's hot frees: the
  * hook stays NULL unless the program creates a weak collection or keeps a
  * checked record's source, so the free costs one predictable branch, not a

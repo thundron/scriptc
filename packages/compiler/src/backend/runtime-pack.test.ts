@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { chmod, mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
-import { describe, expect, test } from "vitest";
+import { basename, dirname, join, relative } from "node:path";
+import { describe, expect, test, vi } from "vitest";
 import { compilerReleaseVersion } from "../library/sidecar.js";
 import { snapshotNativeArtifactDependencies } from "./native-toolchain.js";
 import { nativeArtifactDependenciesStillMatch } from "./native/artifact-stamps.js";
@@ -28,6 +28,7 @@ import {
   LINUX_X64_GNU_TARGET,
   MACOS_ARM64_TARGET,
   WINDOWS_X64_MSVC_TARGET,
+  WASM32_WASI_TARGET,
   type NativeTargetSpec,
 } from "./targets.js";
 
@@ -429,6 +430,103 @@ describe("runtime pack manifests", () => {
     };
     expect((await createNativeLinkPlan(options)).hugeText).toBe(true);
     expect((await createNativeLinkPlan({ ...options, hugeText: false })).hugeText).toBeUndefined();
+  });
+
+  test.each([MACOS_ARM64_TARGET, WASM32_WASI_TARGET])(
+    "explicit pack selection is authoritative across library modes ($name)",
+    async (target) => {
+      const first = await fixture(target);
+      const second = await fixture(target);
+      for (const pack of [first, second]) {
+        await writeFile(
+          join(pack.root, "runtime-pack.json"),
+          JSON.stringify({
+            ...pack.manifest,
+            flavors: {
+              ...pack.manifest.flavors,
+              "library-release": pack.manifest.flavors.release,
+              "library-thread-release": pack.manifest.flavors.release,
+            },
+          }),
+        );
+      }
+      const selections = [];
+      for (const pack of [first, second]) {
+        for (const mode of ["executable", "library", "library-thread"] as const) {
+          const selection = await loadRuntimePack({
+            target,
+            features: BASE,
+            optimization: "release",
+            mode,
+            env: { SCRIPTC_RUNTIME_PACK: relative(process.cwd(), pack.root) },
+            resolver: () => {
+              throw new Error("must not resolve an installed pack");
+            },
+          });
+          expect(selection.root).toBe(pack.root);
+          expect(selection.dependencyPaths).toContain(pack.packagePath);
+          expect(selection.sourceDependencies.every((d) => d.path.startsWith(pack.root))).toBe(
+            true,
+          );
+          selections.push(selection);
+        }
+      }
+      expect(selections[0]!.sourceDependencies).not.toEqual(selections[3]!.sourceDependencies);
+    },
+  );
+
+  test("the library loader honors the process environment without caller forwarding", async () => {
+    const { root, manifest } = await fixture();
+    await writeFile(
+      join(root, "runtime-pack.json"),
+      JSON.stringify({
+        ...manifest,
+        flavors: { "library-release": manifest.flavors.release },
+      }),
+    );
+    vi.stubEnv("SCRIPTC_RUNTIME_PACK", root);
+    try {
+      const selection = await loadRuntimePack({
+        target: MACOS_ARM64_TARGET,
+        features: BASE,
+        optimization: "release",
+        mode: "library",
+        resolver: () => {
+          throw new Error("must not resolve an installed pack");
+        },
+      });
+      expect(selection.root).toBe(root);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  test("invalid overrides cannot fall back or bypass identity and hash verification", async () => {
+    const installed = await fixture();
+    const explicit = await fixture(WASM32_WASI_TARGET);
+    const options = {
+      target: MACOS_ARM64_TARGET,
+      features: BASE,
+      optimization: "release" as const,
+      resolver: () => installed.packagePath,
+    };
+    await expect(
+      loadRuntimePack({ ...options, env: { SCRIPTC_RUNTIME_PACK: "" } }),
+    ).rejects.toThrow("must name");
+    await expect(
+      loadRuntimePack({
+        ...options,
+        env: { SCRIPTC_RUNTIME_PACK: join(explicit.root, "missing") },
+      }),
+    ).rejects.toBeInstanceOf(RuntimePackError);
+    await expect(
+      loadRuntimePack({ ...options, env: { SCRIPTC_RUNTIME_PACK: explicit.root } }),
+    ).rejects.toBeInstanceOf(RuntimePackError);
+    const valid = await fixture();
+    await writeFile(join(valid.root, "artifacts/base.o"), "tampered");
+    await expect(
+      loadRuntimePack({ ...options, env: { SCRIPTC_RUNTIME_PACK: valid.root } }),
+    ).rejects.toThrow("mismatch");
   });
 
   test("selection chooses the most-specific variant and feature archive", async () => {

@@ -41,6 +41,7 @@ import {
   type RuntimePackStore,
 } from "../backend/runtime-pack-native.js";
 import { RuntimePackError } from "../backend/runtime-pack-core.js";
+import { codegenServerName } from "../backend/codegen-server.js";
 import {
   NativeCodegenError,
   nativePartitionPaths,
@@ -163,6 +164,9 @@ function nativeProfile(options: CompileRequestOptions): NativeProfileOptions | u
 /** Shared frontend semantics with native processes for code generation and linking. */
 export class NativeCompiler {
   private readonly frontend: FrontendFactory;
+  /** The shared code generation server this build's helper commands run on,
+   * or null when the build runs the helper as its own process. */
+  private readonly codegenServer: string | null;
 
   constructor(
     readonly toolchain: NativeToolchain,
@@ -171,6 +175,11 @@ export class NativeCompiler {
      * build on this machine shares, even one whose build cache starts empty. */
     private readonly state: NativeCache | null = null,
   ) {
+    this.codegenServer = codegenServerName(
+      toolchain.helperExecutable,
+      toolchain.compilerVersion,
+      toolchain.target.llvmTriple,
+    );
     const evaluator = toolchain.comptimeExecutable;
     this.frontend = (entry, npmStatic, externalTypes, libraryNpmStatic, options) =>
       runNativeFrontend(
@@ -294,6 +303,7 @@ export class NativeCompiler {
       compilerVersion: toolchain.compilerVersion,
       target: toolchain.target,
       helper: toolchain.helper,
+      server: this.codegenServer,
       ...this.helperVerification(),
     };
     let key: string | null = null;

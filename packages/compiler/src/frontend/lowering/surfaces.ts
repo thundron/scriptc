@@ -580,6 +580,12 @@ export const SET_COMBINE_METHODS = new Set([
   "isDisjointFrom",
 ]);
 
+/** The keyed-collection classes whose `prototype` reads, members and
+ * constructors have a checked-dynamic form (scr_dyn_collections.c). */
+export const DYN_COLLECTION_CLASSES = ["Set", "Map", "WeakMap", "WeakSet"] as const;
+
+export type DynCollectionClass = (typeof DYN_COLLECTION_CLASSES)[number];
+
 export type CompoundOp = "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>" | ">>>";
 
 export const COMPOUND_ASSIGN_OPS: Partial<Record<ts.SyntaxKind, CompoundOp>> = {
@@ -2278,6 +2284,22 @@ const DNS_ERROR_CODES: Record<string, string> = {
   CANCELLED: "ECANCELLED",
 };
 
+/** node:dns's getaddrinfo hint flags per TARGET libc. Node re-exports the
+ * three values its c-ares binding compiled against (src/cares_wrap.cc's
+ * NODE_DEFINE_CONSTANT of AI_ADDRCONFIG/AI_ALL/AI_V4MAPPED), so they are
+ * the target's <netdb.h> macros, not a portable libuv normalization:
+ * glibc and musl number them 0x20/0x10/0x8, while the BSD headers (macOS)
+ * and Windows' ws2tcpip.h use 0x400/0x100/0x800. Node:dns's own values
+ * follow the platform the program runs on, which is why the differential
+ * corpus sees 32 16 8 on Linux and 1024 256 2048 on macOS. */
+const DNS_HINT_CONSTS: Record<string, Record<string, number> | undefined> = {
+  // AI_ADDRCONFIG, AI_ALL, AI_V4MAPPED (glibc netdb.h; musl matches).
+  linux: { ADDRCONFIG: 0x0020, ALL: 0x0010, V4MAPPED: 0x0008 },
+  // BSD netdb.h (macOS/iOS) and ws2tcpip.h (win32) agree.
+  darwin: { ADDRCONFIG: 0x0400, ALL: 0x0100, V4MAPPED: 0x0800 },
+  win32: { ADDRCONFIG: 0x0400, ALL: 0x0100, V4MAPPED: 0x0800 },
+};
+
 /** Builtin-module CONSTANTS (value reads of named imports): each lowers to
  * a literal of its value's kind. The bare-module values are the TARGET
  * platform's (builtinModuleConstOf applies target-specific overrides,
@@ -2312,9 +2334,12 @@ export const BUILTIN_MODULE_CONSTS: Record<
   zlib: Object.fromEntries(
     Object.entries(ZLIB_CONSTANTS).filter(([name]) => !name.startsWith("BROTLI")),
   ),
-  // getaddrinfo hints use the target's AI_* values: Linux defaults here,
-  // with Darwin and Winsock overrides below. Resolver errors are strings;
-  // node:dns/promises exports those strings, but not the hint flags.
+  // node:dns's getaddrinfo hints are the target libc's AI_* values
+  // (builtinModuleConstOf selects them from DNS_HINT_CONSTS); the names
+  // live here so the inventory, fence and manifest walks see them, and
+  // the glibc numbers are the fallback for a target with no entry. The
+  // error codes are the module's exported strings; node:dns/promises
+  // exports the same ones.
   dns: { ADDRCONFIG: 32, ALL: 16, V4MAPPED: 8, ...DNS_ERROR_CODES },
   "dns/promises": { ...DNS_ERROR_CODES },
 };
@@ -3157,15 +3182,6 @@ function buildAmbientSurfaceFns(): readonly AmbientSurfaceRow[] {
   ];
 }
 
-/** Darwin's netdb.h and Winsock use high-bit getaddrinfo hint flags,
- * unlike Linux's low-bit values. Never read the compiling host's flags. */
-const DARWIN_TARGET_CONSTS: Record<
-  string,
-  Record<string, string | number | boolean | undefined> | undefined
-> = {
-  dns: { ADDRCONFIG: 0x400, ALL: 0x100, V4MAPPED: 0x800 },
-};
-
 /** The win32-target overrides of the bare modules' constants: path's
  * constants ARE the path/win32 namespace's, and os.EOL is CRLF (Node's
  * `isWindows ? '\r\n' : '\n'`). */
@@ -3175,7 +3191,6 @@ const WIN32_TARGET_CONSTS: Record<
 > = {
   path: BUILTIN_MODULE_CONSTS["path/win32"],
   os: { EOL: "\r\n", devNull: "\\\\.\\nul" },
-  dns: DARWIN_TARGET_CONSTS["dns"],
 };
 
 /** builtinModuleFns() with the platform-conditional modules bound per
@@ -3231,6 +3246,7 @@ export const FS_CALLBACK_MEMBERS = new Set([
   "rmdir",
   "unlink",
   "open",
+  "opendir",
   "close",
   "fstat",
   "ftruncate",
@@ -3322,14 +3338,15 @@ export function builtinModuleConstOf(
   module: string,
   member: string,
 ): string | number | boolean | undefined {
-  const overrides =
-    lowerer.targetPlatform === "win32"
-      ? WIN32_TARGET_CONSTS
-      : lowerer.targetPlatform === "darwin"
-        ? DARWIN_TARGET_CONSTS
-        : undefined;
-  if (overrides) {
-    const mod = ownEntry(overrides, module);
+  // node:dns's hint flags are the TARGET's libc macros, so they are
+  // selected per platform rather than taken from the shared table.
+  if (module === "dns") {
+    const hints = ownEntry(DNS_HINT_CONSTS, lowerer.targetPlatform);
+    const hint = hints ? ownEntry(hints, member) : undefined;
+    if (hint !== undefined) return hint;
+  }
+  if (lowerer.targetPlatform === "win32") {
+    const mod = ownEntry(WIN32_TARGET_CONSTS, module);
     const w = mod ? ownEntry(mod, member) : undefined;
     if (w !== undefined) return w;
   }

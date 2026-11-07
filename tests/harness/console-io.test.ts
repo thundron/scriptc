@@ -208,47 +208,56 @@ function stagedVisibility(
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** How many bytes a FIFO accepts before the next write blocks: 65536 on Linux,
+ * 8192 on darwin. The probe has to fill exactly the capacity in one write that
+ * completes, so the test asks the FIFO instead of assuming the Linux number. */
+function fifoCapacity(readFd: number, fifo: string): number {
+  const probeFd = openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK);
+  const byte = Buffer.from("a");
+  let filled = 0;
+  try {
+    for (;;) {
+      writeSync(probeFd, byte);
+      filled += 1;
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EAGAIN") throw err;
+  } finally {
+    closeSync(probeFd);
+  }
+  // Empty the FIFO again: the write end is closed, so this ends at EOF.
+  const drained = Buffer.alloc(filled);
+  let offset = 0;
+  while (offset < filled) {
+    const n = readSync(readFd, drained, offset, filled - offset, null);
+    if (n === 0) break;
+    offset += n;
+  }
+  expect(offset).toBe(filled);
+  return filled;
+}
+
 /** Give the probe a FIFO as fd 1, so a write that starts after the FIFO is
  * full is interrupted with nothing transferred. A pipe read by this process
  * would have been drained into the stream's buffer before the probe's short
  * line was flushed, and the write would find room and complete.
  *
- * The parent fills the FIFO to its actual capacity before spawning the probe.
- * The probe marks stderr, buffers one short line, then writes to stderr again:
- * that publish of the line blocks on the full FIFO.
+ * The probe fills the FIFO, marks stderr, buffers one short line, then
+ * writes to stderr again: that publish of the line blocks on the full FIFO.
  * The signal lands while it is blocked; afterwards every byte is drained.
- * Returns everything that arrived. */
+ * Returns everything that arrived, and the fill size the probe used. */
 async function interruptedFlush(
   cmd: string,
-): Promise<{ stdout: Buffer; stderr: string; code: number | null; filled: number }> {
+): Promise<{ stdout: Buffer; stderr: string; code: number | null; fill: number }> {
   const dir = mkdtempSync(join(tmpdir(), "scriptc-console-io-"));
   const fifo = join(dir, "stdout.fifo");
   execFileSync("mkfifo", [fifo]);
   const readFd = openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK);
+  const fill = fifoCapacity(readFd, fifo);
   const writeFd = openSync(fifo, constants.O_WRONLY);
-  let filled = 0,
-    writeOpen = true;
+  let writeOpen = true;
   try {
-    // FIFO capacity is not universally 64 KiB (Darwin may allocate a smaller
-    // FIFO). Fill through a separate nonblocking open file description, leaving
-    // the child's descriptor blocking so the interrupted write is genuine.
-    const filler = openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK);
-    try {
-      const chunk = Buffer.alloc(4096, "a");
-      while (filled < 16 * 1024 * 1024) {
-        try {
-          filled += writeSync(filler, chunk);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "EAGAIN") break;
-          throw error;
-        }
-      }
-      if (filled === 0 || filled >= 16 * 1024 * 1024)
-        throw new Error("could not fill the probe FIFO");
-    } finally {
-      closeSync(filler);
-    }
-    const child = spawn(cmd, ["--prefilled"], { stdio: ["ignore", writeFd, "pipe"] });
+    const child = spawn(cmd, [String(fill)], { stdio: ["ignore", writeFd, "pipe"] });
     closeSync(writeFd);
     writeOpen = false;
     const stdout: Buffer[] = [];
@@ -306,7 +315,7 @@ async function interruptedFlush(
       stdout: Buffer.concat(stdout),
       stderr: Buffer.concat(stderr).toString("utf8"),
       code,
-      filled,
+      fill,
     };
   } finally {
     if (writeOpen) closeSync(writeFd);
@@ -617,7 +626,7 @@ describe(`buffered stdout (--stdout-buffering)${sanitize ? " (sanitized)" : ""}`
       const trailer = "interrupted=1\n";
       expect(res.stdout.toString("utf8").endsWith(trailer)).toBe(true);
       const body = res.stdout.subarray(0, res.stdout.length - trailer.length);
-      expect(body.toString("utf8")).toBe("a".repeat(res.filled) + "pending-line\n");
+      expect(body.toString("utf8")).toBe("a".repeat(res.fill) + "pending-line\n");
     },
   );
 });

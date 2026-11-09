@@ -472,6 +472,9 @@ void scr_library_arena_reset(void) {
 void scr_library_collect(void) {
   scr_library_arena_reset();
   scr_collect_cycles();
+#if SCR_WASM_SMALL_ALLOC
+  scr_wsa_trim();
+#endif
 }
 
 /* ── marshalling helpers (both emissions call exactly these) ──────────── */

@@ -2575,6 +2575,21 @@ export function lowerStdlibMethodCall(
   ) => lowerToNumberArguments(lowerer, nodes, lowerOther);
   const afterArguments = (stmts: IrStmt[], result: IrExpr): IrExpr =>
     stmts.length === 0 ? result : { kind: "seqExpr", stmts, result, type: result.type, loc };
+  if (
+    staticMath &&
+    name === "hypot" &&
+    (call.arguments.nodes.length === 2 || call.arguments.nodes.length === 3) &&
+    call.arguments.nodes.every((argument) => !ts.isSpreadElement(argument))
+  ) {
+    const { stmts, values } = mathArgs(call.arguments.nodes);
+    return afterArguments(stmts, {
+      kind: "libCall",
+      fn: values.length === 2 ? "math.hypot2" : "math.hypot3",
+      args: values,
+      type: F64,
+      loc,
+    });
+  }
   // Math.hypot, and Math.max/Math.min with a spread among other arguments
   // (`Math.max(...xs, 5)`): the arguments in order, spreads flattened, as
   // one number[] the runtime folds.

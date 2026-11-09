@@ -816,6 +816,7 @@ export function emitDenseArrayPop(
   element: IrType,
   empty: string,
   slow: string,
+  nonempty = false,
 ): string {
   const B = host.B;
   const kind = slotKind(host, acc, element);
@@ -830,10 +831,11 @@ export function emitDenseArrayPop(
     len = B.tmp(),
     none = B.tmp();
   loadArrCount(host, len, lenPtr, host.fieldAliasAttachment(lenPtr));
-  B.line(`${none} = icmp eq ${size} ${len}, 0`);
-  const check = B.newLabel("arr.pop.check"),
+  if (!nonempty) B.line(`${none} = icmp eq ${size} ${len}, 0`);
+  const check = B.newLabel(nonempty ? "arr.pop.nonempty" : "arr.pop.check"),
     dense = B.newLabel("arr.pop.dense");
-  B.condBr(none, empty, check);
+  if (nonempty) B.br(check);
+  else B.condBr(none, empty, check);
   B.startBlock(check);
   const filledPtr = header(SCR_ARR_FIELD.filled),
     filled = B.tmp(),
@@ -1006,5 +1008,123 @@ export function emitDenseArrayPush(
   B.startBlock(join);
   const result = B.tmp();
   B.line(`${result} = phi double [ ${fastValue}, %${fastEnd} ], [ ${slowValue}, %${slow} ]`);
+  return result;
+}
+
+/** A variadic append evaluates its values first, then commits one dense
+ * batch. The existing helper owns growth, sparse and non-dense cases. */
+export function emitDenseArrayPushMany(
+  host: LlvmEmitterContext,
+  array: string,
+  acc: ArrayAccess,
+  element: IrType,
+  values: string[],
+  fallback: () => string,
+): string {
+  const B = host.B,
+    size = host.sizeType,
+    kind = slotKind(host, acc, element);
+  const field = (index: number): string => {
+    const p = B.tmp();
+    B.line(`${p} = getelementptr inbounds %ScrArr, ptr ${array}, i32 0, i32 ${index}`);
+    host.markMemoryPointer(p, "array:header");
+    return p;
+  };
+  const lenPtr = field(SCR_ARR_FIELD.len),
+    capPtr = field(SCR_ARR_FIELD.cap),
+    len = B.tmp(),
+    cap = B.tmp();
+  loadArrCount(host, len, lenPtr, host.fieldAliasAttachment(lenPtr));
+  loadArrCount(host, cap, capPtr, host.fieldAliasAttachment(capPtr));
+  const dense = B.tmp(),
+    space = B.tmp(),
+    room = B.tmp(),
+    fits = B.tmp();
+  B.line(`${dense} = icmp ule ${size} ${len}, ${cap}`);
+  B.line(`${space} = sub ${size} ${cap}, ${len}`);
+  B.line(`${room} = icmp uge ${size} ${space}, ${values.length}`);
+  B.line(`${fits} = and i1 ${dense}, ${room}`);
+  const fast = B.newLabel("arr.push.batch"),
+    slow = B.newLabel("arr.push.batch.slow"),
+    join = B.newLabel("arr.push.batch.join");
+  B.condBr(fits, fast, slow);
+  B.startBlock(fast);
+  const dataPtr = field(SCR_ARR_FIELD.data),
+    data = B.tmp();
+  B.line(`${data} = load ptr, ptr ${dataPtr}${host.fieldAliasAttachment(dataPtr)}`);
+  const indexes = values.map((_v, i) => {
+    if (!i) return len;
+    const at = B.tmp();
+    B.line(`${at} = add nuw ${size} ${len}, ${i}`);
+    return at;
+  });
+  values.forEach((value, i) => {
+    const ptr = valuePointer(host, { offset: indexes[i]!, data }, kind);
+    let stored = value;
+    const ty =
+      acc === "f64"
+        ? "double"
+        : acc === "i32"
+          ? "i32"
+          : acc === "bool"
+            ? "i8"
+            : kind === "cref"
+              ? "i32"
+              : "ptr";
+    if (acc === "i32") {
+      stored = B.tmp();
+      B.line(`${stored} = fptosi double ${value} to i32`);
+    } else if (acc === "bool") {
+      stored = B.tmp();
+      B.line(`${stored} = zext i1 ${value} to i8`);
+    } else if (kind === "cref") {
+      stored = B.tmp();
+      for (const line of compactRefStoreLines(value, stored, `${stored}.r`))
+        B.line(line.trimStart());
+    }
+    B.line(`store ${ty} ${stored}, ptr ${ptr}${host.fieldAliasAttachment(ptr)}`);
+  });
+  const mark = B.newLabel("arr.push.batch.states"),
+    marked = B.newLabel("arr.push.batch.marked");
+  B.condBr(emitArrayHasStates(host, array), mark, marked);
+  B.startBlock(mark);
+  indexes.forEach((index) => {
+    const remain = B.tmp(),
+      near = B.tmp(),
+      state = B.tmp();
+    B.line(`${remain} = sub nuw ${size} ${cap}, ${index}`);
+    B.line(`${near} = getelementptr inbounds i8, ptr ${data}, ${size} ${remain}`);
+    B.line(
+      `${state} = getelementptr inbounds [${slotWidth(kind)} x i8], ptr ${near}, ${size} ${cap}, ${size} -1`,
+    );
+    host.markMemoryPointer(state, "array:present");
+    B.line(`store i8 ${SCR_ARR_VALUE}, ptr ${state}${host.fieldAliasAttachment(state)}`);
+  });
+  B.br(marked);
+  B.startBlock(marked);
+  const next = B.tmp();
+  B.line(`${next} = add nuw ${size} ${len}, ${values.length}`);
+  storeArrCount(host, next, lenPtr, host.fieldAliasAttachment(lenPtr));
+  const filledPtr = field(SCR_ARR_FIELD.filled),
+    filled = B.tmp(),
+    packed = B.tmp(),
+    increment = B.tmp(),
+    updated = B.tmp();
+  B.line(`${filled} = load i32, ptr ${filledPtr}${host.fieldAliasAttachment(filledPtr)}`);
+  B.line(`${packed} = icmp eq ${size} ${sizedFilled(host, filled)}, ${len}`);
+  B.line(`${increment} = add i32 ${filled}, ${values.length}`);
+  B.line(`${updated} = select i1 ${packed}, i32 ${increment}, i32 ${filled}`);
+  B.line(`store i32 ${updated}, ptr ${filledPtr}${host.fieldAliasAttachment(filledPtr)}`);
+  const fastResult = B.tmp();
+  B.line(`${fastResult} = ${sizeToDouble(size)} ${size} ${next} to double`);
+  const fastEnd = B.currentLabel();
+  B.br(join);
+  B.startBlock(slow);
+  const slowResult = fallback(),
+    slowEnd = B.currentLabel();
+  B.br(join);
+  B.startBlock(join);
+  const result = B.tmp();
+  B.line(`${result} = phi double [ ${fastResult}, %${fastEnd} ], [ ${slowResult}, %${slowEnd} ]`);
   return result;
 }

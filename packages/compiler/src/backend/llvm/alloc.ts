@@ -37,6 +37,8 @@ export interface AllocHost {
   readonly sizeType: "i32" | "i64";
   /** Inline the allocator fast paths (see the target rule above). */
   readonly inlineAlloc?: boolean;
+  /** Private wasm32 constant-size allocation with optimizer-visible clearing. */
+  readonly inlineWasmAlloc?: boolean;
   /** Emit the RC-audit object notes on the out-of-line paths (ShapeHost
    * objectAudit: only --sanitize builds count them). Absent means emit. */
   readonly objectAudit?: boolean;
@@ -314,6 +316,17 @@ function allocLines(
   stored: number,
 ): string[] {
   const S = host.sizeType;
+  const total = Number(size) + (cyc ? CYC_HDR : 0);
+  const literal = /^\d+$/.test(size);
+  const typeSize = /^ptrtoint \(ptr getelementptr \(%[\w.$]+, ptr null, i32 1\) to i32\)$/.test(
+    size,
+  );
+  if (
+    host.inlineWasmAlloc === true &&
+    S === "i32" &&
+    ((literal && total > 0 && total <= 512) || typeSize)
+  )
+    return wasmAllocLines(host, size, cyc);
   if (host.inlineAlloc !== true) {
     if (cyc) {
       host.declare(`declare ptr @scr_cyc_alloc(${S}, ptr)`);
@@ -768,6 +781,103 @@ function freeLines(
     `  call void @scr_rt_free(ptr ${blk})`,
     `  br label %sf.done`,
     `sf.done:`,
+  );
+  return lines;
+}
+
+/** Keep zeroing and descriptor accounting in the constructor, where LLVM
+ * can remove bytes immediately overwritten by field initialization. The
+ * size-class helper returns ordinary allocator-owned storage; releases,
+ * cycle collection and library result lifetimes stay unchanged. */
+function wasmAllocLines(host: AllocHost, size: string, cyc: CycHeader | null): string[] {
+  const S = host.sizeType;
+  const classes = [16, 32, 48, 64, 80, 96, 112, 128, 192, 256, 384, 512];
+  const literal = /^\d+$/.test(size);
+  const total = literal ? String(Number(size) + (cyc ? CYC_HDR : 0)) : "%wa.total";
+  const lines: string[] = [];
+  host.declare(`declare void @llvm.memset.p0.i32(ptr, i8, i32, i1)`);
+  host.needOom();
+  if (!literal) lines.push(`  %wa.total = add i32 ${size}, ${cyc ? CYC_HDR : 0}`);
+  lines.push(`  %wa.fits = icmp ule i32 ${size}, ${512 - (cyc ? CYC_HDR : 0)}`);
+  if (cyc) {
+    host.declare(`declare ptr @scr_cyc_alloc(${S}, ptr)`);
+    declareGlobal(host, `@scr_cyc_live = external global i32`);
+    lines.push(
+      `  %wa.idp = getelementptr inbounds ${CYC_TYPE}, ptr ${cyc.type}, i32 0, i32 3`,
+      `  %wa.tid = load i32, ptr %wa.idp`,
+      `  %wa.registered = icmp ne i32 %wa.tid, 0`,
+      `  %wa.ready = and i1 %wa.registered, %wa.fits`,
+      `  br i1 %wa.ready, label %wa.alloc, label %wa.slow`,
+    );
+  } else {
+    host.declare(`declare ptr @scr_rt_calloc(${S})`);
+    lines.push(`  br i1 %wa.fits, label %wa.alloc, label %wa.slow`);
+  }
+  lines.push(`wa.alloc:`);
+  let allocator: string;
+  if (literal) {
+    const cls = classes.find((n) => n >= Number(total))!;
+    allocator = `@scr_wsa_alloc_${cls}`;
+    host.declare(`declare noalias ptr ${allocator}()`);
+  } else {
+    // sizeof is an LLVM constant expression, authoritative for the target
+    // layout. LLVM folds this selection to one direct constant-class call.
+    allocator = `@scr_wsa_alloc_512`;
+    host.declare(`declare noalias ptr ${allocator}()`);
+    for (let i = classes.length - 2; i >= 0; i--) {
+      const callee = `@scr_wsa_alloc_${classes[i]!}`;
+      host.declare(`declare noalias ptr ${callee}()`);
+      lines.push(
+        `  %wa.le${i} = icmp ule i32 ${total}, ${classes[i]!}`,
+        `  %wa.fn${i} = select i1 %wa.le${i}, ptr ${callee}, ptr ${allocator}`,
+      );
+      allocator = `%wa.fn${i}`;
+    }
+  }
+  lines.push(
+    `  %wa.block = call noalias ptr ${allocator}()`,
+    `  %wa.null = icmp eq ptr %wa.block, null`,
+    `  br i1 %wa.null, label %wa.oom, label %wa.init`,
+    `wa.oom:`,
+    `  call void @sc_oom()`,
+    `  unreachable`,
+    `wa.init:`,
+    `  call void @llvm.memset.p0.i32(ptr align 8 %wa.block, i8 0, i32 ${total}, i1 false)`,
+  );
+  if (cyc)
+    lines.push(
+      `  %wa.id = trunc i32 %wa.tid to i16`,
+      `  store i16 %wa.id, ptr %wa.block`,
+      ...(cyc.acyclic === true
+        ? [
+            `  %wa.buf = getelementptr inbounds i8, ptr %wa.block, i32 ${CYC_BUF}`,
+            `  store i32 -1, ptr %wa.buf`,
+          ]
+        : []),
+      `  %wa.live = load i32, ptr @scr_cyc_live`,
+      `  %wa.next = add i32 %wa.live, 1`,
+      `  store i32 %wa.next, ptr @scr_cyc_live`,
+      `  %wa.obj = getelementptr inbounds i8, ptr %wa.block, i32 ${CYC_HDR}`,
+    );
+  else lines.push(`  %wa.obj = getelementptr inbounds i8, ptr %wa.block, i32 0`);
+  lines.push(`  br label %wa.done`, `wa.slow:`);
+  if (cyc)
+    lines.push(
+      `  %wa.slowobj = call ptr @scr_cyc_alloc(i32 ${size}, ptr ${cyc.type})`,
+      `  br label %wa.done`,
+    );
+  else
+    lines.push(
+      `  %wa.slowobj = call ptr @scr_rt_calloc(i32 ${size})`,
+      `  %wa.slownull = icmp eq ptr %wa.slowobj, null`,
+      `  br i1 %wa.slownull, label %wa.oom, label %wa.slowdone`,
+      `wa.slowdone:`,
+      `  br label %wa.done`,
+    );
+  lines.push(
+    `wa.done:`,
+    `  %o = phi ptr [ %wa.obj, %wa.init ], [ %wa.slowobj, %${cyc ? "wa.slow" : "wa.slowdone"} ]`,
+    `  call void @scr_obj_alloc_note()`,
   );
   return lines;
 }

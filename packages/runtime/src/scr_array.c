@@ -2674,6 +2674,38 @@ double scr_math_min_arr(ScrArr *a) {
   return best;
 }
 
+/* Keep the same compensated accumulation in scalar and variadic hypot. */
+static inline void scr_hypot_add(double value, double *sum, double *correction) {
+  double term = value * value - *correction;
+  double next = *sum + term;
+  *correction = (next - *sum) - term;
+  *sum = next;
+}
+
+static inline __attribute__((always_inline)) double scr_math_hypot_values(const double *values, size_t n) {
+  double scale = 0.0;
+  bool has_nan = false;
+  for (size_t i = 0; i < n; i++) {
+    double value = fabs(values[i]);
+    if (isinf(value)) return INFINITY;
+    if (isnan(value)) has_nan = true;
+    else if (value > scale) scale = value;
+  }
+  if (has_nan || scale == 0.0) return has_nan ? NAN : 0.0;
+  double sum = 0.0, correction = 0.0;
+  for (size_t i = 0; i < n; i++) scr_hypot_add(values[i] / scale, &sum, &correction);
+  return scale * sqrt(sum);
+}
+
+double scr_math_hypot2(double x, double y) {
+  const double values[2] = {x, y};
+  return scr_math_hypot_values(values, 2);
+}
+double scr_math_hypot3(double x, double y, double z) {
+  const double values[3] = {x, y, z};
+  return scr_math_hypot_values(values, 3);
+}
+
 /* Math.hypot is variadic. Scale before summing to avoid intermediate
  * overflow/underflow, and scan every element so Infinity wins over NaN. */
 double scr_math_hypot_arr(ScrArr *a) {
@@ -2710,10 +2742,7 @@ double scr_math_hypot_arr(ScrArr *a) {
     uint64_t slot = 0;
     if (!coerced) (void)scr_arr_f64_state_at(a, i, &slot);
     double v = (coerced ? coerced[i] : scr_slot_to_f64(slot)) / scale;
-    double term = v * v - correction;
-    double next = sum + term;
-    correction = (next - sum) - term;
-    sum = next;
+    scr_hypot_add(v, &sum, &correction);
   }
   free(coerced);
   return scale * sqrt(sum);

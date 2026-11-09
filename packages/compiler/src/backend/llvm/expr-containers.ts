@@ -66,6 +66,7 @@ import {
   emitDenseArrayNumberInt32,
   emitDenseArrayPop,
   emitDenseArrayPush,
+  emitDenseArrayPushMany,
   runtimeAccess,
   type ArrayAccess,
 } from "./dense-array-access.js";
@@ -163,6 +164,28 @@ export function emitArrayValues(
     );
     return result;
   }
+  const slow = (): string => emitArrayValuesSlow(host, arr, acc, values, prepend, sharedBuffer);
+  return !prepend && values.length <= 16
+    ? emitDenseArrayPushMany(
+        host,
+        arr,
+        acc,
+        element,
+        values.map((value) => value.name),
+        slow,
+      )
+    : slow();
+}
+
+function emitArrayValuesSlow(
+  host: LlvmEmitterContext,
+  arr: string,
+  acc: ArrayAccess,
+  values: LlValue[],
+  prepend: boolean,
+  sharedBuffer?: string,
+): string {
+  const B = host.B;
   const capacity = Math.min(values.length, 64);
   const buffer = sharedBuffer ?? B.tmp();
   if (sharedBuffer === undefined) B.entryAllocas.push(`${buffer} = alloca [${capacity} x i64]`);
@@ -865,9 +888,25 @@ export function emitArrIntrinsic(
           slow = slowLabel;
         denseRaw = checked
           ? host.emitByElementKind(r.name, "i64", (kind) =>
-              emitDenseArrayPop(host, r.name, kind, elem, empty, slow),
+              emitDenseArrayPop(
+                host,
+                r.name,
+                kind,
+                elem,
+                empty,
+                slow,
+                host.nonemptyStackPops.has(e),
+              ),
             )!
-          : emitDenseArrayPop(host, r.name, access, elem, la, slowLabel);
+          : emitDenseArrayPop(
+              host,
+              r.name,
+              access,
+              elem,
+              la,
+              slowLabel,
+              host.nonemptyStackPops.has(e),
+            );
         denseLabel = B.currentLabel();
         B.br(lp);
         B.startBlock(slowLabel);

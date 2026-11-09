@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/small-numeric-array-maps.ts"
+ ],
+ "diags": []
+}

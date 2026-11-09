@@ -5,9 +5,11 @@ import type { BytesHeader } from "./bytes-headers.js";
 import { BYTES_ELEMENT_SIZE, F64, type IrBytesElem, type IrExpr } from "../../ir/ir.js";
 import type { LlvmEmitterContext, LlValue, OffsetIndex } from "./expr-context.js";
 import { F64_INF, exactIndexLines, exactOffsetIndexLines, f64Lit, sizeToDouble } from "./common.js";
-import { alwaysExactInteger, exactInteger } from "./integer-values.js";
+import { indexInteger } from "./integer-values.js";
 import { byteNumberAccess } from "../../ir/byte-numbers.js";
 import { emitByteNumber } from "./byte-numbers.js";
+import { emitBytesStoreValue } from "./bytes-values.js";
+import { emitBytesFill } from "./bytes-fill.js";
 import { integerOrNaNIndex, integerOrNaNRange } from "./wrapping-sums.js";
 import { bytesElementAlias, bytesHeaderAlias, bytesHeaderValueAlias } from "./bytes-alias.js";
 
@@ -108,9 +110,11 @@ export function emitBytesIndex(
 ): string {
   const B = host.B;
   const index = value.name;
-  // The exact integer, or a wide view that always equals the double (such
-  // as `i + 1` of a speculated counter).
-  const exact = alwaysExactInteger(host, value, exactInteger(host, value, expr));
+  // An index view need only equal its double at every index the view can
+  // admit. Keep the full i64 through the bounds check before narrowing:
+  // large products must never wrap into a valid wasm32 address. Native64
+  // views can exceed 2^32 elements, so they require global exactness.
+  const exact = indexInteger(host, value, expr, host.sizeType === "i32" ? 2 ** 32 : Infinity);
   if (inBounds && exact !== null) {
     if (host.sizeType === "i64") return exact;
     const narrow = B.tmp();
@@ -758,61 +762,14 @@ function emitScopedBytesSet(
     B.br(done);
     B.startBlock(local);
   }
-  let stored: string | null;
-  if (elem === "u8c") {
-    // ToUint8Clamp, as scr_bytes_to_u8_clamp computes it: NaN and values
-    // at most 0 store 0, values at least 255 store 255, and values between
-    // round to the nearest integer, ties to even. Adding and subtracting
-    // 2^52 rounds a value in (0, 255) that way in the default rounding mode,
-    // with no call or branch, so loops of clamped stores can vectorize.
-    const positive = B.tmp(),
-      high = B.tmp(),
-      shifted = B.tmp(),
-      rounded = B.tmp(),
-      upper = B.tmp(),
-      clamped = B.tmp();
-    stored = B.tmp();
-    B.line(`${positive} = fcmp ogt double ${value.name}, 0.0`);
-    B.line(`${high} = fcmp oge double ${value.name}, 255.0`);
-    B.line(`${shifted} = fadd double ${value.name}, 0x4330000000000000`);
-    B.line(`${rounded} = fsub double ${shifted}, 0x4330000000000000`);
-    B.line(`${upper} = select i1 ${high}, double 255.0, double ${rounded}`);
-    B.line(`${clamped} = select i1 ${positive}, double ${upper}, double 0.0`);
-    B.line(`${stored} = fptoui double ${clamped} to i32`);
-  } else
-    stored =
-      elem === "f16" || elem === "f32" || elem === "f64"
-        ? null
-        : host.emitToUint32(value.name, expr, value.uint32);
+  const { type: ty, name: operand } = emitBytesStoreValue(host, elem, value, expr);
   if (elem === "f16") {
-    // One round-to-nearest-even step from the double, in the runtime.
-    host.declare(`declare zeroext i16 @scr_f16_from_f64(double)`);
-    const narrowed = B.tmp();
     const p = B.tmp();
-    B.line(`${narrowed} = call zeroext i16 @scr_f16_from_f64(double ${value.name})`);
     B.line(`${p} = getelementptr inbounds i16, ptr ${data}, ${host.sizeType} ${idx}`);
-    B.line(`store i16 ${narrowed}, ptr ${p}, align 1${bytesElementAlias(host)}`);
+    B.line(`store i16 ${operand}, ptr ${p}, align 1${bytesElementAlias(host)}`);
     B.br(done);
     B.startBlock(done);
     return;
-  }
-  // The element's bits as an LLVM value of the element's width.
-  let ty: string;
-  let operand: string;
-  if (BYTES_ELEMENT_SIZE[elem] < 4) {
-    ty = `i${BYTES_ELEMENT_SIZE[elem] * 8}`;
-    operand = B.tmp();
-    B.line(`${operand} = trunc i32 ${stored!} to ${ty}`);
-  } else if (elem === "f32") {
-    ty = "float";
-    operand = B.tmp();
-    B.line(`${operand} = fptrunc double ${value.name} to float`);
-  } else if (elem === "f64") {
-    ty = "double";
-    operand = value.name;
-  } else {
-    ty = "i32";
-    operand = stored!;
   }
   if (
     (host.mod.workers || host.mod.lib?.threadInstances === true) &&
@@ -837,6 +794,7 @@ function emitScopedBytesSet(
 export function emitBytesIntrinsic(
   host: LlvmEmitterContext,
   e: IrExpr & { kind: "bytesIntrinsic" },
+  discarded = false,
 ): LlValue {
   const B = host.B;
   const call = (
@@ -940,6 +898,7 @@ export function emitBytesIntrinsic(
   const directElementAccess =
     method === "length" ||
     method === "byteLength" ||
+    method === "fillElem" ||
     method === "get" ||
     byteNumberAccess(e) !== null;
   const r = directElementAccess
@@ -1168,7 +1127,9 @@ export function emitBytesIntrinsic(
         false,
         false,
       );
-    case "fillElem":
+    case "fillElem": {
+      const inline = emitBytesFill(host, e, r, args, discarded);
+      if (inline) return inline;
       // Per-element TypedArray fill (non-u8): slice-style index
       // defaults, never throws; the receiver comes back +1.
       return call(
@@ -1178,6 +1139,7 @@ export function emitBytesIntrinsic(
         true,
         false,
       );
+    }
     case "fill":
     case "fillNum": {
       const sym = method === "fill" ? "scr_bytes_fill" : "scr_bytes_fill_num";

@@ -1115,6 +1115,31 @@ export function emitSpeculativeInteger(
         return result;
       }
       if (e.op === "*") {
+        const constant =
+          e.right.kind === "numLit" ? e.right : e.left.kind === "numLit" ? e.left : null;
+        if (constant && Number.isSafeInteger(constant.value) && constant.value !== 0) {
+          const rightConstant = constant === e.right;
+          const variable = rightConstant ? a : b;
+          const range = operandRange(host, rightConstant ? e.left : e.right);
+          const limit = Math.floor(SAFE / Math.abs(constant.value));
+          // Check before multiplying: a valid product is exact in binary64
+          // and cannot overflow i64. A biased unsigned comparison covers
+          // both bounds without the i128 helper wasm needs for checked mul.
+          if (!range || range.min < -limit || range.max > limit) {
+            const biased = B.tmp(),
+              outside = B.tmp();
+            B.line(`${biased} = add i64 ${variable}, ${limit}`);
+            B.line(`${outside} = icmp ugt i64 ${biased}, ${2 * limit}`);
+            bail(outside);
+          }
+          if (constant.value < 0 && (!range || (range.min <= 0 && range.max >= 0))) {
+            const zero = B.tmp();
+            B.line(`${zero} = icmp eq i64 ${variable}, 0`);
+            bail(zero); // +0 times a negative constant is -0.
+          }
+          B.line(`${result} = mul nsw i64 ${variable}, ${constant.value}`);
+          return result;
+        }
         host.declare("declare { i64, i1 } @llvm.smul.with.overflow.i64(i64, i64)");
         const pair = B.tmp(),
           overflow = B.tmp(),

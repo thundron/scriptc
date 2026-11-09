@@ -189,6 +189,7 @@ export function emitFunction(emitter: LlEmitter, fn: IrFunction): string {
     fn.captures !== undefined ? emitter.lazyCaptures.stableCaptures(fn.name) : new Set();
   emitter.integerLoopBindings.clear();
   emitter.integerTemps.clear();
+  emitter.wideIntegerTemps.clear();
   emitter.integerTempsEnabled = emitter.debug === null && !fn.async && !fn.generator;
   beginFunctionLoops(emitter, fn, numericFn);
   beginFunctionLanes(emitter, numericFn);

@@ -1,6 +1,7 @@
 import {
   F64,
   isRefCounted,
+  typeEquals,
   type IrExpr,
   type IrFunction,
   type IrLocal,
@@ -35,11 +36,15 @@ function scalarTemporaries(value: IrExpr): boolean {
   return everyExpr(value, { expr: (expr) => !isRefCounted(expr.type), stmt: () => true });
 }
 
-function producer(fn: IrFunction, shapes: ReadonlyMap<string, IrRecordShape>): Producer | null {
+function producer(
+  fn: IrFunction,
+  shapes: ReadonlyMap<string, IrRecordShape>,
+  captured = false,
+): Producer | null {
   if (
     fn.async ||
     fn.generator ||
-    fn.captures?.length ||
+    (!captured && fn.captures?.length) ||
     fn.classCaptures?.length ||
     fn.returnType.kind !== "record"
   )
@@ -47,17 +52,23 @@ function producer(fn: IrFunction, shapes: ReadonlyMap<string, IrRecordShape>): P
   const shape = shapes.get(fn.returnType.shapeId);
   if (
     !shape ||
-    shape.tuple ||
+    (!captured && shape.tuple) ||
     shape.indexValue ||
     shape.fields.length === 0 ||
     shape.fields.length > MAX_FIELDS ||
     shape.fields.some((f) => f.type.kind !== "f64")
   )
     return null;
+  const captures = new Set((fn.captures ?? []).map((capture) => capture.localId));
+  if (fn.captures?.some((capture) => capture.type.kind === "func")) return null;
   // Scalar parameters/locals need no ownership cleanup across the inlined
-  // return. Closures, suspension and finally completions remain out of scope.
+  // return. Nested closures, suspension and finally remain out of scope.
   if (
-    fn.locals.some((l) => l.boxed || l.tdz || (l.type.kind !== "f64" && l.type.kind !== "bool")) ||
+    fn.locals.some(
+      (l) =>
+        l.tdz ||
+        (!captures.has(l.id) && (l.boxed || (l.type.kind !== "f64" && l.type.kind !== "bool"))),
+    ) ||
     fn.params.some((p) => p.type.kind !== "f64" && p.type.kind !== "bool")
   )
     return null;
@@ -66,8 +77,12 @@ function producer(fn: IrFunction, shapes: ReadonlyMap<string, IrRecordShape>): P
   const eligible = everyStmtList(fn.body, {
     expr: (expr) => {
       if (++size > MAX_CALLEE_NODES) return false;
+      if ((expr.kind === "assignExpr" || expr.kind === "incDec") && captures.has(expr.localId))
+        return false;
+      if (expr.kind === "call" && expr.callee === fn.name) return false;
       switch (expr.kind) {
         case "closure":
+        case "classRef":
         case "selfRef":
         case "awaitExpr":
         case "awaitUnionExpr":
@@ -79,6 +94,14 @@ function producer(fn: IrFunction, shapes: ReadonlyMap<string, IrRecordShape>): P
     },
     stmt: (stmt) => {
       if (++size > MAX_CALLEE_NODES || stmt.kind === "tryCatch") return false;
+      if (
+        (stmt.kind === "assign" ||
+          stmt.kind === "varDecl" ||
+          stmt.kind === "forOf" ||
+          stmt.kind === "rethrow") &&
+        captures.has(stmt.localId)
+      )
+        return false;
       if (stmt.kind !== "return") return true;
       returns++;
       const value = stmt.value;
@@ -170,21 +193,76 @@ interface Replacement {
 /** Eliminate small fresh numeric result records at direct, field-only call
  * sites. This is a bounded shared backend pass, not a change to record ABI:
  * the original producer remains available to all other callers. Arguments
- * and literal fields retain source evaluation order. A labeled block models
+ * and literal fields retain source evaluation order. The optional closure
+ * mode also admits constant local callables and their read-only capture
+ * bindings; its caller must keep observed-stack and debugger boundaries.
+ * A labeled block models
  * return, including returns inside loops, without changing caller control
  * flow. Unknown uses and non-scalar producer locals keep the heap path. */
-export function scalarizeNumericRecords(mod: IrModule): IrModule {
+export function scalarizeNumericRecords(mod: IrModule, inlineClosures = false): IrModule {
   const shapes = new Map((mod.records ?? []).map((s) => [s.id, s]));
   const producers = new Map<string, Producer>();
+  const closureProducers = new Map<string, Producer>();
   for (const fn of mod.functions) {
     const p = producer(fn, shapes);
     if (p) producers.set(fn.name, p);
+    if (inlineClosures) {
+      const closure = producer(fn, shapes, true);
+      if (closure) closureProducers.set(fn.name, closure);
+    }
   }
-  if (producers.size === 0) return mod;
+  if (producers.size === 0 && closureProducers.size === 0) return mod;
   let changed = false;
   const functions = mod.functions.map((fn): IrFunction => {
     if (fn.async || fn.generator) return fn;
     const locals = new Map(fn.locals.map((l) => [l.id, l]));
+    const globals = new Map((mod.globals ?? []).map((global) => [global.id, global]));
+    // A const local closure still refers to its creation's active lexical
+    // bindings at every call in this frame. Substitute capture ids only
+    // after checking their exact types; argument snapshots precede body
+    // reads, so mutable outer bindings retain by-reference semantics.
+    const closures = new Map<string, { producer: Producer; captures: Map<string, string> }>();
+    const declarations = new Map<string, number>(),
+      written = new Set<string>();
+    if (inlineClosures)
+      everyStmtList(fn.body, {
+        expr: (expr) => {
+          if (expr.kind === "assignExpr" || expr.kind === "incDec") written.add(expr.localId);
+          return true;
+        },
+        stmt: (stmt) => {
+          if (stmt.kind === "assign" || stmt.kind === "forOf" || stmt.kind === "rethrow")
+            written.add(stmt.localId);
+          if (stmt.kind !== "varDecl") return true;
+          declarations.set(stmt.localId, (declarations.get(stmt.localId) ?? 0) + 1);
+          const local = locals.get(stmt.localId),
+            value = stmt.init;
+          if (
+            !local ||
+            local.mutable ||
+            local.boxed ||
+            local.tdz ||
+            globals.has(local.id) ||
+            value?.kind !== "closure"
+          )
+            return true;
+          const producer = closureProducers.get(value.fnName);
+          if (!producer || value.captures.length !== (producer.fn.captures?.length ?? 0))
+            return true;
+          const captures = new Map<string, string>();
+          for (let i = 0; i < value.captures.length; i++) {
+            const target = producer.fn.captures![i]!,
+              id = value.captures[i]!,
+              source = locals.get(id) ?? globals.get(id);
+            if (!source || source.tdz || !typeEquals(source.type, target.type)) return true;
+            captures.set(target.localId, id);
+          }
+          closures.set(local.id, { producer, captures });
+          return true;
+        },
+      });
+    for (const id of closures.keys())
+      if (declarations.get(id) !== 1 || written.has(id)) closures.delete(id);
     const used = new Set([...locals.keys(), ...(mod.globals ?? []).map((g) => g.id)]);
     collectLabels(fn.body, used);
     // A header accepts one statement, not an inlined block. Local ids are
@@ -224,10 +302,14 @@ export function scalarizeNumericRecords(mod: IrModule): IrModule {
           local.boxed ||
           local.tdz ||
           local.type.kind !== "record" ||
-          call?.kind !== "call"
+          (call?.kind !== "call" && call?.kind !== "callValue")
         )
           return true;
-        const p = producers.get(call.callee);
+        const closure =
+          call.kind === "callValue" && call.callee.kind === "varRef"
+            ? closures.get(call.callee.localId)
+            : undefined;
+        const p = call.kind === "call" ? producers.get(call.callee) : closure?.producer;
         if (
           !p ||
           p.fn.name === fn.name ||
@@ -242,7 +324,9 @@ export function scalarizeNumericRecords(mod: IrModule): IrModule {
         for (const l of p.fn.locals) used.add(l.id);
         collectLabels(p.fn.body, used);
         const fields = new Map(p.shape.fields.map((f) => [f.name, fresh()]));
-        const renamed = new Map(p.fn.locals.map((l) => [l.id, fresh()]));
+        const renamed = new Map(
+          p.fn.locals.map((l) => [l.id, closure?.captures.get(l.id) ?? fresh()]),
+        );
         const labels = new Map<string, string>();
         const exit = fresh();
         const label = (name: string): string => {
@@ -256,7 +340,8 @@ export function scalarizeNumericRecords(mod: IrModule): IrModule {
             type: F64,
             mutable: true,
           });
-        for (const l of p.fn.locals) added.push({ ...l!, id: renamed.get(l.id)! });
+        for (const l of p.fn.locals)
+          if (!closure?.captures.has(l.id)) added.push({ ...l!, id: renamed.get(l.id)! });
         const body = transformStmtList(p.fn.body, {
           expr: (expr) => {
             switch (expr.kind) {
@@ -344,7 +429,7 @@ export function scalarizeNumericRecords(mod: IrModule): IrModule {
     });
     if (replacements.size === 0) return fn;
     changed = true;
-    const body = transformStmtList(fn.body, {
+    let body = transformStmtList(fn.body, {
       stmt: (stmt) => {
         const replacement = stmt.kind === "varDecl" ? replacements.get(stmt.localId) : undefined;
         return replacement ? { kind: "block", body: replacement.body, loc: stmt.loc } : stmt;
@@ -357,9 +442,34 @@ export function scalarizeNumericRecords(mod: IrModule): IrModule {
         return expr;
       },
     });
+    const readClosures = new Set<string>();
+    if (closures.size)
+      everyStmtList(body, {
+        stmt: () => true,
+        expr: (expr) => {
+          if (expr.kind === "varRef") readClosures.add(expr.localId);
+          if (expr.kind === "closure" || expr.kind === "classRef")
+            for (const id of expr.captures ?? []) readClosures.add(id);
+          return true;
+        },
+      });
+    // Creation has no user effects. Keep the object whenever any alias,
+    // identity observer, unoptimized call or nested capture can see it.
+    const unusedClosures = new Set([...closures.keys()].filter((id) => !readClosures.has(id)));
+    if (unusedClosures.size)
+      body = transformStmtList(body, {
+        expr: (expr) => expr,
+        stmt: (stmt) =>
+          stmt.kind === "varDecl" && unusedClosures.has(stmt.localId)
+            ? { kind: "block", body: [], loc: stmt.loc }
+            : stmt,
+      });
     return {
       ...fn!,
-      locals: [...fn.locals.filter((l) => !replacements.has(l.id)), ...added],
+      locals: [
+        ...fn.locals.filter((l) => !replacements.has(l.id) && !unusedClosures.has(l.id)),
+        ...added,
+      ],
       body,
     };
   });

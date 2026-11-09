@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/scalar-numeric-array-literals.ts"
+ ],
+ "diags": []
+}

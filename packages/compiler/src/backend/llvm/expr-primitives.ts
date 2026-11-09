@@ -257,6 +257,16 @@ export function emitLiteralExpr(
         if (host.takeLastUseMove(e, b.slot, b.type)) return host.own({ name: t, type: e.type });
         return host.own({ name: host.retainFrame(t, e.type), type: e.type });
       }
+      const wide = host.wideIntegerTemps.get(e.localId);
+      if (wide !== undefined) {
+        const integer = B.tmp();
+        B.line(`${integer} = load i64, ptr ${wide.slot}`);
+        return {
+          name: t,
+          type: e.type,
+          wideInteger: { name: integer, bound: wide.bound, below: wide.below },
+        };
+      }
       return { name: t, type: e.type };
     }
     default: {

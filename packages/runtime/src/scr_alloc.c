@@ -2900,7 +2900,48 @@ void *scr_mem_realloc(void *p, size_t n) {
   return q;
 }
 #else
+#if SCR_WASM_SMALL_ALLOC
+ScrWsaState scr_wsa = {0};
+#if defined(SCR_WSA_STATS) && SCR_WSA_STATS
+uint64_t scr_wsa_stats[SCR_WSA_CLASSES + 1][2];
+#endif
+ScrWsaSlab *scr_wsa_new_slab(unsigned c) {
+  ScrWsaSlab *s = aligned_alloc(SCR_WSA_PAGE, SCR_WSA_PAGE);
+  if (!s) return NULL;
+  memset(s, 0, sizeof *s);
+  s->class_id = (uint8_t)c;
+  s->capacity = (uint16_t)((SCR_WSA_PAGE - SCR_WSA_HEADER) / scr_wsa_size(c));
+  scr_wsa.pages[(uintptr_t)s >> 16] = (uint8_t)(c + 1);
+  scr_wsa_link(s);
+  return s;
+}
+/* Empty retention is bounded to twelve pages. An embedder's explicit
+ * collection can also return those pages to libc without touching live data. */
+void scr_wsa_trim(void) {
+  for (unsigned c = 0; c < SCR_WSA_CLASSES; c++) {
+    ScrWsaSlab *s = scr_wsa.empty[c];
+    if (!s) continue;
+    scr_wsa.empty[c] = NULL;
+    scr_wsa_unlink(s);
+    scr_wsa.pages[(uintptr_t)s >> 16] = 0;
+    free(s);
+  }
+}
+#endif
 void *scr_mem_realloc(void *p, size_t n) {
+#if SCR_WASM_SMALL_ALLOC
+  ScrWsaSlab *s = scr_wsa_owner(p);
+  if (s) {
+    size_t have = scr_wsa_size(s->class_id);
+    if (n && n <= have) return p;
+    if (!n) { scr_wsa_free(p); return NULL; }
+    void *q = scr_mem_alloc_ref(n);
+    if (!q) return NULL;
+    memcpy(q, p, have);
+    scr_wsa_free(p);
+    return q;
+  }
+#endif
   void *q = realloc(p, n);
   /* Realloc moved (or ended) the block, and the library audit lane's
    * registry follows it; a failed request leaves p live and registered. */
@@ -2912,8 +2953,17 @@ void *scr_mem_realloc(void *p, size_t n) {
 }
 /* Without the small object allocator every block is a reference block, so the
  * reference twin shares the plain path, audit registry included. */
-void *scr_mem_realloc_ref(void *p, size_t n) { return scr_mem_realloc(p, n); }
+void *scr_mem_realloc_ref(void *p, size_t n) {
+#if SCR_WASM_SMALL_ALLOC
+  if (!p) return scr_mem_alloc_ref(n);
+#endif
+  return scr_mem_realloc(p, n);
+}
 size_t scr_mem_block_size(const void *p) {
+#if SCR_WASM_SMALL_ALLOC
+  ScrWsaSlab *s = scr_wsa_owner(p);
+  if (s) return scr_wsa_size(s->class_id);
+#endif
 #if defined(__GLIBC__)
   return malloc_usable_size((void *)p);
 #else
@@ -3489,4 +3539,24 @@ void *scr_plr_alloc(size_t n) {
   }
   return scr_plr_refill(n);
 }
+#endif
+
+
+#if defined(__wasm__) && UINTPTR_MAX == UINT32_MAX
+/* Constant-class, uninitialized storage for emitted private constructors.
+ * Even pool-off builds use the ordinary reference allocator here. */
+#define SCR_WSA_ALLOC_CLASS(N) __attribute__((malloc)) void *scr_wsa_alloc_##N(void) { return scr_mem_alloc_ref(N); }
+SCR_WSA_ALLOC_CLASS(16)
+SCR_WSA_ALLOC_CLASS(32)
+SCR_WSA_ALLOC_CLASS(48)
+SCR_WSA_ALLOC_CLASS(64)
+SCR_WSA_ALLOC_CLASS(80)
+SCR_WSA_ALLOC_CLASS(96)
+SCR_WSA_ALLOC_CLASS(112)
+SCR_WSA_ALLOC_CLASS(128)
+SCR_WSA_ALLOC_CLASS(192)
+SCR_WSA_ALLOC_CLASS(256)
+SCR_WSA_ALLOC_CLASS(384)
+SCR_WSA_ALLOC_CLASS(512)
+#undef SCR_WSA_ALLOC_CLASS
 #endif

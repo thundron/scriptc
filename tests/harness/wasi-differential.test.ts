@@ -112,6 +112,18 @@ describe.skipIf(!zigOnPath())("wasm32-wasi differential", () => {
   });
 
   test.each([
+    "captured-numeric-results.ts",
+    "numeric-literal-projections.ts",
+    "numeric-stack-batches.ts",
+    "numeric-map-extreme-fusion.ts",
+    "wide-index-local-provenance.ts",
+    "small-numeric-array-maps.ts",
+    "private-numeric-stack-pairs.ts",
+    "array-append-loop-reservation.ts",
+    "constant-index-multiply.ts",
+    "math-hypot-fixed-arity.ts",
+    "scalar-numeric-array-literals.ts",
+    "typed-array-inline-fill.ts",
     "finite-union-spreads.ts",
     "float32-arithmetic.ts",
     "float32-automatic.ts",

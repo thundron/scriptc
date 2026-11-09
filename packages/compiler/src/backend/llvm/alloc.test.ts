@@ -285,3 +285,45 @@ describe("emitted object allocation", () => {
     ]);
   });
 });
+
+describe("private wasm32 constant-size constructors", () => {
+  function wasmHost() {
+    const base = host(false);
+    return { ...base, sizeType: "i32" as const, inlineWasmAlloc: true, objectAudit: false };
+  }
+  test("clears optimizer-visible storage and preserves cold type registration and live accounting", () => {
+    const h = wasmHost();
+    const lines = emitObjectAlloc(h, "40", { type: "@kind", acyclic: true });
+    const text = lines.join("\n");
+    expect(text).toContain("@scr_wsa_alloc_48()");
+    expect(text).toContain("@llvm.memset.p0.i32");
+    expect(text).toContain("@scr_cyc_alloc(i32 40, ptr @kind)");
+    expect(text).toContain("store i16 %wa.id");
+    expect(text).toContain("store i32 -1");
+    expect(text).toContain("@scr_cyc_live");
+    expect(text).not.toContain("atomic");
+    expect(text).not.toContain("@scr_obj_alloc_note");
+    expectSingleDefinitions(lines);
+  });
+  test("LLVM sizeof expressions select a constant class using the target layout", () => {
+    const h = wasmHost(),
+      size = "ptrtoint (ptr getelementptr (%Shape, ptr null, i32 1) to i32)";
+    const lines = emitObjectAlloc(h, size, { type: "@kind" }),
+      text = lines.join("\n");
+    expect(text).toContain(`%wa.fits = icmp ule i32 ${size}, 504`);
+    expect(text).toContain("call noalias ptr %wa.fn0()");
+    expect(text).toContain("ptr @scr_wsa_alloc_512");
+    expectSingleDefinitions(lines);
+  });
+  test("plain objects and the largest pooled block retain the ordinary free contract", () => {
+    const h = wasmHost();
+    expect(emitObjectAlloc(h, "504", { type: "@kind" }).join("\n")).toContain(
+      "@scr_wsa_alloc_512()",
+    );
+    expect(emitObjectAlloc(h, "20", null).join("\n")).toContain("@scr_wsa_alloc_32()");
+    expect(emitObjectAlloc(h, "505", { type: "@kind" }).join("\n")).not.toContain("scr_wsa_alloc_");
+    expect(emitObjectAlloc(h, "%dynamic", null).join("\n")).toContain(
+      "@scr_rt_calloc(i32 %dynamic)",
+    );
+  });
+});

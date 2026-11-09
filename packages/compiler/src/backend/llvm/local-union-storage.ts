@@ -73,6 +73,7 @@ function sameUnion(expr: IrExpr, type: IrType): boolean {
  * bits, so no heap box is needed while consumers only project. */
 export function isScalarOptionalSource(expr: IrExpr, sources: UnionSources): boolean {
   if (!isScalarUnion(expr.type, sources.unions)) return false;
+  if (expr.kind === "seqExpr") return isScalarOptionalSource(expr.result, sources);
   if (expr.kind === "arrIntrinsic")
     return (
       (expr.method === "pop" || expr.method === "shift") &&
@@ -243,6 +244,7 @@ export function storeLocalUnion(
     expr.kind === "optChain" ||
     expr.kind === "nullish" ||
     expr.kind === "call" ||
+    expr.kind === "seqExpr" ||
     expr.kind === "arrIntrinsic"
   ) {
     // Scalar optional sources and register results: a private stack box.

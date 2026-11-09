@@ -657,6 +657,8 @@ ScrArr *scr_arr_fill_undefined(ScrArr *a, double start, double end);
 double scr_math_max_arr(ScrArr *a);
 double scr_math_min_arr(ScrArr *a);
 double scr_math_hypot_arr(ScrArr *a);
+double scr_math_hypot2(double x, double y);
+double scr_math_hypot3(double x, double y, double z);
 /* The scalar Math statics (scr_lib.c): min/max are the ECMA two-argument
  * folds (NaN poisons; max prefers +0, min prefers -0 — NOT C's fmin/fmax);
  * random is a uniform [0,1) double at 53-bit granularity from

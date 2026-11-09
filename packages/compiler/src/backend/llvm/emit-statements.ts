@@ -2084,12 +2084,26 @@ function storeIntegerTemp(
     local.mutable ||
     local.tdz === true ||
     emitter.captureIds.has(localId) ||
-    !v.integer
+    (!v.integer && !v.wideInteger)
   ) {
+    emitter.wideIntegerTemps.delete(localId);
     emitter.integerTemps.delete(localId);
     return;
   }
   const B = emitter.B;
+  if (!v.integer) {
+    emitter.integerTemps.delete(localId);
+    const wide = v.wideInteger!;
+    let slot = emitter.wideIntegerTemps.get(localId)?.slot;
+    if (slot === undefined) {
+      slot = B.slot();
+      B.entryAllocas.push(`${slot} = alloca i64 ; wide integer ${local.name}`);
+    }
+    B.line(`store i64 ${wide.name}, ptr ${slot}`);
+    emitter.wideIntegerTemps.set(localId, { slot, bound: wide.bound, below: wide.below });
+    return;
+  }
+  emitter.wideIntegerTemps.delete(localId);
   let slot = emitter.integerTemps.get(localId)?.slot;
   if (slot === undefined) {
     slot = B.slot();

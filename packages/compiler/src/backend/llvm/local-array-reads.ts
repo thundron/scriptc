@@ -14,7 +14,7 @@ import { everyStmtList } from "../../ir/traverse.js";
 import { analyzeCallLifetimes, type CallLifetimes } from "./call-lifetimes.js";
 import type { LlValue, LlvmEmitterContext } from "./expr-context.js";
 import { ReferenceEffects } from "./reference-effects.js";
-import { SCR_ARR_FIELD, loadArrCount, scrArrStateAt } from "./common.js";
+import { SCR_ARR_FIELD, loadArrCount, scrArrStateAt, f64Lit } from "./common.js";
 import { indexInteger } from "./integer-values.js";
 import { READ_FALLBACK } from "./dense-array-access.js";
 import { compactRefLoadLines } from "./classes.js";
@@ -820,6 +820,44 @@ export function emitLocalArrayRead(
   inline = true,
 ): { slot: string; type: IrType } | null {
   const B = host.B;
+  if (
+    read.array.kind === "arrayLit" &&
+    read.array.type.kind === "array" &&
+    read.array.type.elem.kind === "f64" &&
+    read.element.kind === "f64" &&
+    read.array.elems.length <= 16 &&
+    !read.array.spreads?.length &&
+    read.array.elems.every((element) => element.type.kind === "f64")
+  ) {
+    // All elements evaluate before the index, even when it is missing,
+    // fractional or out of range. Presence is independent of genuine NaNs.
+    const values = read.array.elems.map((element) => host.emitExpr(element));
+    const index = host.emitExpr(read.index);
+    let present = "false",
+      value = f64Lit(0);
+    for (let i = values.length - 1; i >= 0; i--) {
+      const matches = B.tmp(),
+        any = B.tmp(),
+        selected = B.tmp();
+      B.line(`${matches} = fcmp oeq double ${index.name}, ${f64Lit(i)}`);
+      B.line(`${any} = or i1 ${present}, ${matches}`);
+      B.line(`${selected} = select i1 ${matches}, double ${values[i]!.name}, double ${value}`);
+      present = any;
+      value = selected;
+    }
+    const box = B.slot(),
+      tag = B.tmp(),
+      payload = B.tmp(),
+      tagPtr = B.tmp();
+    B.entryAllocas.push(`${box} = alloca %ScrUnion`);
+    B.line(`${tag} = select i1 ${present}, i32 ${read.presentTag}, i32 ${read.missingTag}`);
+    B.line(`${tagPtr} = getelementptr inbounds %ScrUnion, ptr ${box}, i32 0, i32 1`);
+    B.line(`${payload} = getelementptr inbounds %ScrUnion, ptr ${box}, i32 0, i32 5`);
+    B.line(`store i32 ${tag}, ptr ${tagPtr}`);
+    B.line(`store double ${value}, ptr ${payload}`);
+    B.line(`store ptr ${box}, ptr ${localSlot}`);
+    return null;
+  }
   if (read.bytesElement !== undefined) {
     const array = host.emitStableReceiver(read.array, [read.index]);
     const index = host.emitExpr(read.index);

@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -11,6 +11,7 @@ import {
   releaseShared as releaseReference,
 } from "@scriptc/experimental/f32";
 import { build as referenceBvhBuild } from "../library-mode/float32-bvh/lib.ts";
+import * as numericReference from "../library-mode/numeric-kernels/lib.ts";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import {
   compileLibrary as compileNodeLibrary,
@@ -804,6 +805,131 @@ export function createHost(){return {};}
         { encoding: "utf8" },
       );
       expect({ values, echo, bytes, reports }).toEqual(JSON.parse(reference));
+    });
+
+    test("numeric kernels preserve exact results without temporary arrays", async () => {
+      const source = join(import.meta.dirname, "../library-mode/numeric-kernels");
+      const settings = JSON.parse(await readFile(join(source, "profile.json"), "utf8"));
+      settings.entry = join(source, "lib.ts");
+      const profilePath = join(directory, "numeric-profile.json");
+      await writeFile(profilePath, JSON.stringify(settings));
+      const output = join(directory, "numeric-kernels");
+      const result = await compileLibrary({ profilePath, outDir: output });
+      expect(result.diagnostics ?? []).toEqual([]);
+      expect(result.ok).toBe(true);
+      const glue = await import(pathToFileURL(result.archivePath.replace(/\.wasm$/, ".mjs")).href);
+      const api = (await glue.instantiateFromBytes(await readFile(result.archivePath), {})) as Api;
+      const emitted = (
+        await Promise.all(
+          (await readdir(output))
+            .filter((name) => name.endsWith(".ll"))
+            .map((name) => readFile(join(output, name), "utf8")),
+        )
+      ).join("\n");
+      const run = emitted.match(
+        /define (?:internal )?[^\n]+ @sc_(?:b)?f_run(?:\.i32)?\([^\n]*\) #[0-9]+ \{([\s\S]*?)\n\}/,
+      );
+      expect(run).not.toBeNull();
+      expect(run![1]).not.toMatch(/@scr_arr_new|@sc_b?f_.*idxOr/);
+      expect(run![1]).toContain("bytes.fill.body");
+      expect(emitted).toContain("@scr_math_hypot2");
+      expect(emitted).toContain("@scr_math_hypot3");
+      expect(emitted).toContain("@scr_wsa_alloc_");
+      expect(emitted).toContain("numeric.reduce");
+      expect(emitted).toContain("arr.push.batch");
+      expect(emitted).toContain("arr.pop.nonempty");
+      const values = [0, -0, 3, -4, 1e308, 1e-300, Infinity, -Infinity, NaN];
+      for (const x of values)
+        for (const y of values) {
+          expect(Object.is(api["nk_two"]!(x, y), numericReference.two(x, y))).toBe(true);
+          for (const z of values)
+            expect(Object.is(api["nk_three"]!(x, y, z), numericReference.three(x, y, z))).toBe(
+              true,
+            );
+        }
+      for (const initial of [...values, 1.25, 4294967295, Number.MAX_SAFE_INTEGER])
+        for (const n of [0, 1, 3, 24]) {
+          expect(
+            Object.is(api["nk_product"]!(n, initial), numericReference.product(n, initial)),
+          ).toBe(true);
+        }
+      for (const x of values)
+        for (const index of [0, -0, 1, 2, 3, -1, 0.5, Infinity, NaN]) {
+          expect(Object.is(api["nk_literal"]!(x, index), numericReference.literal(x, index))).toBe(
+            true,
+          );
+        }
+      for (const seed of [-0, 1.25, 1e-300, 1e100])
+        expect(Object.is(api["nk_run"]!(seed, 100), numericReference.run(seed, 100))).toBe(true);
+      for (const x of values) {
+        expect(Object.is(api["nk_map"]!(x), numericReference.mapSum(x))).toBe(true);
+        expect(Object.is(api["nk_closed"]!(30, x), numericReference.closed(30, x))).toBe(true);
+        expect(Object.is(api["nk_stack"]!(30, x), numericReference.stackSum(30, x))).toBe(true);
+      }
+      for (const n of [0, 0.5, 2.5, 1000])
+        expect(api["nk_grow"]!(n)).toBe(numericReference.grow(n));
+      for (const x of values)
+        for (const index of [0, -0, 1, 2, 3, -1, 0.5, Infinity, NaN])
+          expect(Object.is(api["nk_direct"]!(x, index), numericReference.direct(x, index))).toBe(
+            true,
+          );
+      for (const n of [0, 1, 2, 8, 30]) {
+        expect(api["nk_triples"]!(n)).toBe(numericReference.triples(n));
+        expect(api["nk_affine"]!(n)).toBe(numericReference.affine(n));
+        for (const x of values)
+          expect(Object.is(api["nk_extremes"]!(n, x), numericReference.extremes(n, x))).toBe(true);
+      }
+      const wasi = new WASI({ version: "preview1" });
+      const instance = await WebAssembly.instantiate(await readFile(result.archivePath), {
+        ...wasi.getImportObject(),
+        scriptc: {
+          panic: () => {
+            throw new Error("numeric library panic");
+          },
+        },
+      });
+      const raw = instance.instance.exports as Api;
+      wasi.initialize(instance.instance);
+      raw["nk_init"]!();
+      raw["nk_allocations"]!(128);
+      raw["nk_recycled"]!(128);
+      raw["nk_collect"]!();
+      const bytes = raw.memory.buffer.byteLength;
+      for (let i = 0; i < 1000; i++) {
+        const n = 64 + (i % 64);
+        expect(raw["nk_allocations"]!(n)).toBe(numericReference.allocations(n));
+        expect(raw["nk_recycled"]!(n)).toBe(numericReference.recycled(n));
+        if (i % 100 === 0) raw["nk_collect"]!();
+      }
+      expect(raw.memory.buffer.byteLength).toBeLessThanOrEqual(bytes + 4 * 65536);
+      const scalarEntry = join(directory, "scalar-numeric.ts"),
+        scalarProfile = join(directory, "scalar-numeric.json");
+      await writeFile(
+        scalarEntry,
+        "export function only(x:number,y:number):number {return Math.hypot(x,y);}",
+      );
+      await writeFile(
+        scalarProfile,
+        JSON.stringify({
+          ...settings,
+          entry: scalarEntry,
+          exports: [{ export: "only", symbol: "nk_only", params: ["f64", "f64"], returns: "f64" }],
+        }),
+      );
+      const scalar = await compileLibrary({
+        profilePath: scalarProfile,
+        outDir: join(directory, "scalar-numeric"),
+      });
+      expect(scalar.diagnostics ?? []).toEqual([]);
+      expect(scalar.ok).toBe(true);
+      const scalarGlue = await import(
+        pathToFileURL(scalar.archivePath.replace(/\.wasm$/, ".mjs")).href
+      );
+      const scalarApi = await scalarGlue.instantiateFromBytes(
+        await readFile(scalar.archivePath),
+        {},
+      );
+      expect(scalarApi.nk_only(3, 4)).toBe(5);
     });
 
     test("SIMD profile changes are cache-isolated, Node-exact and feature-checked", async () => {

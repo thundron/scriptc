@@ -61,7 +61,9 @@ test("only empty literals stored where the module appends construct small", () =
   // which does not change the choice of constructor.
   const llvm = emitLlvmModule(module(body, ["xs", "ys"]));
   expect(llvm.match(/call ptr @scr_arr_new_small\(i32 [07]\)/g)).toHaveLength(2);
-  expect(llvm.match(/call ptr @scr_arr_new\(i32 [07], i64 0\)/g)).toHaveLength(2);
+  // The unused binding `ys` is scalar-replaced; the discarded literal
+  // still uses the ordinary constructor, never a small append buffer.
+  expect(llvm.match(/call ptr @scr_arr_new\(i32 [07], i64 0\)/g)).toHaveLength(1);
 });
 
 test("a binding with the same id in another function does not count", () => {

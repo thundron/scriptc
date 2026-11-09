@@ -22,6 +22,16 @@ import {
 } from "./alloc.js";
 import { youngNurseryRequested } from "../young-nursery.js";
 import { llvmBytes as llBytes, wtf8Bytes } from "../literals.js";
+import { scalarizeArrayLiterals } from "./scalar-arrays.js";
+import { findNonemptyStackPops } from "./nonempty-stack-pops.js";
+import { fuseNumericMapReductions } from "./numeric-map-reductions.js";
+import { specializeSmallArrayMaps } from "./small-array-maps.js";
+import { eliminatePrivateStackPairs } from "./private-stack-pairs.js";
+import {
+  findAppendLoopReserves,
+  emitAppendLoopReserve,
+  type AppendReserve,
+} from "./append-loop-reserves.js";
 import { InternalCompilerError } from "../../errors.js";
 import { serializeModuleParts } from "../../ir/serialize.js";
 import { createHash } from "node:crypto";
@@ -968,6 +978,15 @@ function verifyInt32Selection(
 /** Emits the module's parts, emitting it again with the functions an
  * UnwindAbiViolation names on the pending-flag ABI. */
 function emitModuleText(input: IrModule, options: LlvmTargetOptions): string[] {
+  if (
+    options.debugSources === undefined &&
+    process.env["SCRIPTC_CAPTURED_NUMERIC_RESULTS"] !== "0" &&
+    !observesStacks(input)
+  )
+    input = scalarizeNumericRecords(input, true);
+  input = scalarizeArrayLiterals(
+    eliminatePrivateStackPairs(fuseNumericMapReductions(specializeSmallArrayMaps(input))),
+  );
   for (let excluded = options.unwindExcluded ?? new Set<string>(); ;) {
     const emitter = moduleEmitter(input, { ...options, unwindExcluded: excluded });
     try {
@@ -1684,6 +1703,7 @@ export class LlEmitter {
    * whose bindings end with the list (emitBlock and function bodies). */
   private stmtCursor: { stmts: IrStmt[]; index: number } | null = null;
   readonly optionalArrayReads: OptionalArrayReads;
+  readonly nonemptyStackPops: ReadonlySet<IrExpr>;
   readonly float32Values: Float32Values;
   /** Union sources a binding or projection can hold in a stack box. */
   readonly unionSources: UnionSources;
@@ -1826,6 +1846,7 @@ export class LlEmitter {
    * (reservedArrayLength), with that hint. Constructing the literal with
    * the hinted capacity consumes the hint, which then emits nothing. */
   readonly reservedArrayLengths = new Map<IrExpr, IrStmt & { kind: "arraySetLength" }>();
+  readonly appendLoopReserves: ReadonlyMap<IrStmt, AppendReserve>;
   readonly consumedReserves = new Set<IrStmt>();
   /** The promise a `return` emitted past its finally regions already
    * produced for its adopting await (borrowed from the return's parked
@@ -2054,6 +2075,9 @@ export class LlEmitter {
     string,
     { slot: string; type: "i64"; signed: true; range: IntegerRange }
   >();
+  /** Constant locals retain an index-only view separately from the
+   * authoritative double, including products outside the safe range. */
+  wideIntegerTemps = new Map<string, { slot: string; bound: number; below: number }>();
   /** Integer temps are kept only in optimized synchronous functions: an
    * async or generator body resumes with its locals in its frame, which
    * an entry alloca is not part of. */
@@ -2423,6 +2447,7 @@ export class LlEmitter {
       if (fn.jsEntry !== undefined) this.jsEntries = true;
     }
     this.appendedArrayLiterals = findAppendedArrayLiterals(mod, this.nodeIndex);
+    this.appendLoopReserves = findAppendLoopReserves(mod);
     for (const entry of mod.ffiImports ?? []) {
       this.ffiByName.set(entry.name, entry);
     }
@@ -2485,6 +2510,7 @@ export class LlEmitter {
     // Optional array reads also cover nullable unions: emitLocalArrayRead
     // then yields the (borrowed or owned) element pointer, not a stack box.
     // Arrays of such a union are read the same way.
+    this.nonemptyStackPops = findNonemptyStackPops(mod);
     this.optionalArrayReads = new OptionalArrayReads(
       this.fnByName,
       this.unionsById,
@@ -2664,6 +2690,13 @@ export class LlEmitter {
         targetTriple: options.targetTriple,
         threadInstances: mod.lib?.threadInstances === true,
       }),
+      inlineWasmAlloc:
+        process.env["SCRIPTC_WASM_CONSTRUCTORS"] !== "0" &&
+        options.wasi === true &&
+        this.sizeType === "i32" &&
+        options.objectAudit === false &&
+        mod.workers !== true &&
+        mod.lib?.threadInstances !== true,
       // Worker programs keep one allocator per script thread: the inline
       // paths address its thread-local state.
       threadLocalAlloc: mod.workers === true,
@@ -7258,6 +7291,8 @@ export class LlEmitter {
           this.deferredPromiseAllEntries.set((stmts[i] as { localId: string }).localId, deferred);
           continue;
         }
+        const appendReserve = this.appendLoopReserves.get(stmts[i]!);
+        if (appendReserve) emitAppendLoopReserve(this, appendReserve);
         this.emitStmt(stmts[i]!);
       }
     } finally {
@@ -7429,7 +7464,18 @@ export class LlEmitter {
     return this.canBorrowCallArgument(value);
   }
 
+  emitProjectedSequence(e: ExprOf<"seqExpr">): LlValue {
+    return this.emitSequence(() => {
+      for (const stmt of e.stmts) this.emitStmt(stmt);
+      return this.emitReadReceiver(e.result);
+    });
+  }
+
   emitDiscarded(e: IrExpr): void {
+    if (e.kind === "bytesIntrinsic" && e.method === "fillElem") {
+      emitBytesIntrinsic(this, e, true);
+      return;
+    }
     // A statement-position yield never reads the resumed value: it stays
     // in the IN slot until the next resume replaces it.
     if (e.kind === "yieldExpr" && e.captureCompletion === undefined && e.type.kind !== "void") {

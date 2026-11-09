@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/math-hypot-fixed-arity.ts"
+ ],
+ "diags": []
+}

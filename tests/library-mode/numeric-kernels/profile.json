@@ -1,0 +1,145 @@
+{
+  "profile_format": 1,
+  "name": "numeric-kernels",
+  "entry": "lib.ts",
+  "emission": "llvm",
+  "abi": {
+    "prefix": "nk_",
+    "init_symbol": "nk_init",
+    "sink_register_symbol": "nk_set_panic_sink",
+    "collect_symbol": "nk_collect",
+    "result_reset_symbol": null
+  },
+  "exports": [
+    {
+      "export": "two",
+      "symbol": "nk_two",
+      "params": [
+        "f64",
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "three",
+      "symbol": "nk_three",
+      "params": [
+        "f64",
+        "f64",
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "literal",
+      "symbol": "nk_literal",
+      "params": [
+        "f64",
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "product",
+      "symbol": "nk_product",
+      "params": [
+        "f64",
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "run",
+      "symbol": "nk_run",
+      "params": [
+        "f64",
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "mapSum",
+      "symbol": "nk_map",
+      "params": [
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "stackSum",
+      "symbol": "nk_stack",
+      "params": [
+        "f64",
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "grow",
+      "symbol": "nk_grow",
+      "params": [
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "allocations",
+      "symbol": "nk_allocations",
+      "params": [
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "direct",
+      "symbol": "nk_direct",
+      "params": [
+        "f64",
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "triples",
+      "symbol": "nk_triples",
+      "params": [
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "extremes",
+      "symbol": "nk_extremes",
+      "params": [
+        "f64",
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "affine",
+      "symbol": "nk_affine",
+      "params": [
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "recycled",
+      "symbol": "nk_recycled",
+      "params": [
+        "f64"
+      ],
+      "returns": "f64"
+    },
+    {
+      "export": "closed",
+      "symbol": "nk_closed",
+      "params": [
+        "f64",
+        "f64"
+      ],
+      "returns": "f64"
+    }
+  ]
+}

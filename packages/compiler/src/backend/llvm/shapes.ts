@@ -115,6 +115,8 @@ export interface ShapeHost {
   cstr(text: string): string;
   /** Inline the small-object allocator's fast paths (llvm/alloc.ts). */
   readonly inlineAlloc?: boolean;
+  /** Private wasm32 constant-size allocation with optimizer-visible clearing. */
+  readonly inlineWasmAlloc?: boolean;
   /** Record and class fields that store a scalar union's tag and bits
    * inline (inline-unions.ts): they own nothing. */
   readonly inlineUnions: InlineUnionFields;

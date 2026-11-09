@@ -1,0 +1,6 @@
+{
+ "order": [
+  "<repo>/tests/corpus/array-append-loop-reservation.ts"
+ ],
+ "diags": []
+}

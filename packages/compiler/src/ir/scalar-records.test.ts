@@ -470,3 +470,94 @@ test("renames a producer's parameter where its literal writes it", () => {
   expect(caller.locals.find((l) => l.id === at)?.mutable).toBe(true);
   expect(caller.locals.find((l) => l.id === text)?.mutable).toBe(false);
 });
+
+function capturedFixture(): IrModule {
+  const mod = fixture(),
+    pair = mod.functions[0]!,
+    caller = main(mod),
+    func: IrType = { kind: "func", params: [F64], ret: record };
+  pair.captures = [{ localId: "cap", name: "cap", type: F64 }];
+  pair.locals.push({ id: "cap", name: "cap", type: F64, mutable: false, boxed: true });
+  const result = pair.body[0]!;
+  if (result.kind === "return" && result.value?.kind === "recordLit")
+    result.value.fields[1]!.value = ref("cap");
+  caller.locals.push(
+    { id: "holder", name: "holder", type: F64, mutable: false, boxed: true },
+    { id: "choose", name: "choose", type: func, mutable: false },
+  );
+  const declaration = caller.body[0]!;
+  if (declaration.kind === "varDecl")
+    declaration.init = {
+      kind: "callValue",
+      callee: ref("choose", func),
+      args: [num(1)],
+      type: record,
+      loc,
+    };
+  caller.body.unshift(
+    { kind: "varDecl", localId: "holder", init: num(7), loc },
+    {
+      kind: "varDecl",
+      localId: "choose",
+      init: { kind: "closure", fnName: "pair", captures: ["holder"], type: func, loc },
+      loc,
+    },
+  );
+  return mod;
+}
+
+test("captured field-only results map capture slots into the active caller and remove unused closures", () => {
+  const mod = capturedFixture(),
+    before = structuredClone(mod);
+  expect(validateModule(mod)).toEqual([]);
+  const out = scalarizeNumericRecords(mod, true);
+  expect(validateModule(out)).toEqual([]);
+  expect(mod).toEqual(before);
+  expect(nodes(main(out).body, "callValue")).toHaveLength(0);
+  expect(nodes(main(out).body, "closure")).toHaveLength(0);
+  expect(nodes(main(out).body, "varRef").some((node) => node["localId"] === "holder")).toBe(true);
+  expect(main(out).locals.some((local) => local.id === "choose")).toBe(false);
+  expect(out.functions[0]).toBe(mod.functions[0]);
+});
+
+test("escaping captured results retain their ordinary record and closure ABI", () => {
+  const mod = capturedFixture();
+  main(mod).body.push({ kind: "exprStmt", expr: ref("result", record), loc });
+  expect(validateModule(mod)).toEqual([]);
+  expect(scalarizeNumericRecords(mod, true)).toBe(mod);
+});
+
+test("captured writes and unstable closure bindings keep the original calls", () => {
+  const mod = capturedFixture();
+  mod.functions[0]!.locals.find((local) => local.id === "cap")!.mutable = true;
+  main(mod).locals.find((local) => local.id === "holder")!.mutable = true;
+  mod.functions[0]!.body.unshift({ kind: "assign", localId: "cap", value: num(9), loc });
+  expect(validateModule(mod)).toEqual([]);
+  expect(scalarizeNumericRecords(mod, true)).toBe(mod);
+  const unstable = capturedFixture();
+  main(unstable).locals.find((local) => local.id === "choose")!.mutable = true;
+  expect(validateModule(unstable)).toEqual([]);
+  expect(scalarizeNumericRecords(unstable, true)).toBe(unstable);
+});
+
+test("identity observers retain a closure even when its field-only calls inline", () => {
+  const mod = capturedFixture(),
+    caller = main(mod),
+    type = caller.locals.find((local) => local.id === "choose")!.type;
+  caller.body.push({
+    kind: "exprStmt",
+    expr: {
+      kind: "bin",
+      op: "===",
+      left: ref("choose", type),
+      right: ref("choose", type),
+      type: BOOL,
+      loc,
+    },
+    loc,
+  });
+  const out = scalarizeNumericRecords(mod, true);
+  expect(validateModule(out)).toEqual([]);
+  expect(nodes(main(out).body, "callValue")).toHaveLength(0);
+  expect(nodes(main(out).body, "closure")).toHaveLength(1);
+});

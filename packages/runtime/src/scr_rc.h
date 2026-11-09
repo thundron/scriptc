@@ -368,8 +368,24 @@ void scr_cyc_free(void *obj); /* frees the block, header included */
 #define SCR_SMALL_ALLOC 1
 #endif
 
+#include "scr_wasm_alloc.h"
+
 void *scr_mem_realloc(void *p, size_t n);
 void *scr_rt_calloc(size_t n); /* emitted-code entry points */
+#if defined(__wasm__) && UINTPTR_MAX == UINT32_MAX
+void *scr_wsa_alloc_16(void);
+void *scr_wsa_alloc_32(void);
+void *scr_wsa_alloc_48(void);
+void *scr_wsa_alloc_64(void);
+void *scr_wsa_alloc_80(void);
+void *scr_wsa_alloc_96(void);
+void *scr_wsa_alloc_112(void);
+void *scr_wsa_alloc_128(void);
+void *scr_wsa_alloc_192(void);
+void *scr_wsa_alloc_256(void);
+void *scr_wsa_alloc_384(void);
+void *scr_wsa_alloc_512(void);
+#endif
 /* The targets whose compact class fields hold 32-bit references
  * (llvm/emitter.ts lowRegionTarget): Linux and 64-bit macOS. */
 #if SCR_SMALL_ALLOC && (defined(__linux__) || defined(__APPLE__))
@@ -699,23 +715,39 @@ void scr_library_heap_note_free(void *p);
 #define SCR_LIBRARY_HEAP_FREE(p) ((void)(p))
 #endif
 static inline void *scr_mem_alloc(size_t n) {
+#if SCR_WASM_SMALL_ALLOC
+  return scr_wsa_take(n, false);
+#else
   void *p = malloc(n);
   SCR_LIBRARY_HEAP_ALLOC(p);
   return p;
+#endif
 }
 static inline void *scr_mem_calloc(size_t n) {
+#if SCR_WASM_SMALL_ALLOC
+  return scr_wsa_take(n, true);
+#else
   void *p = calloc(1, n);
   SCR_LIBRARY_HEAP_ALLOC(p);
   return p;
+#endif
 }
 static inline void scr_mem_free(void *p) {
+#if SCR_WASM_SMALL_ALLOC
+  if (scr_wsa_free(p)) return;
+#endif
   SCR_LIBRARY_HEAP_FREE(p);
   free(p);
 }
 /* Without the small object allocator every block is a reference block, so the
  * reference twins are the plain path, audit hooks included. */
+#if SCR_WASM_SMALL_ALLOC
+static inline void *scr_mem_alloc_ref(size_t n) { return scr_wsa_take(n, false); }
+static inline void *scr_mem_calloc_ref(size_t n) { return scr_wsa_take(n, true); }
+#else
 static inline void *scr_mem_alloc_ref(size_t n) { return scr_mem_alloc(n); }
 static inline void *scr_mem_calloc_ref(size_t n) { return scr_mem_calloc(n); }
+#endif
 void *scr_mem_realloc_ref(void *p, size_t n);
 size_t scr_mem_block_size(const void *p);
 #endif

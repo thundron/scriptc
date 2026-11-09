@@ -29,16 +29,16 @@
  * The header parser throws on any C type it cannot map, so it cannot
  * fall behind the header without a test failure. */
 import { execFile } from "node:child_process";
-import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test } from "vitest";
 import { emitLlvmModule } from "../src/backend/llvm/emitter.js";
 import { resolveCc, runtimeSrcDir } from "../src/backend/native-toolchain.js";
 import { RUNTIME_ABI_MARKER } from "../src/backend/runtime-abi.js";
 import type { IrModule } from "../src/ir/ir.js";
-import { compile } from "../src/index.js";
+import { compile, deserializeModule } from "../src/index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -46,6 +46,15 @@ const repoRoot = join(import.meta.dirname, "../../..");
 const runtimeHeaderDir = join(repoRoot, "packages/runtime/src");
 const llvmSrcDir = join(import.meta.dirname, "../src/backend/llvm");
 const corpusDir = join(repoRoot, "tests/corpus");
+const temporaryDirectories: string[] = [];
+async function temporaryDirectory(prefix: string): Promise<string> {
+  const path = await mkdtemp(join(tmpdir(), prefix));
+  temporaryDirectories.push(path);
+  return path;
+}
+afterAll(async () => {
+  await Promise.all(temporaryDirectories.map((path) => rm(path, { recursive: true, force: true })));
+});
 
 /** The emitted-scan slice: in-tier programs that collectively exercise the
  * fs/path/os/crypto/fs.promises/scandir/stats surfaces — the family where
@@ -89,6 +98,7 @@ const LL_I32_TYPES = new Set(["int", "int32_t", "uint32_t", "unsigned", "unsigne
 interface HeaderTypes {
   enums: ReadonlySet<string>;
   ptrTypedefs: ReadonlySet<string>;
+  pointerBits: 32 | 64;
 }
 
 /** C type → the LLVM type the emitter must use for it. Throws on anything
@@ -112,7 +122,17 @@ function cTypeToLl(raw: string, types: HeaderTypes): string {
     return "i8";
   if (t === "short" || t === "unsigned short" || t === "int16_t" || t === "uint16_t") return "i16";
   if (t === "va_list") return "ptr"; // decays to a pointer in a parameter list on our targets
-  if (LL_I64_TYPES.has(t)) return "i64";
+  if (LL_I64_TYPES.has(t)) {
+    const pointerSized = [
+      "size_t",
+      "ssize_t",
+      "intptr_t",
+      "uintptr_t",
+      "long",
+      "unsigned long",
+    ].includes(t);
+    return pointerSized && types.pointerBits === 32 ? "i32" : "i64";
+  }
   if (LL_I32_TYPES.has(t)) return "i32";
   if (types.enums.has(t)) return "i32"; // C enums are int-sized on every supported target
   if (types.ptrTypedefs.has(t)) return "ptr"; // typedef'd function pointers (ScrTraceFn, ...)
@@ -175,7 +195,9 @@ async function readRuntimeHeader(
  * Only `;`-terminated prototypes count: a `static inline` definition has
  * no linkage symbol the emitter could declare, so a declare against one
  * must report as missing. */
-async function parseHeader(): Promise<{ protos: Map<string, CProto>; dataSyms: Set<string> }> {
+async function parseHeader(
+  pointerBits: 32 | 64 = 64,
+): Promise<{ protos: Map<string, CProto>; dataSyms: Set<string> }> {
   // The dynamic tier's units declare their entry points in scr_js.h, which
   // static runtime units never include (packages/runtime/test/headers).
   const seen = new Set<string>();
@@ -201,7 +223,7 @@ async function parseHeader(): Promise<{ protos: Map<string, CProto>; dataSyms: S
   )) {
     ptrTypedefs.add(m[1]!);
   }
-  const types: HeaderTypes = { enums, ptrTypedefs };
+  const types: HeaderTypes = { enums, ptrTypedefs, pointerBits };
   const protos = new Map<string, CProto>();
   for (const m of src.matchAll(/\b(scr_[a-z0-9_]+)\s*\(/g)) {
     const name = m[1]!;
@@ -345,7 +367,7 @@ describe("LLVM backend declares match scr_runtime.h prototypes", () => {
     );
   });
   test("ScrBytes structural type matches the C runtime layout", async () => {
-    const outDir = await mkdtemp(join(tmpdir(), "scriptc-llvm-layout-"));
+    const outDir = await temporaryDirectory("scriptc-llvm-layout-");
     const cPath = join(outDir, "scr-bytes-layout.c");
     const objectPath = join(outDir, "scr-bytes-layout.o");
     await writeFile(
@@ -448,12 +470,50 @@ _Static_assert(offsetof(ScrBytes, properties) == 56, "ScrBytes.properties must f
     expect(failures).toEqual([]);
   });
 
+  test("private wasm32 constructor declarations match the wasm32 C ABI", async () => {
+    const outDir = await temporaryDirectory("scriptc-llvm-wasm-abi-"),
+      entry = join(outDir, "main.ts"),
+      ir = join(outDir, "main.json");
+    await writeFile(
+      entry,
+      `class Cell { next:Cell|undefined;constructor(public x:number){} }
+function make(x:number){const node=new Cell(x);node.next=node;return {x,bytes:new Uint8Array(8),node,plain:{value:x}};}
+const value=make(Number(process.argv[2]));console.log(value.node===value.node.next,value.plain.value,value.bytes.length);`,
+    );
+    const result = await compile(entry, {
+      outDir,
+      outPath: ir,
+      outputKind: "ir",
+      nodeIslands: { mode: "off" },
+    });
+    expect(result.diagnostics ?? []).toEqual([]);
+    expect(result.ok).toBe(true);
+    const mod = deserializeModule(await readFile(ir, "utf8")),
+      text = emitLlvmModule(mod, { wasi: true, pointerBits: 32, objectAudit: false });
+    const { protos } = await parseHeader(32),
+      failures: string[] = [],
+      seen = new Set<string>();
+    for (const line of text.split("\n")) {
+      if (!line.startsWith("declare ")) continue;
+      const declaration = parseDeclare(line);
+      if (!declaration?.name.startsWith("scr_")) continue;
+      seen.add(declaration.name);
+      const issue = checkDeclare(declaration, protos);
+      if (issue) failures.push(issue);
+    }
+    for (const size of [16, 32, 48, 64, 80, 96, 112, 128, 192, 256, 384, 512])
+      expect(seen.has(`scr_wsa_alloc_${size}`)).toBe(true);
+    expect(seen.has("scr_cyc_alloc")).toBe(true);
+    expect(seen.has("scr_rt_calloc")).toBe(true);
+    expect(failures).toEqual([]);
+  });
+
   test("every declare emitted for the fs/path corpus slice", async () => {
     const { protos } = await parseHeader();
     const failures: string[] = [];
     const seen = new Set<string>();
     for (const fixture of EMIT_FIXTURES) {
-      const outDir = await mkdtemp(join(tmpdir(), "scriptc-llvm-abi-"));
+      const outDir = await temporaryDirectory("scriptc-llvm-abi-");
       const res = await compile(join(corpusDir, fixture), {
         outPath: join(outDir, "program"),
         outDir,

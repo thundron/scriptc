@@ -42,6 +42,8 @@ import { type WalkBorrowHost, analyzeWalks } from "./walk-borrows.js";
 export function emitReadReceiver(emitter: LlEmitter, e: IrExpr): LlValue {
   if (!isRefCounted(e.type)) return emitter.emitExpr(e);
   if (e.kind === "strLit") return { name: emitter.internLiteral(e.value), type: e.type };
+  if (e.kind === "seqExpr" && isScalarOptionalSource(e.result, emitter.unionSources))
+    return emitter.emitProjectedSequence(e);
   const guarded = guardedValue(e);
   if (guarded !== null) {
     // Throwing guards run in place, exactly as the sequence emits them.
@@ -328,6 +330,7 @@ export function canBorrowReceiver(emitter: LlEmitter, e: IrExpr): boolean {
     case "ternary":
       return emitter.canBorrowReceiver(e.then) && emitter.canBorrowReceiver(e.else_);
     case "seqExpr": {
+      if (isScalarOptionalSource(e.result, emitter.unionSources)) return true;
       const guarded = guardedValue(e);
       return guarded !== null && emitter.canBorrowReceiver(guarded);
     }

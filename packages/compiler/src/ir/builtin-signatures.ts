@@ -966,6 +966,8 @@ function buildLibFnSignatures() {
     "math.maxArr": { argTypes: [arrayOf(F64)], result: F64 },
     "math.minArr": { argTypes: [arrayOf(F64)], result: F64 },
     "math.hypotArr": { argTypes: [arrayOf(F64)], result: F64 },
+    "math.hypot2": { argTypes: [F64, F64], result: F64 },
+    "math.hypot3": { argTypes: [F64, F64, F64], result: F64 },
     /** `Math.floor(x)` — C floor() IS the JS operation (NaN/±0/±Infinity
      * pass through bit-exactly). Never throws. */
     "math.floor": { argTypes: [F64], result: F64 },

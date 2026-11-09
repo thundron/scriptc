@@ -182,19 +182,20 @@ export function exactCompareOperands(
   return [operand(l, li), operand(r, ri)];
 }
 
-/** An i64 index for a consumer that compares it, unsigned, with a length or
- * capacity below 2^32 and takes the double's path otherwise: the exact
- * integer of `value`, or its wide view, which equals the double at every
- * such index. Null when the index needs the double round trip. */
+/** An i64 index for a consumer with a proven maximum length/capacity.
+ * Ordinary arrays use the default 2^32 bound. An unbounded native64 byte
+ * view passes Infinity: only a globally exact view can replace its double.
+ * Null when the consumer needs the double round trip. */
 export function indexInteger(
   host: LlvmEmitterContext,
   value: LlValue,
   expr?: IrExpr,
+  maximumLength = INDEX_LIMIT,
 ): string | null {
   const integer = exactInteger(host, value, expr);
   if (integer) return widenInteger(host, integer);
   const wide = value.wideInteger;
-  return wide && wide.below >= INDEX_LIMIT ? wide.name : null;
+  return wide && (wide.bound <= wide.below || wide.below >= maximumLength) ? wide.name : null;
 }
 
 /** An i64 equal to a value's double wherever the value can be: its exact

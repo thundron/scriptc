@@ -142,6 +142,8 @@ export const LIB_FN_SYMS: Record<string, string> = {
   "math.maxArr": "scr_math_max_arr",
   "math.minArr": "scr_math_min_arr",
   "math.hypotArr": "scr_math_hypot_arr",
+  "math.hypot2": "scr_math_hypot2",
+  "math.hypot3": "scr_math_hypot3",
   "math.min": "scr_math_min",
   "math.max": "scr_math_max",
   "math.random": "scr_math_random",

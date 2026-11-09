@@ -1153,7 +1153,7 @@ function lowerUnionBytesMethodCall(
     result = "receiver";
   } else if (name === "fill" && nodes.length <= 3) {
     method = "fillElem";
-    args = () => [optional(0, num(0)), optional(1, num(0)), optional(2, num(Infinity))];
+    args = () => [optional(0, num(NaN)), optional(1, num(0)), optional(2, num(Infinity))];
     result = "receiver";
   } else if (name === "copyWithin" && nodes.length <= 3) {
     method = "copyWithin";
@@ -1416,10 +1416,12 @@ export function lowerBytesMethodCall(
       lowerer.noLowering(`.fill with ${nArgs} arguments on typed arrays`, call);
     }
     const receiver = lowerer.lowerExprExpecting(access.expression, receiverIr);
-    const zero: IrExpr = { kind: "numLit", value: 0, type: F64, loc };
+    // ToNumber(undefined) is NaN, not zero; integer element coercion
+    // subsequently maps it to zero while floating views keep the NaN.
+    const missingValue: IrExpr = { kind: "numLit", value: NaN, type: F64, loc };
     const v = call.arguments.nodes[0]
-      ? lowerOptionalArgument(lowerer, call.arguments.nodes[0], F64, zero)
-      : zero;
+      ? lowerOptionalArgument(lowerer, call.arguments.nodes[0], F64, missingValue)
+      : missingValue;
     const idx = call.arguments.nodes.slice(1).map((a, i) =>
       lowerOptionalArgument(lowerer, a, F64, {
         kind: "numLit",

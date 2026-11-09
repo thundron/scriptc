@@ -465,6 +465,34 @@ ScrStr *scr_str_alloc_raw(size_t len, size_t cap) {
   return s;
 }
 
+/* A symbol event name's registry key (scr_string.h): a ScrStr-shaped
+ * identity key with len == SIZE_MAX and the ScrSym* in its bytes. Emissions
+ * of a symbol-named event make one per call, so it is a plain small
+ * allocation on the ordinary string refcount — the audit's live count
+ * stays exact — and the release path's short-string, index and spare-block
+ * caches all decline it (len far above the cache window, ascii proven). */
+ScrStr *scr_str_symbol_key(ScrSym *sym) {
+  ScrStr *s = scr_mem_alloc(sizeof(ScrStr) + sizeof sym);
+  if (!s) scr_oom();
+  s->rc = 1;
+  s->len = SIZE_MAX;
+  s->cap = 0;
+  s->ascii = 1; /* no char index to purge: the bytes are a pointer */
+#if SCR_STR_HASH_CACHE
+  s->hash = 0;
+#endif
+  memcpy(s->data, &sym, sizeof sym);
+#ifdef SCR_RC_AUDIT
+  scr_live_strings++;
+#endif
+  return s;
+}
+
+/* The symbol unit's table for the emitter's symbol-keyed buckets
+ * (scr_string.h); scr_symbol.c installs it from a constructor. NULL in a
+ * program without symbols — a symbol-keyed bucket cannot exist there. */
+const ScrSymEventOps *scr_sym_event_ops = NULL;
+
 ScrStr *scr_str_regrow(ScrStr *s, size_t newcap) {
   if (newcap < s->len || newcap > SCR_STR_MAX_CAP) scr_oom();
   scr_short_forget(s);
@@ -1767,6 +1795,14 @@ static size_t scr_sidx_walk_from(const ScrStr *s, ScrSidx *e, size_t cu, size_t 
 
 static __attribute__((noinline)) size_t scr_u16_to_byte_walk(const ScrStr *s, ScrSidx *e,
                                                              size_t u16, bool *mid) {
+  /* An index at or past a known length (the end of `s.slice(k)`, which is
+   * the length itself) is the byte length. Walking to it would index the
+   * whole string first: the rest of a text cut again and again paid one
+   * pass over that rest for every cut. An unknown length is SIZE_MAX. */
+  if (u16 >= e->u16len) {
+    *mid = false;
+    return s->len;
+  }
   if (scr_sidx_offsets(s, e)) {
     *mid = false;
     if (u16 >= e->offsets->n) return s->len;
@@ -2626,9 +2662,14 @@ static ScrStr *scr_str_slice_units(ScrStr *s, ScrSidx *e,
     ScrStr *result = scr_str_from_span(s->data + from_b, content_len);
     /* Unit boundaries already prove the exact output length. Preserve it
      * instead of decoding a potentially megabyte-sized copy on .length.
-     * Index checkpoints remain lazy and owned by the result's cache slot. */
-    if (content_len >= SCR_SIDX_MIN_BYTES && !result->ascii)
-      scr_sidx(result)->u16len = to - from;
+     * Index checkpoints remain lazy and owned by the result's cache slot;
+     * a result below the index's size keeps its length in the length
+     * table, so the next slice of it (the rest of a text, cut again) does
+     * not count it either. */
+    if (!result->ascii) {
+      if (content_len >= SCR_SIDX_MIN_BYTES) scr_sidx(result)->u16len = to - from;
+      else scr_str_note_utf16_len(result, to - from);
+    }
     return result;
   }
 
@@ -3225,7 +3266,64 @@ ScrStr *scr_str_replace_chars(ScrStr *s, ScrStr *chars, ScrStr *texts) {
   return out;
 }
 
+/* replace / replaceAll of one byte by plain text. A one-byte needle is an
+ * ASCII character, and `hit` is its first match. The matches are counted
+ * first, so the result is allocated once at its exact size. Declines
+ * (NULL) a replacement that expands `$` or that could complete a surrogate
+ * pair at a seam (an empty one, or one with a lone surrogate at either
+ * end): scr_str_replace_bytes keeps those. */
+static ScrStr *scr_str_replace_byte(ScrStr *s, const char *hit, char c, ScrStr *rep, bool all) {
+  size_t rl = rep->len;
+  if (rl == 0 || (unsigned char)rep->data[0] == 0xED ||
+      (rl >= 3 && (unsigned char)rep->data[rl - 3] == 0xED) || memchr(rep->data, '$', rl) != NULL)
+    return NULL;
+  const char *end = s->data + s->len;
+  size_t count = 1;
+  if (all)
+    for (const char *p = hit + 1; (p = memchr(p, c, (size_t)(end - p))) != NULL; p++) count++;
+  if (count > (SCR_STR_MAX_CAP - s->len) / rl) scr_oom();
+  size_t len = s->len - count + count * rl;
+  ScrStr *out = scr_str_alloc_raw(len, len);
+  char *to = out->data;
+  const char *from = s->data;
+  for (size_t k = 0;;) {
+    size_t gap = (size_t)(hit - from);
+    scr_copy_bytes(to, from, gap);
+    to += gap;
+    scr_copy_bytes(to, rep->data, rl);
+    to += rl;
+    from = hit + 1;
+    if (++k == count) break;
+    hit = memchr(from, c, (size_t)(end - from));
+  }
+  scr_copy_bytes(to, from, (size_t)(end - from));
+  out->len = len;
+  /* A spare block may be far larger than the result (as in
+   * scr_str_replace_bytes). */
+  if (out->cap - len > len / 4 + 64) out = scr_str_regrow(out, len);
+  out->data[len] = '\0';
+  scr_str_hash_forget(out);
+  if (s->ascii && rep->ascii) scr_str_note_ascii(out);
+  return out;
+}
+
+static __attribute__((noinline)) ScrStr *scr_str_replace_literal_long(ScrStr *s, ScrStr *search,
+                                                                      ScrStr *rep, bool all);
+
+/* A one-character search value takes one memchr; a subject without it is
+ * returned as it is, with no allocation. */
 ScrStr *scr_str_replace_literal(ScrStr *s, ScrStr *search, ScrStr *rep, bool all) {
+  if (search->len == 1) {
+    const char *hit = memchr(s->data, search->data[0], s->len);
+    if (!hit) return scr_str_retain(s);
+    ScrStr *out = scr_str_replace_byte(s, hit, search->data[0], rep, all);
+    if (out) return out;
+  }
+  return scr_str_replace_literal_long(s, search, rep, all);
+}
+
+static __attribute__((noinline)) ScrStr *scr_str_replace_literal_long(ScrStr *s, ScrStr *search,
+                                                                      ScrStr *rep, bool all) {
   if (search->len) return scr_str_replace_bytes(s, search->data, search->len, rep, all);
   ScrJsonBuf b;
   scr_jb_init(&b);

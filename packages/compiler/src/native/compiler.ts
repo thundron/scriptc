@@ -47,7 +47,7 @@ import {
   nativePartitionPaths,
   nativeProgramPartitions,
 } from "../backend/native-codegen-core.js";
-import { llvmRefusalDiag } from "../backend/target-diagnostics.js";
+import { llvmRefusalDiags } from "../backend/target-diagnostics.js";
 import { nativeCodegenDiag, type ScrDiagnostic } from "../diagnostics/diagnostic.js";
 import { loadFfiProfile, type FfiProfile } from "../ffi/ffi-manifest.js";
 import { analyzeWithFrontend } from "../frontend/analysis.js";
@@ -64,7 +64,7 @@ import {
 import { clearFenceEvalCaches } from "../library/fence-eval.js";
 import { archiveNativeLibrary, localizeNativeLibrary, linkNativeWasmLibrary } from "./library.js";
 import type { NativeToolchain } from "./toolchain.js";
-import { evaluateNativeComptime } from "./comptime.js";
+import { createComptimeEvaluator } from "../frontend/comptime.js";
 import { contentDigest, fileDigest, partsDigest, type NativeCache } from "./cache.js";
 import {
   nativeProfileKey,
@@ -83,6 +83,7 @@ import {
   prepareNativeExecutable,
   prepareNativeLibrary,
 } from "./prepare.js";
+import { usesLoweredProgram } from "../executable/lowered.js";
 import { readUnchangedBuild, recordUnchangedBuild, unchangedBuildKey } from "./unchanged.js";
 import { buildSanitizedRuntime, sanitizerDriver, sanitizerFlags } from "./sanitizer.js";
 import { inputsWithoutLld, lldLinkerArgs } from "../backend/lld.js";
@@ -181,16 +182,23 @@ export class NativeCompiler {
       toolchain.target.llvmTriple,
     );
     const evaluator = toolchain.comptimeExecutable;
+    const evaluateComptime =
+      evaluator === undefined
+        ? undefined
+        : createComptimeEvaluator(toolchain.ts7Executable, () => {
+            if (!existsSync(evaluator))
+              throw new Error(
+                `the compile-time evaluator ${evaluator} is missing; reinstall scriptc`,
+              );
+            return evaluator;
+          });
     this.frontend = (entry, npmStatic, externalTypes, libraryNpmStatic, options) =>
       runNativeFrontend(
         entry,
         toolchain.ts7Executable,
         npmStatic,
         externalTypes,
-        evaluator === undefined
-          ? undefined
-          : (source, timeout) =>
-              evaluateNativeComptime(source, timeout, toolchain.ts7Executable, evaluator),
+        evaluateComptime,
         libraryNpmStatic,
         options,
       );
@@ -528,9 +536,10 @@ export class NativeCompiler {
       }
       const exclusions = nativeFrontendExclusions(entry, options);
       // An unchanged build keeps what the last build of the same inputs left
-      // in place (native/unchanged.ts), before the frontend reads a source.
+      // in place (native/unchanged.ts), before the frontend reads a source. A
+      // build that writes or reads a lowered program always runs.
       const unchangedKey =
-        outputKind === "exe"
+        outputKind === "exe" && !usesLoweredProgram(options)
           ? unchangedBuildKey({
               entry,
               options,
@@ -885,7 +894,7 @@ export class NativeCompiler {
       // Keep subclass reads at the catch boundary, where the thrown object
       // retains its class identity and source location.
       if (error instanceof LlvmUnsupportedError)
-        return { ok: false, diagnostics: [llvmRefusalDiag(error, entry)], sourceTexts };
+        return { ok: false, diagnostics: llvmRefusalDiags(error, entry), sourceTexts };
       if (error instanceof NativeCodegenError)
         return {
           ok: false,
@@ -1056,7 +1065,7 @@ export class NativeCompiler {
       if (error instanceof LlvmUnsupportedError)
         return {
           ok: false,
-          diagnostics: [llvmRefusalDiag(error, options.profilePath)],
+          diagnostics: llvmRefusalDiags(error, options.profilePath),
           sourceTexts,
         };
       if (error instanceof NativeCodegenError)

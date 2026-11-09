@@ -253,10 +253,16 @@ let foreignBurstSum = 0;
 let foreignTimerTicks = 0;
 let foreignBurstOrderErrors = 0;
 const foreignBurstNext = [0, 0];
+const foreignTimerArmed = Date.now();
 const foreignTimer = setInterval(() => {
   foreignTimerTicks++;
 }, 0);
 const foreignBurstTick = (threadId: number, sequence: number) => {
+  // The first callback holds the loop until the interval is due. The timer
+  // then has to get its turn among the callbacks still queued, whatever the
+  // machine's speed: a burst that two threads post and the loop delivers in
+  // under a millisecond would otherwise end before the interval's first tick.
+  if (foreignBurstCount === 0) while (Date.now() - foreignTimerArmed < 3);
   // Count only timers delivered during the burst. A zero-delay interval has
   // a minimum delay, so a very fast burst can otherwise finish before it is due.
   if (foreignBurstCount === 0) foreignTimerTicks = 0;

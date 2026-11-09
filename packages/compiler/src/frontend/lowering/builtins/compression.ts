@@ -1,3 +1,4 @@
+import { refuseCallbackThis } from "../callback-arg.js";
 import { lowerBuiltinByteInput, errorFirstBytesCallback } from "./arguments.js";
 import { dynUndefinedExpr, numLit, varRef } from "../../../ir/build.js";
 import { InternalCompilerError } from "../../../errors.js";
@@ -108,6 +109,13 @@ function zlibInput(
       },
       dyn: false,
     };
+  }
+  // A value that is one of several kinds (`string | Buffer`, or a string
+  // that may be undefined): the runtime reads the kind the value has, with
+  // Node's TypeError for one that is no byte input.
+  if (value.type.kind === "union" && lowerer.dynConvertible(value.type)) {
+    const boxed = lowerer.coerceToExpected(value, DYN);
+    if (boxed.type.kind === "dyn") return { value: boxed, dyn: true };
   }
   lowerer.noLowering(
     `zlib byte input of '${lowerer.fmt(value.type)}' values`,
@@ -241,6 +249,7 @@ export function lowerZlibStreamMethodCall(
   const isFunc = (node: ts.Expression): boolean =>
     lowerer.mapTypeOf(lowerer.typeOf(node))?.kind === "func";
   const callback = (node: ts.Expression): IrExpr => {
+    refuseCallbackThis(lowerer, node, `a zlib ${member} callback`, "the stream");
     const cb = lowerer.lowerExprExpecting(node, funcOf([], VOID));
     if (cb.type.kind !== "func" || cb.type.params.length > 0) {
       lowerer.noLowering(

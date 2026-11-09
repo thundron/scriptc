@@ -1,5 +1,6 @@
 import { renderOriginNote } from "../decl-origin.js";
 import { keyedHelperName } from "../stable-names.js";
+import { ARM_EXTRACTION_HELPER, ROUTING_HELPERS } from "../width-lift.js";
 import { buildUnionNarrow, unionNarrowFailureMessage } from "../union-narrow.js";
 import { isSafeToRepeat } from "../expressions/evaluation-safety.js";
 import { nodeThrowExpr } from "../../../ir/build.js";
@@ -16,7 +17,19 @@ import * as ts from "../../ts7/adapter.js";
 import type { IrExpr, IrType, SrcLoc } from "../../../ir/ir.js";
 import { BOOL, F64, isUnitType, STRING, typeEquals } from "../../../ir/ir.js";
 import { typeKey } from "../../type-mapper.js";
+import { widthFromOverflow } from "./structural-plans.js";
 import type { Lowerer } from "../lowerer.js";
+import type { WidthLift } from "../width-lift.js";
+
+/** An arm conversion reaches for the width plan of its record pair. A source
+ * with an index signature can now supply a missing field from its overflow
+ * map, so pairs that had no plan have one; a retag keeps the conversion it
+ * took before that rule (reading the overflow across a retag would also link
+ * the dynamic tier into a program that never reads one). */
+function armWidthLift(lowerer: Lowerer, src: IrType, dst: IrType): WidthLift | null {
+  if (widthFromOverflow(lowerer, src, dst)) return null;
+  return lowerer.widthLiftPlan(src, dst);
+}
 
 /** Validate the complete union conversion before interning helpers.
  * Recursive width plans close through the same in-progress pair guard;
@@ -34,7 +47,7 @@ export function unionRetagMappable(lowerer: Lowerer, fromId: string, toId: strin
         from,
         to,
         (id) => lowerer.shapes.get(id),
-        (src, dst) => lowerer.widthLiftPlan(src, dst),
+        (src, dst) => armWidthLift(lowerer, src, dst),
       ) !== null
     );
   } finally {
@@ -313,7 +326,7 @@ export function recordUnionWrapHelper(
   const key = `recordWrap:${source.shapeId}:${toId}`;
   const existing = lowerer.coercions.retags.get(key);
   if (existing) return existing;
-  const name = keyedHelperName(lowerer, "%record.wrap", key);
+  const name = keyedHelperName(lowerer, ROUTING_HELPERS.recordWrap, key);
   lowerer.coercions.retags.set(key, name);
   lowerer.liftedFns.push(
     buildRecordUnionWrap(name, source, to, plan, loc, (lift, value, dst) =>
@@ -342,10 +355,10 @@ export function recordUnionRouteHelper(
     shape,
     to,
     (id) => lowerer.shapes.get(id),
-    (from, dst) => lowerer.widthLiftPlan(from, dst),
+    (from, dst) => armWidthLift(lowerer, from, dst),
   );
   if (!plan) return null;
-  const name = keyedHelperName(lowerer, "%record.route", key);
+  const name = keyedHelperName(lowerer, ROUTING_HELPERS.recordRoute, key);
   lowerer.coercions.retags.set(key, name);
   lowerer.liftedFns.push(
     buildRecordUnionWrap(name, source, to, plan, loc, (lift, value, dst) =>
@@ -390,7 +403,7 @@ export function unionRetagHelper(
     from,
     to,
     (id) => lowerer.shapes.get(id),
-    (src, dst) => lowerer.widthLiftPlan(src, dst),
+    (src, dst) => armWidthLift(lowerer, src, dst),
     trappable,
     classRoutes,
     checked ? (src, dst) => lowerer.checkedWidthLift(src, dst) : undefined,
@@ -405,7 +418,7 @@ export function unionRetagHelper(
   });
   const key = `${fromId}:${toId}:${stranded.join(".")}:${routeKey}${checked ? ":checked" : ""}`;
   const existing = lowerer.coercions.retags.get(key);
-  const name = existing ?? keyedHelperName(lowerer, "%union.retag", key);
+  const name = existing ?? keyedHelperName(lowerer, ROUTING_HELPERS.retag, key);
   if (!existing) {
     lowerer.coercions.retags.set(key, name);
     lowerer.liftedFns.push(
@@ -429,7 +442,7 @@ export function unionRetagHelper(
         arm.kind === "classRoute" ||
         (arm.kind === "direct"
           ? arm.route.lift.how === "copy"
-          : arm.routes.every((route) => route.lift.how === "copy")),
+          : arm.kind === "discriminant" && arm.routes.every((route) => route.lift.how === "copy")),
     )
   ) {
     lowerer.coercions.copyRetags.set(request, {
@@ -439,6 +452,15 @@ export function unionRetagHelper(
     });
   }
   return name;
+}
+
+/** The package declaration typing the slot a checked extraction of union
+ * `fromId` is built for (decl-origin.ts), or null. */
+function extractionOrigin(lowerer: Lowerer, fromId: string): string | null {
+  const originNode = lowerer.coercionOriginUnion === fromId ? lowerer.coercionOriginNode : null;
+  return (
+    lowerer.coercionFieldOrigin ?? (originNode === null ? null : lowerer.slotOriginOf(originNode))
+  );
 }
 
 /** Interned `%union.narrow.<n>(u)` — the CHECKED single-arm extraction
@@ -464,15 +486,7 @@ export function narrowedArmHelper(
   // A slot in package code typed by a package declaration: the TypeError
   // names the declaration (decl-origin.ts). Other extractions keep their
   // shared helper.
-  const originNode =
-    message === undefined && lowerer.coercionOriginUnion === fromId
-      ? lowerer.coercionOriginNode
-      : null;
-  const origin =
-    message !== undefined
-      ? null
-      : (lowerer.coercionFieldOrigin ??
-        (originNode === null ? null : lowerer.slotOriginOf(originNode)));
+  const origin = message !== undefined ? null : extractionOrigin(lowerer, fromId);
   const key =
     message !== undefined
       ? `${fromId}:${tag}:${message}`
@@ -484,7 +498,7 @@ export function narrowedArmHelper(
     lowerer.coercions.checkedNarrows.add(existing);
     return existing;
   }
-  const name = keyedHelperName(lowerer, "%union.narrow", key);
+  const name = keyedHelperName(lowerer, ARM_EXTRACTION_HELPER, key);
   lowerer.coercions.narrows.set(key, name);
   lowerer.coercions.checkedNarrows.add(name);
   const fn = buildUnionNarrow(
@@ -512,24 +526,37 @@ export function narrowedArmHelper(
 }
 
 /** Interned `%union.narrow.width.<n>(u)`: the checked extraction of a
- * record arm from a union that also holds records whose fields strictly
- * include the arm's (a function's widened inferred return, see
- * widenReducedReturn). Those arms convert like any record width coercion;
- * every other arm throws like narrowedArmHelper's. */
+ * record arm from a union that also holds arms the slot's own conversion
+ * accepts. Those arms convert like any record width coercion; every other
+ * arm throws like narrowedArmHelper's.
+ *
+ * Without `converts`, the arms that convert are the records whose fields
+ * strictly include the target's (a function's widened inferred return, see
+ * widenReducedReturn). With it, they are the listed tags: the arms a union
+ * flowing whole into its own record arm still holds at the site
+ * (liftableBesideArm), each a value of the slot's type that Node passes
+ * on as the object it is. */
 export function widthNarrowHelper(
   lowerer: Lowerer,
   fromId: string,
   target: IrType,
   loc: SrcLoc,
+  converts?: readonly number[],
 ): string | null {
   const from = lowerer.unions.get(fromId);
   if (!from || target.kind !== "record") return null;
   const tag = lowerer.armTag(fromId, target);
   if (tag < 0) return null;
-  const key = `${fromId}:${tag}`;
+  // The TypeError of an arm that still throws names the package declaration
+  // typing the slot, as narrowedArmHelper's does.
+  const origin = converts === undefined ? null : extractionOrigin(lowerer, fromId);
+  const key =
+    converts === undefined
+      ? `${fromId}:${tag}`
+      : `${fromId}:${tag}:lift:${converts.join(".")}${origin === null ? "" : `:origin:${origin}`}`;
   const existing = lowerer.coercions.widthNarrows.get(key);
   if (existing) return existing;
-  const name = keyedHelperName(lowerer, "%union.narrow.width", key);
+  const name = keyedHelperName(lowerer, ROUTING_HELPERS.narrowWidth, key);
   lowerer.coercions.widthNarrows.set(key, name);
   const fn = buildUnionNarrow(
     name,
@@ -539,7 +566,15 @@ export function widthNarrowHelper(
     (type) => lowerer.fmt(type),
     null,
     null,
-    (armTag, payload) => widthSubtypeConversion(lowerer, from.arms[armTag]!, target, payload, loc),
+    (armTag, payload) => {
+      const arm = from.arms[armTag]!;
+      if (converts === undefined) return widthSubtypeConversion(lowerer, arm, target, payload, loc);
+      if (!converts.includes(armTag)) return null;
+      const lift = lowerer.widthLiftPlan(arm, target);
+      return lift === null ? null : lowerer.applyWidthLift(lift, payload, target, loc);
+    },
+    origin,
+    lowerer.targetPlatform === "win32",
   );
   if (!fn) throw new InternalCompilerError("lowerer bug: invalid checked union extraction");
   lowerer.coercions.checkedNarrowArms.set(name, {
@@ -547,9 +582,47 @@ export function widthNarrowHelper(
     tag,
     target: from.arms[tag]!,
     widens: true,
+    ...(origin === null ? {} : { origin }),
   });
   lowerer.liftedFns.push(fn);
   return name;
+}
+
+/** The tags of the arms of union `fromId`, other than its record arm
+ * `target`, that hold a value and convert into `target` by the slot's own
+ * width conversion; `among` restricts them to the arms of that type (the
+ * type the checker gives the site). Empty when there is none: the checked
+ * extraction then has nothing to convert.
+ *
+ * Arms a discriminant tells apart never convert into each other, whatever
+ * their layouts: each has its own literals, so a value of one is not a
+ * value of the other's type (`{ kind: "a" }` beside `{ kind: "b"; extra }`),
+ * and one found in the other's place was narrowed or asserted there. */
+export function liftableBesideArm(
+  lowerer: Lowerer,
+  fromId: string,
+  target: IrType,
+  among?: IrType,
+): number[] {
+  const from = lowerer.unions.get(fromId);
+  if (!from || target.kind !== "record") return [];
+  const targetTag = lowerer.armTag(fromId, target);
+  const cases = from.discriminant?.cases ?? [];
+  const told = (tag: number): boolean => cases.some((c) => c.tag === tag);
+  const seen =
+    among === undefined
+      ? null
+      : among.kind === "union"
+        ? (lowerer.unions.get(among.unionId)?.arms ?? [])
+        : [among];
+  const tags: number[] = [];
+  from.arms.forEach((arm, tag) => {
+    if (isUnitType(arm) || tag === targetTag) return;
+    if (told(tag) && told(targetTag)) return;
+    if (seen !== null && !seen.some((s) => typeEquals(s, arm))) return;
+    if (lowerer.widthLiftPlan(arm, target) !== null) tags.push(tag);
+  });
+  return tags;
 }
 
 /** A checked extraction at its use. A plain read tests the stored tag in

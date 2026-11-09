@@ -1,6 +1,6 @@
 /* Increment, decrement and prefix unary operators, and compound field updates. */
 import { staticPrivateUpdateTarget } from "../private-statics.js";
-import { lowerCompoundValueToTarget } from "./binary.js";
+import { lowerCompoundValueToTarget, numericTypeStaysNumber } from "./binary.js";
 import {
   indexedUnionArms,
   lowerIndexedUnionNumberRead,
@@ -51,7 +51,9 @@ import { classToNumberConversion } from "../class-to-primitive.js";
 import { lowerPrimitiveUnionNumber } from "../lower-calls.js";
 import { dynUndefinedExpr, nodeThrowExpr, numLit, varRef } from "../../../ir/build.js";
 import { fenceNodeModuleMutation } from "../lower-node-module.js";
+import { fenceCopiedKeyedWrite } from "./asserted-receiver.js";
 import { findStaticOn, staticFieldWriteTarget } from "../lower-classes.js";
+import { checkRefusedMemberUse } from "../class-member-refusals.js";
 import { fenceReadonlyExpandoWrite } from "../lower-expando.js";
 import { nsWritableTarget } from "../lower-namespaces.js";
 import { arrayNumberRead, arrayValueRead, arrayValueStore } from "../array-values.js";
@@ -144,6 +146,40 @@ function booleanToNumber(value: IrExpr, loc: SrcLoc): IrExpr {
   };
 }
 
+/** A JavaScript unary operand that is not the number the operator needs
+ * (`-"6"`, `+null`, `~aString`): ToNumber runs on the operand through the
+ * checked-dynamic conversion, so the runtime applies the language's
+ * ToPrimitive/valueOf order and throws Node's TypeError for a Symbol. Null
+ * for a typed source — a typed non-number operand is a source error — and
+ * for a BigInt, whose operators are the BigInt ones. */
+function jsUnaryNumber(
+  lowerer: Lowerer,
+  expr: ts.PrefixUnaryExpression,
+  raw: IrExpr,
+): IrExpr | null {
+  if (raw.type.kind === "bigint" || !isJsSourceFile(ts.getSourceFileOfNode(expr))) return null;
+  return {
+    kind: "libCall",
+    fn: "dyn.toNumberCoerce",
+    args: [lowerer.coerceToExpected(raw, DYN)],
+    type: F64,
+    loc: locOf(expr),
+  };
+}
+
+/** Unary minus of a JavaScript operand that can convert to a BigInt
+ * (`-new Box()` with a coercion hook returning one): ToNumeric, then the
+ * negation of that number or BigInt. */
+function jsUnaryNegate(lowerer: Lowerer, expr: ts.PrefixUnaryExpression, raw: IrExpr): IrExpr {
+  return {
+    kind: "libCall",
+    fn: "dyn.negate",
+    args: [lowerer.coerceToExpected(raw, DYN)],
+    type: DYN,
+    loc: locOf(expr),
+  };
+}
+
 export function lowerPrefixUnary(lowerer: Lowerer, expr: ts.PrefixUnaryExpression): IrExpr {
   const loc = locOf(expr);
   // Unary plus and minus convert with ToNumber, whose number hint reads the
@@ -159,6 +195,16 @@ export function lowerPrefixUnary(lowerer: Lowerer, expr: ts.PrefixUnaryExpressio
       if (raw.type.kind === "bigint") {
         return { kind: "libCall", fn: "bigint.neg", args: [raw], type: BIGINT_T, loc };
       }
+      // Unary minus is ToNumeric: a JavaScript operand whose coercion hook
+      // can answer a BigInt keeps the BigInt negation. A Date keeps its
+      // valueOf lowering below.
+      if (
+        isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
+        raw.type.kind !== "bool" &&
+        raw.type.kind !== "date" &&
+        !numericTypeStaysNumber(lowerer, raw.type)
+      )
+        return jsUnaryNegate(lowerer, expr, raw);
       // Match the checked numeric boundary used by JS binary arithmetic.
       const operand =
         raw.type.kind === "bool"
@@ -173,16 +219,12 @@ export function lowerPrefixUnary(lowerer: Lowerer, expr: ts.PrefixUnaryExpressio
                   type: F64,
                   loc,
                 } satisfies IrExpr)
-              : raw.type.kind === "dyn" && isJsSourceFile(ts.getSourceFileOfNode(expr))
-                ? ({
-                    kind: "libCall",
-                    fn: "dyn.toNumberCoerce",
-                    args: [raw],
-                    type: F64,
-                    loc,
-                  } satisfies IrExpr)
-                : lowerOperatorNumber(lowerer, raw, loc, expr.operand);
-      if (operand.type.kind !== "f64") operatorUnsupported(lowerer, expr, "-", [raw.type]);
+              : lowerOperatorNumber(lowerer, raw, loc, expr.operand);
+      if (operand.type.kind !== "f64") {
+        const js = jsUnaryNumber(lowerer, expr, raw);
+        if (js) return { kind: "unary", op: "-", operand: js, type: F64, loc };
+        operatorUnsupported(lowerer, expr, "-", [raw.type]);
+      }
       if (operand.kind === "numLit") return { ...operand, value: -operand.value, loc };
       return { kind: "unary", op: "-", operand, type: F64, loc };
     }
@@ -223,6 +265,10 @@ export function lowerPrefixUnary(lowerer: Lowerer, expr: ts.PrefixUnaryExpressio
       // union) converts as Number(value) does.
       const unionNumber = lowerPrimitiveUnionNumber(lowerer, raw, expr.operand, loc);
       if (unionNumber) return unionNumber;
+      {
+        const js = jsUnaryNumber(lowerer, expr, raw);
+        if (js) return js;
+      }
       operatorUnsupported(lowerer, expr, "+", [raw.type]);
     }
     case ts.SyntaxKind.ExclamationToken: {
@@ -260,7 +306,29 @@ export function lowerPrefixUnary(lowerer: Lowerer, expr: ts.PrefixUnaryExpressio
       // such as `while (~index)`, where inference may have widened an
       // otherwise numeric slot to the checked-dynamic tree.
       const operand = lowerOperatorNumber(lowerer, raw, loc, expr.operand);
-      if (operand.type.kind !== "f64") operatorUnsupported(lowerer, expr, "~", [raw.type]);
+      if (operand.type.kind !== "f64") {
+        // ToInt32 of a JavaScript operand that is not statically a number,
+        // through the same checked-dynamic conversion the `~`-over-`dyn`
+        // arm above runs. An operand whose conversion can answer a BigInt
+        // keeps the checked-dynamic result.
+        if (isJsSourceFile(ts.getSourceFileOfNode(expr))) {
+          const bits: IrExpr = {
+            kind: "libCall",
+            fn: "dyn.bitwise",
+            args: [
+              lowerer.coerceToExpected(raw, DYN),
+              dynUndefinedExpr(loc),
+              { kind: "strLit", value: "~", type: STRING, loc },
+            ],
+            type: DYN,
+            loc,
+          };
+          return numericTypeStaysNumber(lowerer, raw.type)
+            ? { kind: "dynCheck", value: bits, type: F64, loc }
+            : bits;
+        }
+        operatorUnsupported(lowerer, expr, "~", [raw.type]);
+      }
       return { kind: "unary", op: "~", operand, type: F64, loc };
     }
     case ts.SyntaxKind.PlusPlusToken:
@@ -289,6 +357,7 @@ export function lowerIncDec(
       lowerer.unsupported("SC1045", expr, "increment/decrement of this target");
     }
     fenceNodeModuleMutation(lowerer, access, "assignment");
+    if (ts.isElementAccessExpression(access)) fenceCopiedKeyedWrite(lowerer, access);
     if (ts.isPropertyAccessExpression(access)) {
       // `this.#x++` on a static private field (private-statics.ts): the
       // brand check, then the field's native global.
@@ -906,6 +975,7 @@ export function fieldSetStmt(
         blame,
         `assignment to the getter-only property '${target.field}'`,
       );
+    checkRefusedMemberUse(lowerer, setF.declarer, `set:${target.field}`, blame);
     return {
       kind: "exprStmt",
       expr: lowerer.accessorCall(
@@ -1181,12 +1251,50 @@ export function lowerFieldCompoundValue(
         });
         return { kind: "seqExpr", stmts: body, result: value, type: DYN, loc };
       }
+      // A member the checker types as a string (`detail.text += chunk`,
+      // where the program holds values of the record type as checked-dynamic
+      // values): the member validates as a string, as it validates as a
+      // number below, and the right side appends as it does to a string
+      // field.
+      if (
+        op === "+" &&
+        rhsNode !== null &&
+        lowerer.mapTypeOf(lowerer.typeOf(access))?.kind === "string"
+      ) {
+        const old: IrExpr = { kind: "dynCheck", value: read, type: STRING, loc };
+        const appended = concatOperand(lowerer, rhs, rhsNode);
+        const value = save(
+          { kind: "strConcat", left: old, right: appended, type: STRING, loc },
+          "%compoundResult",
+        );
+        const boxed: IrExpr = { kind: "dynFrom", value, type: DYN, loc };
+        body.push({
+          kind: "exprStmt",
+          expr: {
+            kind: "libCall",
+            fn: "dyn.keySet",
+            args: [receiver, { ...key }, boxed],
+            type: VOID,
+            loc,
+          },
+          loc,
+        });
+        return { kind: "seqExpr", stmts: body, result: value, type: value.type, loc };
+      }
       const numericRhs: IrExpr =
         rhs.type.kind === "dyn"
           ? { kind: "dynCheck", value: rhs, type: F64, loc: rhs.loc }
           : lowerOperatorNumber(lowerer, rhs, loc);
-      if (numericRhs.type.kind !== "f64")
-        compoundUnsupported(lowerer, access, op, F64, numericRhs.type);
+      if (numericRhs.type.kind !== "f64") {
+        // Name the member as the checker types it: this path reads it as a
+        // number, which is its own assumption, not the member's type.
+        const memberTs = lowerer.typeOf(access);
+        const member =
+          (memberTs.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0
+            ? DYN
+            : (lowerer.mapTypeOf(memberTs) ?? F64);
+        compoundUnsupported(lowerer, access, op, member, numericRhs.type);
+      }
       const value = save(
         { kind: "bin", op, left: cur, right: numericRhs, type: F64, loc },
         "%compoundResult",

@@ -1,6 +1,9 @@
 import * as ts from "../ts7/adapter.js";
+import { withoutParentheses } from "../outer-expressions.js";
 import type { Lowerer } from "./lowerer.js";
 import { hostGlobalNameOfIdentifier } from "./host-globals.js";
+import { undeclaredGlobalTypeof } from "./global-object-names.js";
+import { isUnresolvedCjsExports } from "./cjs-exports-object.js";
 import { ambientUndefinedFnSymbolOf, ambientUndefinedVarSymbolOf } from "./lower-namespaces.js";
 
 /** The answer `typeof <operand>` gives without evaluating anything, for
@@ -17,7 +20,13 @@ export function staticTypeofAnswer(lowerer: Lowerer, operand: ts.Expression): st
   while (ts.isParenthesizedExpression(e)) e = e.expression;
   if (!ts.isIdentifier(e)) return null;
   if (hostGlobalNameOfIdentifier(lowerer, e) !== null) return "function";
-  if (lowerer.checker.getSymbolAtLocation(e) === undefined) return "undefined";
+  // The exports object of a CommonJS module is a value, read where it is
+  // tested (cjs-exports-object.ts), not an undeclared name.
+  if (isUnresolvedCjsExports(lowerer, e)) return null;
+  // A name nothing declares is undeclared at run time unless Node's global
+  // object has or inherits it (`navigator`, `toString`).
+  if (lowerer.checker.getSymbolAtLocation(e) === undefined)
+    return undeclaredGlobalTypeof(e.text) ?? "undefined";
   for (const name of ["global", "globalThis", "process"])
     if (lowerer.isStdlibGlobal(e, name)) return "object";
   // A name the program declares ambiently but nothing defines (`declare
@@ -32,12 +41,8 @@ export function staticTypeofAnswer(lowerer: Lowerer, operand: ts.Expression): st
  * `typeof self !== "undefined"`), folded: the operand read has no effects,
  * so only the comparison's value remains. Null for other shapes. */
 export function staticTypeofComparison(lowerer: Lowerer, e: ts.BinaryExpression): boolean | null {
-  const unwrap = (x: ts.Expression): ts.Expression => {
-    while (ts.isParenthesizedExpression(x)) x = x.expression;
-    return x;
-  };
-  const left = unwrap(e.left);
-  const right = unwrap(e.right);
+  const left = withoutParentheses(e.left);
+  const right = withoutParentheses(e.right);
   const literal = (x: ts.Expression): string | null =>
     ts.isStringLiteral(x) || ts.isNoSubstitutionTemplateLiteral(x) ? x.text : null;
   let answer: string | null = null;

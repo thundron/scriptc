@@ -24,6 +24,7 @@
  * Static functions never contain sites (invariant I1): the backend only
  * consults this module for calls in dynamic-tier functions. */
 import type { IrExpr, IrFunction, IrModule, IrStmt } from "./ir.js";
+import type { IrLibFn } from "./builtin-signatures.js";
 import { everyExprChild, everyStmtChild } from "./traverse.js";
 
 export type JsIcSite =
@@ -48,7 +49,7 @@ export function dynIndexFastpath(env: NodeJS.ProcessEnv = process.env): boolean 
 
 export const DYN_INDEX_FASTPATH: boolean = dynIndexFastpath();
 
-const CAPSULE_TESTS = new Set(["dyn.typedRefIs", "dyn.typedRefKeyIs", "dyn.classIs"]);
+const CAPSULE_TESTS = new Set<IrLibFn>(["dyn.typedRefIs", "dyn.typedRefKeyIs", "dyn.classIs"]);
 
 /** A class table's branches in the order a receiver that matches none of
  * them reaches their guards: the body's statements, with a `dyn.classHash`
@@ -60,16 +61,22 @@ function classTableBranches(body: readonly IrStmt[]): readonly IrStmt[] {
   if (!body.some(isClassDispatch)) return body;
   const branches: IrStmt[] = [];
   for (const stmt of body) {
-    if (isClassDispatch(stmt))
-      for (const { body: caseBody } of stmt.cases) branches.push(...caseBody);
-    else branches.push(stmt);
+    if (isClassDispatch(stmt)) {
+      // A case of branches that can complete ends with a `break`.
+      for (const { body: caseBody } of stmt.cases)
+        for (const branch of caseBody) if (branch.kind !== "break") branches.push(branch);
+    } else branches.push(stmt);
   }
   return branches;
 }
 
 /** The switch the lowering builds over a generated class table's branches. */
 function isClassDispatch(stmt: IrStmt): stmt is IrStmt & { kind: "switch" } {
-  return stmt.kind === "switch" && stmt.disc.kind === "libCall" && stmt.disc.fn === "dyn.classHash";
+  return (
+    stmt.kind === "switch" &&
+    stmt.disc.kind === "libCall" &&
+    (stmt.disc.fn === "dyn.classHash" || stmt.disc.fn === "dyn.classValueHash")
+  );
 }
 
 /** Classifies the helpers of a module once. */

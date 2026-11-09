@@ -1,12 +1,14 @@
 import type { IrLibFn } from "./builtin-signatures.js";
 
 /** The may-throw seed: libCall members that can raise. Every fs.* member
- * EXCEPT existsSync (which, like Node's, swallows errors and returns false)
- * throws a catchable error on failure; json.parse throws a catchable
- * SyntaxError-shaped string on malformed input. Backends' may-throw analyses must treat a function containing one
- * of these as throwing, exactly like a `throw` statement (and must ALSO
- * seed on `dynCheck` and `awaitExpr` nodes, which throw on validation
- * failure / promise rejection). */
+ * except existsSync (which, like Node's, swallows path errors and returns
+ * false) throws a catchable error on failure; fs.existsSyncValue is here
+ * because reporting DEP0187 for an invalid argument type runs
+ * process.emitWarning, whose replacement may throw. json.parse throws a
+ * catchable SyntaxError-shaped string on malformed input. Backends' may-throw
+ * analyses must treat a function containing one of these as throwing, exactly
+ * like a `throw` statement (and must ALSO seed on `dynCheck` and `awaitExpr`
+ * nodes, which throw on validation failure / promise rejection). */
 export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "shared.f32New",
   "shared.f32View",
@@ -36,6 +38,21 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "nodeIsland.promisify",
   "nodeIsland.classMethodsOf",
   "nodeIsland.copyArrays",
+  "nodeIsland.adoptThenable",
+  "nodeIsland.promiseResolve",
+  // A code that is not a safe integer throws, as process.setExitCode does.
+  "nodeIsland.setExitCode",
+  // A directory the process cannot enter throws, as process.chdir does.
+  "nodeIsland.chdir",
+  // Node's own clearTimeout, clearInterval or clearImmediate on an island
+  // value, which is island JavaScript: a proxy's trap can throw there.
+  "nodeIsland.clearTimer",
+  // Both read Node's process.exitCode through an island helper once Node is
+  // loaded, which is island JavaScript (the property can be redefined
+  // there). The runtime drops what that read throws today and answers its
+  // own value; the check keeps the call right if it ever delivers one.
+  "nodeIsland.exitCode",
+  "nodeIsland.hasExitCode",
   // Node's argument, cipher-name, IV, tag-length and key-length errors.
   "crypto.cipherNew",
   // Node's curve, key, point, encoding and format errors.
@@ -96,6 +113,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "buffer.transcode",
   "buffer.slowBuffer",
   "cp.spawnDynamic",
+  "cp.checkArgs",
   "child.onDyn",
   "text.decoderEncoding",
   "strdec.encoding",
@@ -129,11 +147,18 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "procStream.write",
   "child.stdioStream",
   "stream.unboxDyn",
+  // The stream predicates and state getters refuse by name (SC2020): a
+  // value that is neither a native stream nor a primitive, and a child or
+  // process stdio stream asked about the side it does not have here.
+  "stream.is",
+  "stream.isDyn",
+  "stream.stateDyn",
   "stream.dynIterableSource",
   "stream.dynSourceValue",
   "stream.unboxDynStage",
   "stream.dynTransformResult",
   "stream.handleStream",
+  "stream.handleWritable",
   "stream.pipeDyn",
   "stream.unpipeDyn",
   "weakMap.new",
@@ -153,9 +178,14 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "fs.realpathValue",
   "dyn.validateString",
   "dyn.validateStrings",
+  "dyn.validateFsPath",
   "path.resolveValue",
   "path.parseValue",
   "path.formatValue",
+  // enableCompileCache and flushCompileCache validate their argument
+  // (scr_module_cache.c), and reading the options object can run a getter.
+  "module.compileCacheEnable",
+  "module.compileCacheFlush",
   "bytes.construct",
   "arrayBuffer.new",
   "sharedArrayBuffer.new",
@@ -249,6 +279,17 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "icu.numFormatDefault",
   "icu.dateLocaleString",
   "icu.dateLocaleTimeString",
+  // The formatter constructors read the options object (a getter or a
+  // proxy trap may run) and raise ECMA-402's RangeError and TypeError;
+  // format raises RangeError for a time value out of range.
+  "icu.numberFormatNew",
+  "icu.numberFormatFormat",
+  "icu.numberFormatFormatDyn",
+  "icu.dateTimeFormatFormatDyn",
+  "icu.numToLocaleString",
+  "icu.dateTimeFormatNew",
+  "icu.dateTimeFormatFormat",
+  "icu.dateToLocale",
   "num.toStringRadix",
   "num.toStringRadixF64",
   "insp.jsonDyn",
@@ -318,6 +359,9 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "http.resWriteEarlyHints",
   "http.validateHeaderName",
   "http.validateHeaderValue",
+  "http.setMaxIdleParsers",
+  // 'prefinish' on the HTTP/2 compatibility response is refused by name.
+  "http.resOnPrefinish",
   "http.serverTimeoutGet",
   "http.serverTimeoutOptionSet",
   "net.sockSetEncoding",
@@ -366,6 +410,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "emitter.listenersDyn",
   "emitter.emitError",
   "emitter.on",
+  "emitter.onNamed",
   "emitter.off",
   "emitter.checkListener",
   "emitter.onDyn",
@@ -375,6 +420,10 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "emitter.onData",
   "emitter.onDataDyn",
   "emitter.emitData",
+  // The event name's ToPropertyKey conversion runs an object name's own
+  // toString/valueOf (user code, which may throw), and an object that
+  // answers no primitive throws the spec's TypeError.
+  "emitter.nameDyn",
   "readable.nextChunk",
   "readable.nextChunkDyn",
   // The checked-dynamic chunk forms throw Node's ERR_INVALID_ARG_TYPE
@@ -403,6 +452,11 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "http.clientWriteDyn",
   "http.clientEndDyn",
   "http.clientAddTrailers",
+  // setHeader and removeHeader throw ERR_HTTP_HEADERS_SENT once the head is
+  // out (flushHeaders(), a first write, or an Expect header at
+  // construction), and setHeader throws Node's name and value checks.
+  "http.clientSetHeader",
+  "http.clientRemoveHeader",
   "http.clientFlushHeaders",
   "http.clientUncork",
   "http.clientWrite",
@@ -439,6 +493,17 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "http2.connectCb",
   "http2.sessionRequest",
   "http2.streamSetEncoding",
+  // Settings are validated (ERR_HTTP2_INVALID_SETTING_VALUE), a ping's
+  // payload and a destroyed session are refused, and a dynamic listener
+  // that is not a function is a TypeError.
+  "http2.sessionSettings",
+  "http2.sessionSettingsCb0",
+  "http2.sessionSettingsDynCb",
+  "http2.sessionOnSettingsDyn",
+  "http2.sessionPing",
+  "http2.sessionPingPayload",
+  "http2.getPackedSettings",
+  "http2.getUnpackedSettings",
   "http2.streamRespond",
   "http2.streamWrite",
   "http2.streamWriteBytes",
@@ -459,6 +524,9 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "stream.pipelineDyn",
   "stream.compose",
   "sp.finished",
+  // Destroys the stream, which runs a destroy hook of the program's; the
+  // hook's error rejects the returned promise.
+  "stream.asyncDispose",
   "sp.pipeline",
   "sp.pipelineStages",
   "sp.pipelineStagesOpts",
@@ -468,6 +536,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "sc.text",
   "sc.json",
   "sc.buffer",
+  "sc.bytes",
   "sc.arrayBuffer",
   "readable.newDyn",
   "writable.newDyn",
@@ -575,6 +644,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dyn.propertyKey",
   "dyn.toNumeric",
   "dyn.increment",
+  "dyn.negate",
   // The dynamic-tier operators run the same coercions (scr_js_value.c), and
   // js.toF64 throws dynCheck's TypeError for a non-number.
   "js.toF64",
@@ -584,6 +654,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "js.compare",
   "js.toNumeric",
   "js.increment",
+  "js.negate",
   "js.toNumberCoerce",
   // Error messages use the same coercion protocol before installing cause.
   "error.newOptions",
@@ -623,6 +694,8 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "net.connectLookupDyn",
   "cp.execSync",
   "cp.execCapture",
+  // validateMaxBuffer's ERR_OUT_OF_RANGE, before the capturing call.
+  "cp.maxBuffer",
   // The client request constructors validate the method token
   // synchronously (Node's ClientRequest ctor throw:
   // ERR_INVALID_HTTP_TOKEN).
@@ -735,6 +808,11 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "punycode.toASCII",
   "punycode.toUnicode",
   "punycode.ucs2Encode",
+  // node:sea's asset readers always throw Node's coded error.
+  "sea.getAsset",
+  "sea.getRawAsset",
+  "sea.getAssetAsBlob",
+  "sea.getAssetKeys",
   // The base64 globals: atob/btoa throw the catchable DOMException
   // InvalidCharacterError on malformed input; the zero-argument form
   // always throws Node's TypeError [ERR_MISSING_ARGS].
@@ -811,6 +889,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "regex.newChecked",
   "regex.replaceCallback",
   "dyn.keySet",
+  "dyn.fnOwnSet",
   "dyn.keySetComputed",
   "process.builtinId",
   "process.builtinModule",
@@ -825,6 +904,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "dyn.primitiveDelete",
   "dyn.reflectDeleteProperty",
   "dyn.reflectHasTarget",
+  "dyn.reflectGetPrototypeTarget",
   "dyn.hasKeyComputed",
   // `… in globalThis` over a name the runtime does not provide throws
   "dyn.globalHas",
@@ -848,6 +928,12 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "class.throwReadOnly",
   "class.throwNotExtensible",
   "record.throwFrozen",
+  // The kept-source read runs the source view's accessor, which can throw
+  // (record-sources.ts carries the read into a record width copy).
+  "record.sourceGet",
+  // `delete r.k` of a key the record's kept source holds throws Node's
+  // TypeError on a frozen record in strict code.
+  "record.sourceDelete",
   "dyn.toString",
   "dyn.valueOf",
   // Primitive wrapper objects (scr_js_wrapper.c): the conversions run
@@ -911,6 +997,7 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "process.loadEnvFile",
   "fs.realpathSync",
   "fs.realpathNativeSync",
+  "fs.existsSyncValue",
   "fs.readFileSync",
   "fs.writeFileSync",
   "fs.appendFileSync",
@@ -1061,8 +1148,20 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "emitter.setDefaultMaxChk",
   "fs.readFileSyncBytes",
   "fs.writeFileSyncBytes",
+  "fs.writeFileSyncBytesFlags",
+  "fs.writeFileSyncData",
+  "fs.writeFileSyncDataFlags",
   "fs.writeFileSyncFd",
+  "fs.writeFileSyncFdData",
   "fs.appendFileSyncBytes",
+  "fs.appendFileSyncData",
+  // The promise forms over the checked data run the synchronous write, which
+  // raises for a data argument that is no string or view and for a failed
+  // write, before the error is moved into the promise (as fsp.lchmodChk).
+  "fsp.writeFileData",
+  "fsp.appendFileData",
+  "fsp.writeFileDataFlags",
+  "fileHandle.writeFileData",
   "zlib.inflateSync",
   "zlib.inflateRawSync",
   "zlib.gunzipSync",
@@ -1103,6 +1202,36 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   // listen's port from a checked-dynamic first argument: ERR_SOCKET_BAD_PORT,
   // or the fence for forms without a lowering.
   "net.listenPortDyn",
+  // Server event registrations fire the 'newListener' meta event before the
+  // add, so a handler of it can throw out of the on/once/addListener call.
+  "net.serverOnError",
+  "net.serverOnClose",
+  "net.serverOnListening",
+  "net.serverOnConnection",
+  "net.serverOnSecureConnection",
+  "net.serverOnDrop",
+  "net.serverOnNewListener",
+  "http.serverOnTimeout",
+  // setTimeout(ms, callback) adds the callback as a 'timeout' listener
+  // the same way on() does, so a 'newListener' handler can throw out
+  // of it.
+  "http.serverSetTimeoutCb",
+  // listen(..., callback) adds the callback with once('listening', ...)
+  // before it binds, so a 'newListener' handler can throw out of the call
+  // and the server does not listen.
+  "net.listenCb",
+  "net.listenOptsCb",
+  "net.listenOptsReusePortCb",
+  "net.listenPathCb",
+  "http.serverOnRequest",
+  "http.serverOnCheck",
+  "http.serverOnConnect",
+  "http.serverOnUpgrade",
+  "http.serverOnClientError",
+  "http2.serverOnStream",
+  "http2.serverOnSession",
+  "http2.serverOnSessionError",
+  "tls.serverOnClientError",
   // resetAndDestroy on a TLS socket throws ERR_INVALID_HANDLE_TYPE.
   "net.sockResetAndDestroy",
   // SocketAddress's option checks and parse()'s input check.
@@ -1188,6 +1317,10 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "fs.createWriteStream",
   "fileHandle.createReadStream",
   "fileHandle.createWriteStream",
+  "fs.createReadStreamSignal",
+  "fs.createWriteStreamSignal",
+  "fileHandle.createReadStreamSignal",
+  "fileHandle.createWriteStreamSignal",
   "fs.fsStreamClose",
   "fs.fsStreamCloseCb",
   "dir.readSync",
@@ -1221,6 +1354,12 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "fs.readlinkSyncBuffer",
   "fs.writeFileModeSync",
   "fs.writeFileFlagsSync",
+  "fs.writeFileOptionsSync",
+  "fs.appendFileOptionsSync",
+  "fs.writeFileBytesOptionsSync",
+  "fs.appendFileBytesOptionsSync",
+  "fs.writeFileDataOptionsSync",
+  "fs.appendFileDataOptionsSync",
   "fs.mkdirModeSync",
   "fs.mkdirRecursiveModeSync",
   "fs.openSync",
@@ -1261,6 +1400,9 @@ export const MAY_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "crypto.x509PublicKey",
   "crypto.x509Verify",
   "crypto.x509CheckPrivateKey",
+  // ReadableStream.from's iterability and iterator-method errors, which
+  // Node raises from the call itself.
+  "webstream.from",
 ]);
 
 /** libCall members that always throw. Their result type is the replaced
@@ -1284,4 +1426,8 @@ export const ALWAYS_THROW_LIB_FNS: ReadonlySet<IrLibFn> = new Set([
   "fs.streamOptsChk",
   "net.connectOptsChk",
   "tls.caCertsChk",
+  "sea.getAsset",
+  "sea.getRawAsset",
+  "sea.getAssetAsBlob",
+  "sea.getAssetKeys",
 ]);

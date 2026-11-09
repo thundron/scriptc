@@ -122,6 +122,7 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     ...(opts.copying ? ["scr_copying.c"] : []),
     ...(opts.declAdopt ? ["scr_decl_adopt.c"] : []),
     ...(opts.typeOrigins ? ["scr_type_origin.c"] : []),
+    ...(opts.recordSourceGet === true ? ["scr_record_source_get.c"] : []),
   ];
   const cflags = [
     "-std=c11",
@@ -142,6 +143,9 @@ export async function compileLibArchive(opts: LibArchiveOptions): Promise<void> 
     ...(opts.jsObjectModel || opts.bigintBytes || opts.mutableBuffers
       ? ["-DSCR_JS_OBJECT_MODEL"]
       : []),
+    // A function's own call/apply/bind and the other inherited members a
+    // data property shadows: the same build the executable lane compiles.
+    ...(opts.fnMemberProps === true ? ["-DSCR_FN_MEMBER_PROPS"] : []),
     "-I",
     rtDir,
     ...(regex ? ["-I", vendorEngineDir()] : []),

@@ -1,4 +1,5 @@
 /* instanceof and in, including private-name and runtime-key in. */
+import { consoleHasKey, isConsoleExpression } from "../coercions/console-records.js";
 import { lowerIteratorInstanceOf } from "../iterator-prototype.js";
 import { programCreatesWrappers, WRAPPER_KIND_NUMBER } from "../primitive-wrappers.js";
 import { boxedHandleReceiver } from "../handle-properties.js";
@@ -15,7 +16,7 @@ import {
   privateInMessage,
 } from "../private-brands.js";
 import type { Lowerer } from "../lowerer.js";
-import { isCallableValue } from "../callable-properties.js";
+import { callableBox, isCallableValue } from "../callable-properties.js";
 import {
   BOOL,
   BYTES_ELEMENT_NAME,
@@ -55,17 +56,14 @@ import { typedArrayHasMember } from "../builtins/typed-array-members.js";
 import { fenceEarlyNsMemberRef, nsMemberIdentOf } from "../lower-namespaces.js";
 import { maybePromiseInstanceOf } from "../maybe-promise.js";
 import { lowerGlobalObjectValue } from "../lower-global-value.js";
+import { stringPropertyKey } from "../lower-exprs.js";
 import { isSafeToDiscard, isSafeToRepeat } from "./evaluation-safety.js";
-import {
-  inOperatorTypeError,
-  isBuiltinIdentityToken,
-  isPrimitiveValueType,
-  throwAfterEach,
-} from "../primitive-throws.js";
+import { inOperatorTypeError, isPrimitiveValueType, throwAfterEach } from "../primitive-throws.js";
 import { partialFieldPresence } from "../partial-assertions.js";
 import {
   classDeclaresHasInstanceHook,
   findGenericMethodOn,
+  parameterPropertiesFirst,
   type ClassInfo,
   storedClassValueType,
 } from "../lower-classes.js";
@@ -77,11 +75,8 @@ import { isJsSourceFile, locOf } from "../../program.js";
 import { checkedClassInstanceOf } from "../class-construction.js";
 import { unsupportedDiag } from "../../../diagnostics/diagnostic.js";
 import { globalSymbolKey } from "./global-symbols.js";
-import {
-  hostAbsentInstall,
-  isGlobalObjectRead,
-  NODE_GLOBALS_WITHOUT_NATIVE,
-} from "../host-globals.js";
+import { hostAbsentInstall, isGlobalObjectRead } from "../host-globals.js";
+import { globalObjectPresentNamesArg } from "../global-object-names.js";
 import { hasGlobalFunctionValue } from "../global-function-values.js";
 import { builtinGlobalHasKey } from "../builtins/global-namespace-keys.js";
 import { foldedStringKeyOf } from "./object-literals.js";
@@ -92,6 +87,23 @@ import { nullProtoRecordShape, recordNullProtoTest } from "../null-prototype.js"
 import { recordMayKeepSource } from "../record-sources.js";
 import { recordHasOwnHelper } from "../lower-calls.js";
 import { hostGlobalConstructorOfPrototype, hostGlobalNameOfRead } from "../host-globals.js";
+
+/** The registered class behind the class type of a test's operand. A class
+ * whose collection was refused is deferred, not registered, and a type can
+ * still name it (a parameter, a union arm, a declared result). Naming it
+ * here flushes that refusal, which reports at the class, and the test is
+ * refused with it: the class has no layout to test against. */
+function operandClass(lowerer: Lowerer, className: string, expr: ts.Node, test: string): ClassInfo {
+  const info = lowerer.classes.get(className) ?? lowerer.flushDeferredClass(className);
+  if (info) return info;
+  if (!lowerer.deferredClassByName.has(className))
+    throw new InternalCompilerError(`lowerer bug: unknown class ${className}`);
+  lowerer.unsupported(
+    "SC1090",
+    expr,
+    `${test} on a value whose type names '${lowerer.fmt({ kind: "object", className })}', a class that has no lowering (the class declaration itself was rejected — see its own diagnostic)`,
+  );
+}
 
 /** The class value an `instanceof` right-hand side holds. A JavaScript
  * object's property holding a program class (`holder.type`) reads as a
@@ -175,6 +187,10 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
   if (hostGlobalNameOfRead(lowerer, expr.right) !== null)
     return hostGlobalInstanceOfAnswer(lowerer, expr, false, loc);
   if (lowerer.isStdlibGlobal(expr.right, "Function")) {
+    // A function a Node island made is a Function instance, as it is in
+    // Node, where the package and the program share one realm.
+    if (lowerer.islandFunctionType(lowerer.typeOf(expr.left)))
+      return hostGlobalInstanceOfAnswer(lowerer, expr, true, loc);
     const value =
       hostGlobalNameOfRead(lowerer, expr.left) ??
       hostGlobalConstructorOfPrototype(lowerer, expr.left);
@@ -309,6 +325,27 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
   ) {
     const value = lowerer.coerceInto(expr.left, lowerer.lowerExpr(expr.left), DYN);
     return { kind: "libCall", fn: "dyn.nativeUrlIs", args: [value], type: BOOL, loc };
+  }
+  // `x instanceof URLSearchParams`: the brand of the value an untyped slot
+  // holds for one, as for URL above.
+  if (
+    lowerer.isStdlibGlobal(expr.right, "URLSearchParams") ||
+    (rhsBuiltin?.module === "url" && rhsBuiltin.member === "URLSearchParams")
+  ) {
+    const value = lowerer.coerceInto(expr.left, lowerer.lowerExpr(expr.left), DYN);
+    return { kind: "libCall", fn: "dyn.nativeSearchParamsIs", args: [value], type: BOOL, loc };
+  }
+  // `x instanceof Buffer` in TypeScript: Buffer is the one byte view with a
+  // brand of its own beside its element kind. JavaScript holds the
+  // constructor as a value and tests against that (below).
+  if (
+    (lowerer.isStdlibGlobal(expr.right, "Buffer") ||
+      (rhsBuiltin?.module === "buffer" && rhsBuiltin.member === "Buffer")) &&
+    !isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
+    !lowerer.caughtLocalOf(expr.left)
+  ) {
+    const value = lowerer.coerceInto(expr.left, lowerer.lowerExpr(expr.left), DYN);
+    return { kind: "dynTest", test: "buffer", value, type: BOOL, loc };
   }
   {
     const stack = lowerDisposableStackInstanceOf(lowerer, expr);
@@ -504,6 +541,26 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
     // never promises (scriptc promises are all native, and no data arm
     // can hold one). A promise-typed operand answers true after its
     // evaluation; a checked-dynamic one asks the runtime.
+    // A catch binding holds a thrown promise as its checked-dynamic value.
+    {
+      const caughtPromise =
+        ts.isIdentifier(expr.right) && lowerer.isStdlibGlobal(expr.right, "Promise")
+          ? lowerer.caughtLocalOf(expr.left)
+          : null;
+      if (caughtPromise)
+        return {
+          kind: "dynTest",
+          test: "promise",
+          value: {
+            kind: "caughtToDyn",
+            value: varRef(caughtPromise.id, CAUGHT, loc),
+            type: DYN,
+            loc,
+          },
+          type: BOOL,
+          loc,
+        };
+    }
     if (
       ts.isIdentifier(expr.right) &&
       lowerer.isStdlibGlobal(expr.right, "Promise") &&
@@ -526,7 +583,8 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
         };
       }
       // Plain data (records, arrays, strings, numbers, booleans, and unions
-      // of them) is never a promise: false after the operand's evaluation.
+      // of them) is never a promise, and neither is a class instance (no
+      // program class extends Promise): false after the operand's evaluation.
       const neverPromise = (t: IrType): boolean =>
         NEVER_PROMISE_KINDS.has(t.kind) ||
         (t.kind === "union" && (lowerer.unions.get(t.unionId)?.arms ?? [t]).every(neverPromise));
@@ -746,9 +804,7 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
           "'instanceof' on values other than class instances (narrow union-typed values first)",
         );
       }
-      const lhsInfo = lowerer.classes.get(left.type.className);
-      if (!lhsInfo)
-        throw new InternalCompilerError(`lowerer bug: unknown class ${left.type.className}`);
+      const lhsInfo = operandClass(lowerer, left.type.className, expr, "'instanceof'");
       if (
         (lowerer.inHierarchy(targetInfo) && lowerer.inHierarchy(lhsInfo)) ||
         (targetInfo.localClass !== undefined && lhsInfo.localClass !== undefined)
@@ -802,8 +858,7 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
     }
     // A builtin global function value read off the global (`parseInt`,
     // `Symbol`, `WeakRef`, ...) is not a class value: the boxed value has
-    // no prototype to test against, so the test keeps the refusal the
-    // global's identity token answered.
+    // no prototype to test against, so the test is refused.
     if (
       isJsSourceFile(ts.getSourceFileOfNode(expr)) &&
       hasGlobalFunctionValue(stdlibGlobalNameOf(lowerer, expr.right) ?? "")
@@ -843,6 +898,19 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
         type: BOOL,
         loc,
       };
+    }
+    // A built-in class that has no test of its own above: name it, and
+    // what a program can test instead.
+    const builtinClass =
+      stdlibGlobalNameOf(lowerer, expr.right) ??
+      (rhsBuiltin ? `${rhsBuiltin.module}.${rhsBuiltin.member}` : null);
+    if (builtinClass !== null) {
+      lowerer.unsupported(
+        "SC1090",
+        expr.right,
+        `'instanceof ${builtinClass}' (this built-in class has no run-time class test yet: test what the value has instead, ` +
+          `such as \`typeof value === "object" && value !== null && "member" in value\`)`,
+      );
     }
     lowerer.unsupported(
       "SC1090",
@@ -1028,12 +1096,14 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
     const arms = lowerer.unions.get(unionId)?.arms;
     // Records, arrays and scalar values are no instances of a class that
     // does not extend Array (lowerArrayClassInstanceOf tests the classes
-    // that do). Dynamic/opaque runtime objects keep their existing
-    // instanceof fences.
+    // that do), and neither is a promise: every compiled promise is the
+    // standard library's own, and no program class extends it. Dynamic/opaque
+    // runtime objects keep their existing instanceof fences.
     if (
       arms?.every(
         (arm) =>
           arm.kind === "object" ||
+          arm.kind === "promise" ||
           arm.kind === "record" ||
           arm.kind === "array" ||
           arm.kind === "f64" ||
@@ -1044,6 +1114,11 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
           isUnitType(arm),
       )
     ) {
+      // Every class arm is resolved before the helper is named: an arm
+      // whose class was rejected refuses this test, and must not leave a
+      // helper name behind that no function defines.
+      for (const arm of arms)
+        if (arm.kind === "object") operandClass(lowerer, arm.className, expr, "'instanceof'");
       const key = `instanceof.union:${unionId}:${target.def.name}`;
       let helper = lowerer.valueHelpers.get(key);
       if (!helper) {
@@ -1053,9 +1128,7 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
         const body: IrStmt[] = [];
         arms.forEach((arm, tag) => {
           if (arm.kind !== "object") return;
-          const lhsInfo = lowerer.classes.get(arm.className);
-          if (!lhsInfo)
-            throw new InternalCompilerError(`lowerer bug: unknown class ${arm.className}`);
+          const lhsInfo = operandClass(lowerer, arm.className, expr, "'instanceof'");
           const armTest = (info: ClassInfo): IrExpr =>
             lowerer.inHierarchy(lhsInfo) && lowerer.inHierarchy(info)
               ? {
@@ -1124,9 +1197,7 @@ export function lowerInstanceOf(lowerer: Lowerer, expr: ts.BinaryExpression, loc
       loc,
     });
   }
-  const lhsInfo = lowerer.classes.get(left.type.className);
-  if (!lhsInfo)
-    throw new InternalCompilerError(`lowerer bug: unknown class ${left.type.className}`);
+  const lhsInfo = operandClass(lowerer, left.type.className, expr, "'instanceof'");
   if (lowerer.inHierarchy(lhsInfo) && lowerer.inHierarchy(target)) {
     const tests = runtimeTests(left.type.className);
     if (tests.length === 1) {
@@ -1623,8 +1694,7 @@ function lowerPrivateIn(
     );
   }
   const lhsName = recv.type.className;
-  const lhsInfo = lowerer.classes.get(lhsName);
-  if (!lhsInfo) throw new InternalCompilerError(`lowerer bug: unknown class ${lhsName}`);
+  operandClass(lowerer, lhsName, expr, `'${pname} in …'`);
   if (lowerer.isSubclassOf(declName, lhsName)) {
     // The narrowing direction: the declarer strictly below the
     // receiver's static class — a strict subclass relation puts both in
@@ -1699,8 +1769,8 @@ function declaresOwnMember(info: ClassInfo, key: string): boolean {
 
 /** `classInstanceIn`'s answer: a static boolean, "the declaration lacks the
  * key but a subclass may declare it" (the caller resolves it with class
- * tests), or "the declaration cannot answer" (runtime-provided root, index
- * signature, unknown class). */
+ * tests), or "the declaration cannot answer" (runtime-provided root,
+ * unknown class). */
 type ClassInAnswer = boolean | "below" | "unknown";
 
 /** `classInstanceIn`'s subclass guard: a subclass whose values land in THIS
@@ -1731,15 +1801,6 @@ function declaringSubclasses(info: ClassInfo, key: string, out: string[] = []): 
   return out;
 }
 
-/** A class body spelling an index signature: `'k' in instance` then answers
- * per VALUE (the overflow map), not from the declaration. */
-function declaresIndexSignature(info: ClassInfo): boolean {
-  if (!info.decl) return false;
-  for (const member of info.decl.members.nodes)
-    if (ts.isIndexSignatureDeclaration(member)) return true;
-  return false;
-}
-
 /** `'k' in instance` for a compiled class: every declared member is present
  * on every instance (a class field is defined at construction whether or
  * not it holds `undefined`, and a method lives on the prototype), so
@@ -1747,7 +1808,10 @@ function declaresIndexSignature(info: ClassInfo): boolean {
  * answer. `"unknown"` when the declaration cannot answer for the value:
  * runtime-provided roots (`decl === null`, the Error/EventEmitter/stream/
  * EventTarget/Date/Array families) expose members their declaration does
- * not spell, and an index signature answers per value. `armNames` are the
+ * not spell. A class with an index signature answers the same way: its
+ * declared members are on every instance, and a name it does not declare
+ * is not declared, so the caller asks the instance (classAnswersAtRuntime).
+ * `armNames` are the
  * class arms of the union whose arm this is (null for a single-class
  * receiver): a subclass that is itself an arm is tagged with that arm, so
  * only the other subclasses can lie about this arm's `false`. */
@@ -1773,7 +1837,6 @@ function classInstanceIn(
       c.extendsArray
     )
       return "unknown";
-    if (declaresIndexSignature(c)) return "unknown";
   }
   if (declaresInstanceMember(lowerer, info, key)) return true;
   if (subclassDeclares(info, key, armNames)) return "below";
@@ -2051,7 +2114,11 @@ function declaredMembership(
   for (let base = info.base; base; base = base.base) if (base.fields.has(key)) return true;
   // A parameter property is assigned in the constructor body, after every
   // field initializer has run (Node's transform), so it is not on `this` yet.
-  if (info.paramProps?.some((pp) => pp.name === key)) return false;
+  // A file whose tsconfig compiles class fields in the constructor assigns
+  // its parameter properties first (ownFieldAndParamPropInitStmts): there
+  // every one of them is on `this` when the first initializer runs.
+  if (info.paramProps?.some((pp) => pp.name === key))
+    return parameterPropertiesFirst(lowerer, info);
   const own = info.fieldOrder.findIndex((f) => f.name === key);
   if (own < 0) {
     if (generic === null) return false;
@@ -2093,6 +2160,101 @@ function fieldInitializerAnswer(
   return { kind: "fixed", value: inside };
 }
 
+/** `key in <global object>` with a key that is not statically a symbol:
+ * presence on the runtime's global object, whose answer is the program's own
+ * global properties, then the names Node's global object has
+ * (globalObjectPresentNamesArg). Node HAS the globals the native runtime
+ * does not implement, so their answer must not be a silent false: arming the
+ * compiler's derived set makes the runtime throw for them (host-globals.ts).
+ * A literal key and a computed one take the same query: a literal names a
+ * property the program may have added. A key that may hold a symbol at run
+ * time reaches the global object's symbol store instead. Null when
+ * `receiver` is not the global object or the key is a symbol. Also the
+ * lowering of `Reflect.has(<global object>, key)`, the same query. */
+export function lowerInGlobalObject(
+  lowerer: Lowerer,
+  keyNode: ts.Expression,
+  receiver: ts.Expression,
+  loc: SrcLoc,
+): IrExpr | null {
+  if (
+    !isGlobalObjectRead(lowerer, receiver) ||
+    lowerer.mapTypeOf(lowerer.typeOf(keyNode))?.kind === "symbol"
+  )
+    return null;
+  const inGlobalKey = foldedStringKeyOf(lowerer, keyNode);
+  const present = globalObjectPresentNamesArg(lowerer, receiver, loc);
+  const globalHas = (key: IrExpr): IrExpr => ({
+    kind: "libCall",
+    fn: "dyn.globalHas",
+    args: [key, present],
+    type: BOOL,
+    loc,
+  });
+  const installedHas = (key: IrExpr): IrExpr => ({
+    kind: "seqExpr",
+    stmts: [{ kind: "exprStmt", expr: hostAbsentInstall(loc), loc }],
+    result: globalHas(key),
+    type: BOOL,
+    loc,
+  });
+  if (inGlobalKey !== null)
+    return installedHas({ kind: "strLit", value: inGlobalKey, type: STRING, loc });
+  // JS evaluates the key before the receiver; the receiver is the global
+  // object, whose evaluation has no effects, so lowering the key first is
+  // the whole evaluation order.
+  const lowered = lowerer.lowerExpr(keyNode);
+  if (lowered.type.kind === "string") return installedHas(lowered);
+  // A key the type cannot prove to be a string may hold a symbol at
+  // runtime, and a symbol is an identity, not a name: it must reach the
+  // global object's symbol store rather than the string conversion (which
+  // throws for a symbol). The boxed key is stabilized first; the answer is
+  // the same presence query the dynamic path gives.
+  const keyLocal = lowerer.declareHiddenLocal("%inKey", DYN);
+  const boxedKey = varRef(keyLocal.id, DYN, loc);
+  return {
+    kind: "seqExpr",
+    stmts: [
+      { kind: "exprStmt", expr: hostAbsentInstall(loc), loc },
+      {
+        kind: "varDecl",
+        localId: keyLocal.id,
+        init: lowerer.coerceInto(keyNode, lowered, DYN),
+        loc,
+      },
+    ],
+    result: {
+      kind: "ternary",
+      cond: {
+        kind: "strEq",
+        negated: false,
+        left: { kind: "libCall", fn: "dyn.typeof", args: [boxedKey], type: STRING, loc },
+        right: { kind: "strLit", value: "symbol", type: STRING, loc },
+        type: BOOL,
+        loc,
+      },
+      then: {
+        kind: "libCall",
+        fn: "dyn.hasKeyComputed",
+        args: [lowerGlobalObjectValue(lowerer, receiver, locOf(receiver)), boxedKey],
+        type: BOOL,
+        loc,
+      },
+      else_: globalHas({
+        kind: "libCall",
+        fn: "dyn.toStringCoerce",
+        args: [boxedKey],
+        type: STRING,
+        loc,
+      }),
+      type: BOOL,
+      loc,
+    },
+    type: BOOL,
+    loc,
+  };
+}
+
 /** `"key" in v` — the key-presence test. Three lowered receivers:
  * process.env (getenv(3) presence — Node-exact, an empty value still
  * counts as present), and monomorphic record shapes, where the answer is
@@ -2121,90 +2283,21 @@ export function lowerInExpression(
   const globalKey = globalSymbolKey(lowerer, expr.right, expr.left);
   if (globalKey)
     return { kind: "libCall", fn: "dyn.globalSymbolHas", args: [globalKey], type: BOOL, loc };
+  // `key in console`: console is a native handle with no key table, so
+  // the answer comes from the keys Node's console has (console-records.ts).
+  if (isConsoleExpression(lowerer, expr.right)) {
+    const has = consoleHasKey(lowerer, expr.left, loc);
+    if (has) return has;
+  }
   // `#name in obj` — the ergonomic brand check (ES2022) — resolves
   // before any string-key machinery: the left operand is a private
   // NAME, not a value.
   if (ts.isPrivateIdentifier(expr.left)) {
     return lowerPrivateIn(lowerer, expr, expr.left, loc);
   }
-  // `… in <global object>`: presence on the runtime's global object. Node HAS
-  // the globals the native runtime does not implement, so the answer must not
-  // be a silent false — arming the compiler's derived set makes the runtime
-  // throw for them (host-globals.ts) and answer the global object's own
-  // presence otherwise. A symbol key keeps its checked-dynamic path below;
-  // this answer is keyed by a string.
-  const inGlobalKey = foldedStringKeyOf(lowerer, expr.left);
-  if (
-    isGlobalObjectRead(lowerer, expr.right) &&
-    lowerer.mapTypeOf(lowerer.typeOf(expr.left))?.kind !== "symbol" &&
-    // A static key the runtime already answers correctly (a name Node does
-    // not define) keeps its existing lowering, byte for byte.
-    (inGlobalKey === null || NODE_GLOBALS_WITHOUT_NATIVE.has(inGlobalKey))
-  ) {
-    const installedHas = (key: IrExpr): IrExpr => ({
-      kind: "seqExpr",
-      stmts: [{ kind: "exprStmt", expr: hostAbsentInstall(loc), loc }],
-      result: { kind: "libCall", fn: "dyn.globalHas", args: [key], type: BOOL, loc },
-      type: BOOL,
-      loc,
-    });
-    if (inGlobalKey !== null)
-      return installedHas({ kind: "strLit", value: inGlobalKey, type: STRING, loc });
-    // JS evaluates the key before the receiver; the receiver is the global
-    // object, whose evaluation has no effects, so lowering the key first is
-    // the whole evaluation order.
-    const lowered = lowerer.lowerExpr(expr.left);
-    if (lowered.type.kind === "string") return installedHas(lowered);
-    // A key the type cannot prove to be a string may hold a symbol at
-    // runtime, and a symbol is an identity, not a name: it must reach the
-    // global object's symbol store rather than the string conversion (which
-    // throws for a symbol). The boxed key is stabilized first; the answer is
-    // the same presence query the dynamic path gives.
-    const keyLocal = lowerer.declareHiddenLocal("%inKey", DYN);
-    const boxedKey = varRef(keyLocal.id, DYN, loc);
-    return {
-      kind: "seqExpr",
-      stmts: [
-        { kind: "exprStmt", expr: hostAbsentInstall(loc), loc },
-        {
-          kind: "varDecl",
-          localId: keyLocal.id,
-          init: lowerer.coerceInto(expr.left, lowered, DYN),
-          loc,
-        },
-      ],
-      result: {
-        kind: "ternary",
-        cond: {
-          kind: "strEq",
-          negated: false,
-          left: { kind: "libCall", fn: "dyn.typeof", args: [boxedKey], type: STRING, loc },
-          right: { kind: "strLit", value: "symbol", type: STRING, loc },
-          type: BOOL,
-          loc,
-        },
-        then: {
-          kind: "libCall",
-          fn: "dyn.hasKeyComputed",
-          args: [lowerGlobalObjectValue(lowerer, expr.right, locOf(expr.right)), boxedKey],
-          type: BOOL,
-          loc,
-        },
-        else_: {
-          kind: "libCall",
-          fn: "dyn.globalHas",
-          args: [
-            { kind: "libCall", fn: "dyn.toStringCoerce", args: [boxedKey], type: STRING, loc },
-          ],
-          type: BOOL,
-          loc,
-        },
-        type: BOOL,
-        loc,
-      },
-      type: BOOL,
-      loc,
-    };
+  {
+    const inGlobal = lowerInGlobalObject(lowerer, expr.left, expr.right, loc);
+    if (inGlobal !== null) return inGlobal;
   }
   // Compile-time-known STRING keys fold — literals, and the same
   // const/enum-literal and template folding computed property keys get
@@ -2333,16 +2426,19 @@ export function lowerInExpression(
         const k = lowerer.lowerExpr(expr.left); // JS order: the key evaluates first
         if (lowerer.dynConvertible(k.type)) {
           const boxed = lowerer.coerceToExpected(k, DYN);
-          const keyLocal = lowerer.declareHiddenLocal("%inKey", DYN);
+          // A key that names a string asks by that name, unboxed.
+          const named = stringPropertyKey(lowerer, boxed, expr.left);
+          const keyType = named !== null ? STRING : DYN;
+          const keyLocal = lowerer.declareHiddenLocal("%inKey", keyType);
           return {
             kind: "seqExpr",
-            stmts: [{ kind: "varDecl", localId: keyLocal.id, init: boxed, loc }],
+            stmts: [{ kind: "varDecl", localId: keyLocal.id, init: named ?? boxed, loc }],
             result: {
               kind: "libCall",
-              fn: "dyn.hasKeyComputed",
+              fn: named !== null ? "dyn.in" : "dyn.hasKeyComputed",
               args: [
                 lowerer.coerceToExpected(lowerer.lowerExpr(expr.right), DYN),
-                varRef(keyLocal.id, DYN, loc),
+                varRef(keyLocal.id, keyType, loc),
               ],
               type: BOOL,
               loc,
@@ -2456,7 +2552,7 @@ export function lowerInExpression(
   // that reaches here, so only the receiver's own evaluation remains. The
   // message spells the receiver's value, so a receiver the IR cannot
   // re-evaluate (`receiver()`) evaluates once into a hidden local.
-  if (isPrimitiveValueType(recv.type) && !isBuiltinIdentityToken(lowerer, expr.right, recv)) {
+  if (isPrimitiveValueType(recv.type)) {
     if (isUnitType(recv.type) || isSafeToRepeat(recv)) {
       return throwAfterEach([recv], inOperatorTypeError(lowerer, key, recv, BOOL, loc), loc);
     }
@@ -2548,11 +2644,6 @@ export function lowerInExpression(
       if (key === "cause") {
         return { kind: "libCall", fn: "error.hasCause", args: [recv], type: BOOL, loc };
       }
-      // The code slot, or an own `code` with another value
-      // (`err.code = undefined` is present).
-      if (key === "code") {
-        return { kind: "libCall", fn: "error.hasCode", args: [recv], type: BOOL, loc };
-      }
       // The receiver evaluates for its effects when the answer is static.
       const always = (): IrExpr =>
         recv.kind === "varRef" || recv.kind === "caughtNarrow"
@@ -2579,30 +2670,47 @@ export function lowerInExpression(
       if (staticInfo && declares(staticInfo)) return always();
       // Any other key: a descendant class that declares it (instanceof), or
       // an own property set at runtime (a throw site's extra fields,
-      // Object.assign, writes through a dynamic view). Keys built-in errors
-      // keep outside their class fields depend on the runtime error and
-      // stay fenced.
-      if (!BUILTIN_ERROR_SLOT_KEYS.has(key)) {
+      // Object.assign, writes through a dynamic view). `code` is such a key
+      // too: at runtime it is the error's code slot, or an own `code` with
+      // another value (`err.code = undefined` is present), and a subclass
+      // that declares a `code` field holds it in the field instead. The
+      // other keys built-in errors keep outside their class fields depend
+      // on the runtime error and stay fenced.
+      const staticName = recv.type.className;
+      const declarers: string[] = [];
+      for (const c of lowerer.classes.values()) {
+        const name = c.def.name;
+        if (name === staticName || !lowerer.isSubclassOf(name, staticName) || !declares(c))
+          continue;
+        // A declaring ancestor below the static class already covers it.
+        if (c.base && c.base.def.name !== staticName && declares(c.base)) continue;
+        declarers.push(name);
+      }
+      if (key === "code" && declarers.length === 0) {
+        return { kind: "libCall", fn: "error.hasCode", args: [recv], type: BOOL, loc };
+      }
+      if (key === "code" || !BUILTIN_ERROR_SLOT_KEYS.has(key)) {
         const stable = recv.kind === "varRef" || recv.kind === "caughtNarrow";
         const slot = stable ? null : lowerer.declareHiddenLocal("%inRecv", recv.type);
         const ref = (): IrExpr => (slot ? varRef(slot.id, recv.type, loc) : recv);
-        const tests: IrExpr[] = [];
-        const staticName = recv.type.className;
-        for (const c of lowerer.classes.values()) {
-          const name = c.def.name;
-          if (name === staticName || !lowerer.isSubclassOf(name, staticName) || !declares(c))
-            continue;
-          // A declaring ancestor below the static class already covers it.
-          if (c.base && c.base.def.name !== staticName && declares(c.base)) continue;
-          tests.push({ kind: "instanceOf", value: ref(), className: name, type: BOOL, loc });
-        }
-        tests.push({
-          kind: "libCall",
-          fn: "error.hasKey",
-          args: [ref(), { kind: "strLit", value: key, type: STRING, loc }],
+        const tests: IrExpr[] = declarers.map((className) => ({
+          kind: "instanceOf",
+          value: ref(),
+          className,
           type: BOOL,
           loc,
-        });
+        }));
+        tests.push(
+          key === "code"
+            ? { kind: "libCall", fn: "error.hasCode", args: [ref()], type: BOOL, loc }
+            : {
+                kind: "libCall",
+                fn: "error.hasKey",
+                args: [ref(), { kind: "strLit", value: key, type: STRING, loc }],
+                type: BOOL,
+                loc,
+              },
+        );
         const answer = tests.reduce((acc, test) => ({
           kind: "logical",
           op: "||",
@@ -2766,7 +2874,7 @@ export function lowerInExpression(
     const arms = lowerer.unions.get(unionId)?.arms ?? [];
     const answers: {
       tag: number;
-      has: boolean | "slot" | "unit" | "keyed" | "probe";
+      has: boolean | "slot" | "unit" | "keyed" | "probe" | "source";
       arm: IrType;
     }[] = [];
     const armClasses = new Set(
@@ -2832,6 +2940,21 @@ export function lowerInExpression(
       // true without invoking the getter) — either slot present makes
       // the name a member.
       const acc = shape.fields.some((x) => x.name === `%get:${key}` || x.name === `%set:${key}`);
+      // A key the arm does not declare is an own key of a linked copy's
+      // source or of a kept source, as for a single record receiver
+      // below: the value answers, not the tag (unless another arm declares
+      // the key, see after the loop).
+      if (
+        arm.kind === "record" &&
+        f === undefined &&
+        !acc &&
+        !inherited &&
+        !shape.indexValue &&
+        recordMayKeepSource(lowerer, arm)
+      ) {
+        answers.push({ tag, has: "source", arm });
+        continue;
+      }
       if (f !== undefined || acc || !shape.indexValue) {
         answers.push({ tag, has: f !== undefined || acc || inherited, arm });
         continue;
@@ -2840,10 +2963,21 @@ export function lowerInExpression(
       // stored undefined is present), or the prototype's name.
       answers.push({ tag, has: "keyed", arm });
     }
+    // When another arm declares the key, the test also narrows the value
+    // to that arm, by tag: an arm that lacks the key must then answer false
+    // whatever its value kept, or the narrowed read would meet the wrong
+    // arm. Only a key no arm declares is the value's to answer.
+    if (answers.some((a) => a.has === true || a.has === "slot" || a.has === "probe"))
+      for (const a of answers) if (a.has === "source") a.has = false;
     if (
       staticAnswers &&
       answers.some(
-        (a) => a.has === "slot" || a.has === "unit" || a.has === "keyed" || a.has === "probe",
+        (a) =>
+          a.has === "slot" ||
+          a.has === "unit" ||
+          a.has === "keyed" ||
+          a.has === "probe" ||
+          a.has === "source",
       )
     ) {
       return perValueUnionIn(lowerer, recv, unionId, key, answers, loc);
@@ -2952,6 +3086,16 @@ export function lowerInExpression(
           type: BOOL,
           loc,
         };
+  }
+  // A typed CALLABLE receiver (a function+namespace merge, an expando
+  // function): its own data properties live in the closure's own-property
+  // table, whose presence test is the keyed one the `any` view uses
+  // (callable-properties.ts). The function protocol's inherited names
+  // (length, name, prototype, call, ...) answer through the same runtime
+  // walk.
+  if (recv.type.kind === "func" && isCallableValue(lowerer, expr.right)) {
+    const boxed = callableBox(lowerer, recv);
+    if (boxed !== null) return { kind: "dynHasKey", key, value: boxed, type: BOOL, loc };
   }
   if (recv.type.kind !== "record") {
     // A typed handle in a program that adds properties to handles: own
@@ -3070,7 +3214,7 @@ function perValueUnionIn(
   key: string,
   answers: readonly {
     tag: number;
-    has: boolean | "slot" | "unit" | "keyed" | "probe";
+    has: boolean | "slot" | "unit" | "keyed" | "probe" | "source";
     arm: IrType;
   }[],
   loc: SrcLoc,
@@ -3136,6 +3280,33 @@ function perValueUnionIn(
           kind: "dynHasKey",
           key,
           value: lowerer.coerceToExpected(narrowed, DYN),
+          type: BOOL,
+          loc,
+        },
+        type: BOOL,
+        loc,
+      };
+    }
+    if (a.has === "source" && a.arm.kind === "record") {
+      // The arm does not declare the key, but its value may be a copy
+      // linked to a source that has it, or keep a source of its own: the
+      // own-key helper of the arm's type answers for the narrowed value.
+      const narrowed: IrExpr = {
+        kind: "unionNarrow",
+        unionId,
+        tag: a.tag,
+        value: ref(),
+        type: a.arm,
+        loc,
+      };
+      test = {
+        kind: "logical",
+        op: "&&",
+        left: test,
+        right: {
+          kind: "call",
+          callee: recordHasOwnHelper(lowerer, a.arm.shapeId, loc),
+          args: [narrowed, { kind: "strLit", value: key, type: STRING, loc }],
           type: BOOL,
           loc,
         },
@@ -3374,6 +3545,7 @@ function nodeDeclaredMember(lowerer: Lowerer, t: ts.Type, key: string): boolean 
 }
 
 const NEVER_PROMISE_KINDS: ReadonlySet<IrType["kind"]> = new Set([
+  "object",
   "record",
   "array",
   "string",

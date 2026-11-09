@@ -3,6 +3,7 @@ import { dynUndefinedExpr, boolLit, numLit, varRef } from "../../../ir/build.js"
 import * as ts from "../../ts7/adapter.js";
 import { type Lowerer, ladderFenceExpr } from "../lowerer.js";
 import { lowerFsPath } from "./fs-paths.js";
+import { fsStreamOptionsMayHoldSignal } from "./fs-streams.js";
 import { isJsSourceFile, locOf } from "../../program.js";
 import {
   builtinModuleFnOf,
@@ -414,9 +415,16 @@ export function lowerFsLadderCall(
       const a = dynArgs([args[0], args[1]]);
       if (a && args.length <= 2) {
         const readable = bi.member === "createReadStream";
+        const signal = fsStreamOptionsMayHoldSignal(lowerer, args[1]);
         return {
           kind: "libCall",
-          fn: readable ? "fs.createReadStream" : "fs.createWriteStream",
+          fn: readable
+            ? signal
+              ? "fs.createReadStreamSignal"
+              : "fs.createReadStream"
+            : signal
+              ? "fs.createWriteStreamSignal"
+              : "fs.createWriteStream",
           args: a,
           type: { kind: "object", className: readable ? "%Readable" : "%Writable" },
           loc,
@@ -440,6 +448,7 @@ export function lowerStringOrBytesWrite(
   dataType: Extract<IrType, { kind: "union" }>,
   arms: readonly IrType[],
   append: boolean,
+  staged?: { path: IrExpr; data: IrExpr },
 ): IrExpr {
   const loc = locOf(call);
   const key = `fs.${append ? "append" : "write"}:${dataType.unionId}`;
@@ -516,10 +525,14 @@ export function lowerStringOrBytesWrite(
   return {
     kind: "call",
     callee: helper,
-    args: [
-      lowerFsPath(lowerer, call.arguments.nodes[0]!),
-      lowerer.lowerExprExpecting(call.arguments.nodes[1]!, dataType),
-    ],
+    // A caller that already staged the operands (to evaluate an option
+    // expression between them and the write) passes them in.
+    args: staged
+      ? [staged.path, staged.data]
+      : [
+          lowerFsPath(lowerer, call.arguments.nodes[0]!),
+          lowerer.lowerExprExpecting(call.arguments.nodes[1]!, dataType),
+        ],
     type: VOID,
     loc,
   };
@@ -772,11 +785,16 @@ export function lowerFileHandleMethodCall(
         loc,
       };
     }
-    lowerer.noLowering(
-      `FileHandle.${name} of '${dataT ? lowerer.fmt(dataT) : lowerer.checker.typeToString(lowerer.typeOf(dataNode))}' data`,
-      dataNode,
-      "string and Uint8Array data are supported",
-    );
+    // Data the static type does not pin down — a typed array of another
+    // element, the ArrayBufferView alias, a checked-dynamic value — takes
+    // the checked-data unit, which validates and writes a string or a view.
+    return {
+      kind: "libCall",
+      fn: "fileHandle.writeFileData",
+      args: [receiver(), lowerer.lowerExprExpecting(dataNode, DYN), encoding],
+      type: promise(VOID),
+      loc,
+    };
   }
 
   if (name === "read" || name === "write") {
@@ -986,9 +1004,16 @@ function lowerFileHandleStreamCall(
     }
   }
   const writable = name === "createWriteStream";
+  const signal = fsStreamOptionsMayHoldSignal(lowerer, args[0]);
   const stream: IrExpr = {
     kind: "libCall",
-    fn: writable ? "fileHandle.createWriteStream" : "fileHandle.createReadStream",
+    fn: writable
+      ? signal
+        ? "fileHandle.createWriteStreamSignal"
+        : "fileHandle.createWriteStream"
+      : signal
+        ? "fileHandle.createReadStreamSignal"
+        : "fileHandle.createReadStream",
     args: [receiver, options],
     type: { kind: "object", className: writable ? "%Writable" : "%Readable" },
     loc,

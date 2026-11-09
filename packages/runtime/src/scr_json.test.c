@@ -1,4 +1,5 @@
 #include "scr_runtime.h"
+#include "scr_record_source_get.h"
 #include <assert.h>
 #include <math.h>
 #include <stddef.h>
@@ -29,6 +30,229 @@ static void erase(ScrDyn *map, ScrDyn *key) {
 static ScrDyn *nothing(ScrClosure *closure, ScrDyn *const *args, size_t argc) {
   (void)closure; (void)args; (void)argc;
   return scr_dyn_retain(scr_dyn_undefined());
+}
+
+/* A value for a weak entry: an object that holds `owner` (when given) and
+ * the witness, whose count says how many such values are alive. */
+static ScrDyn *holder(ScrDyn *owner, ScrDyn *witness) {
+  ScrDyn *value = scr_dyn_new_obj();
+  if (owner) scr_dyn_obj_set(value, "owner", 5, scr_dyn_retain(owner));
+  scr_dyn_obj_set(value, "witness", 7, scr_dyn_retain(witness));
+  return value;
+}
+
+static bool holds(ScrDyn *map, ScrDyn *key) {
+  ScrDyn *result = scr_dyn_handle_ops_of(map)->invoke(map->v.handle.ptr, map, "has", &key, 1, "map.has");
+  assert(result && result->kind == SCR_DYN_BOOL && !scr_exc_pending());
+  bool found = result->v.b;
+  scr_dyn_release(result);
+  return found;
+}
+
+/* A native value without a collector header, and its capsule's callbacks. */
+typedef struct { size_t rc; } Unheadered;
+static void *unheadered_retain(void *ptr) {
+  ((Unheadered *)ptr)->rc++;
+  return ptr;
+}
+static void unheadered_release(void *ptr) {
+  if (--((Unheadered *)ptr)->rc) return;
+  scr_weak_dispose(ptr); /* native frees notify the dispose hook */
+  free(ptr);
+}
+static ScrDyn *unheadered_view(void *ptr) {
+  (void)ptr;
+  return scr_dyn_new_obj();
+}
+void scr_dyn_decl_become(ScrDyn *n, const ScrDyn *capsule);
+
+/* A weak entry lasts while its key and its collection are alive without it:
+ * scr_weak_collect_entries ends the ones only their own values keep, and
+ * leaves every count of what stays as it found it. */
+static void weak_entries_held_by_their_values(ScrDyn *witness) {
+  size_t idle = witness->rc;
+  ScrDyn *map = scr_weak_map_new(scr_dyn_undefined());
+  assert(scr_weak_collect_entries() == 0);
+
+  /* The value holds its key; the key is held elsewhere, then not. */
+  ScrDyn *key = scr_dyn_new_obj();
+  ScrDyn *value = holder(key, witness);
+  put(map, key, value);
+  scr_dyn_release(value);
+  assert(scr_weak_collect_entries() == 0);
+  assert(key->rc == 2 && value->rc == 1 && witness->rc == idle + 1 && holds(map, key));
+  scr_dyn_release(key);
+  assert(witness->rc == idle + 1);
+  assert(scr_weak_collect_entries() == 1);
+  assert(witness->rc == idle);
+
+  /* The key is its own value. */
+  key = scr_dyn_new_obj();
+  scr_dyn_obj_set(key, "witness", 7, scr_dyn_retain(witness));
+  put(map, key, key);
+  scr_dyn_release(key);
+  assert(witness->rc == idle + 1 && scr_weak_collect_entries() == 1 && witness->rc == idle);
+
+  /* A value that holds nothing of its key ends with the key, as before. */
+  key = scr_dyn_new_obj();
+  value = holder(NULL, witness);
+  put(map, key, value);
+  scr_dyn_release(value);
+  assert(scr_weak_collect_entries() == 0 && witness->rc == idle + 1);
+  scr_dyn_release(key);
+  assert(witness->rc == idle);
+
+  /* A chain: each value holds its own key and the next key, and only the
+   * first key is held elsewhere. The entries are judged in the order that
+   * makes each depend on one judged later. */
+  enum { CHAIN = 3000 };
+  ScrDyn *head = scr_dyn_new_obj();
+  ScrDyn *at = scr_dyn_retain(head);
+  for (int i = 0; i < CHAIN; i++) {
+    ScrDyn *next = scr_dyn_new_obj();
+    value = holder(at, witness);
+    scr_dyn_obj_set(value, "next", 4, scr_dyn_retain(next));
+    put(map, at, value);
+    scr_dyn_release(value);
+    scr_dyn_release(at);
+    at = next;
+  }
+  scr_dyn_release(at);
+  assert(scr_weak_collect_entries() == 0);
+  assert(witness->rc == idle + CHAIN && head->rc == 2 && holds(map, head));
+  scr_dyn_release(head);
+  assert(scr_weak_collect_entries() == CHAIN && witness->rc == idle);
+
+  /* Two collections, each value holding the other's key. */
+  ScrDyn *other = scr_weak_map_new(scr_dyn_undefined());
+  key = scr_dyn_new_obj();
+  ScrDyn *second = scr_dyn_new_obj();
+  value = holder(second, witness);
+  put(map, key, value);
+  scr_dyn_release(value);
+  value = holder(key, witness);
+  put(other, second, value);
+  scr_dyn_release(value);
+  assert(scr_weak_collect_entries() == 0 && witness->rc == idle + 2);
+  scr_dyn_release(key);
+  assert(scr_weak_collect_entries() == 0 && witness->rc == idle + 2 && holds(map, key));
+  scr_dyn_release(second);
+  assert(scr_weak_collect_entries() == 2 && witness->rc == idle);
+
+  /* A collection that only a dead entry's value reaches: its entries end
+   * although their key is alive. */
+  ScrDyn *inner = scr_weak_map_new(scr_dyn_undefined());
+  ScrDyn *kept = scr_dyn_new_obj();
+  value = holder(NULL, witness);
+  put(inner, kept, value);
+  scr_dyn_release(value);
+  key = scr_dyn_new_obj();
+  value = holder(key, witness);
+  scr_dyn_obj_set(value, "inner", 5, inner);
+  put(map, key, value);
+  scr_dyn_release(value);
+  assert(scr_weak_collect_entries() == 0 && witness->rc == idle + 2);
+  scr_dyn_release(key);
+  size_t ended = scr_weak_collect_entries();
+  assert(ended == 2);
+  assert(witness->rc == idle);
+  assert(kept->rc == 1);
+  scr_dyn_release(kept);
+
+  /* A collection that only a live entry's value reaches stays, with its
+   * entries, and every count is what it was. */
+  inner = scr_weak_map_new(scr_dyn_undefined());
+  kept = scr_dyn_new_obj();
+  ScrDyn *filed = holder(kept, witness);
+  put(inner, kept, filed);
+  scr_dyn_release(filed);
+  key = scr_dyn_new_obj();
+  value = holder(key, witness);
+  scr_dyn_obj_set(value, "inner", 5, scr_dyn_retain(inner));
+  scr_dyn_obj_set(value, "kept", 4, scr_dyn_retain(kept));
+  put(map, key, value);
+  scr_dyn_release(value);
+  scr_dyn_release(kept);
+  assert(scr_weak_collect_entries() == 0);
+  assert(inner->rc == 2 && filed->rc == 1 && value->rc == 1 && kept->rc == 2 && key->rc == 2);
+  assert(witness->rc == idle + 2 && holds(inner, kept));
+  scr_dyn_release(inner);
+  assert(scr_weak_collect_entries() == 0 && filed->rc == 1 && witness->rc == idle + 2);
+  scr_dyn_release(key);
+  assert(scr_weak_collect_entries() == 2);
+  assert(witness->rc == idle);
+
+  /* One value under two keys: a live key keeps it, and what it holds. */
+  key = scr_dyn_new_obj();
+  second = scr_dyn_new_obj();
+  value = holder(key, witness);
+  put(map, key, value);
+  put(map, second, value);
+  scr_dyn_release(value);
+  scr_dyn_release(key);
+  assert(scr_weak_collect_entries() == 0 && value->rc == 2 && witness->rc == idle + 1);
+  scr_dyn_release(second);
+  assert(scr_weak_collect_entries() == 1 && witness->rc == idle);
+
+  /* A function key that its value holds. */
+  ScrClosure *closure = scr_closure_new(NULL, 0);
+  key = scr_dyn_new_func(closure, nothing, 0, "", "key");
+  value = holder(key, witness);
+  put(map, key, value);
+  scr_dyn_release(value);
+  assert(scr_weak_collect_entries() == 0);
+  scr_dyn_release(key);
+  assert(scr_weak_collect_entries() == 1 && witness->rc == idle);
+
+  /* A key that becomes, in place, a capsule of a native value (a checked
+   * cast of a shared object does that): its entry moves to the value's
+   * identity. A native value need not have a collector header, so nothing
+   * may be read in front of it and the entry stays, as before. */
+  Unheadered *native = malloc(sizeof *native);
+  assert(native);
+  native->rc = 1;
+  ScrDyn *capsule = scr_dyn_new_typed_ref(native, unheadered_retain, unheadered_release, "plain", 5,
+                                          unheadered_view, NULL);
+  key = scr_dyn_new_obj();
+  value = holder(key, witness);
+  put(map, key, value);
+  scr_dyn_release(value);
+  scr_dyn_decl_become(key, capsule);
+  scr_dyn_release(capsule);
+  unheadered_release(native);
+  assert(holds(map, key));
+  scr_dyn_release(key);
+  assert(scr_weak_collect_entries() == 0 && witness->rc == idle + 1 && native->rc >= 1);
+  /* Nothing can reach that entry again; it ends with the collection. */
+  ScrDyn *moved = scr_weak_map_new(scr_dyn_undefined());
+  ScrDyn *swap = map;
+  map = moved;
+  scr_dyn_release(swap);
+  assert(witness->rc == idle);
+
+  /* A WeakSet member has no value to hold it. */
+  ScrDyn *set = scr_weak_set_new(scr_dyn_undefined());
+  key = scr_dyn_new_obj();
+  ScrDyn *added = scr_dyn_handle_ops_of(set)->invoke(set->v.handle.ptr, set, "add", &key, 1, "set.add");
+  scr_dyn_release(added);
+  assert(scr_weak_collect_entries() == 0 && holds(set, key));
+  scr_dyn_release(key);
+  scr_dyn_release(set);
+
+  /* Left to itself, the runtime keeps such entries bounded by the heap's
+   * growth since the last analysis. */
+  for (int i = 0; i < 200000; i++) {
+    key = scr_dyn_new_obj();
+    value = holder(key, witness);
+    put(map, key, value);
+    scr_dyn_release(value);
+    scr_dyn_release(key);
+    assert(witness->rc < idle + 10000);
+  }
+  scr_weak_collect_entries();
+  assert(witness->rc == idle);
+  scr_dyn_release(other);
+  scr_dyn_release(map);
 }
 
 static void json_string_boundaries(void) {
@@ -878,6 +1102,135 @@ static void record_source_class_member(void) {
   scr_str_release(member);
 }
 
+/* scr_dyn_copy_prop_at stores a plain data property by an ordinary write
+ * whichever mode the source object is in: on an array, an index key becomes
+ * an element and a name goes to the array's own properties. */
+static void copy_prop_modes(void) {
+  for (int dictionary = 0; dictionary < 2; dictionary++) {
+    ScrDyn *source = scr_dyn_new_obj();
+    scr_dyn_obj_set(source, "0", 1, scr_dyn_new_num(7));
+    scr_dyn_obj_set(source, "tag", 3, scr_dyn_new_num(3));
+    if (dictionary) scr_dyn_to_dictionary(source);
+    assert((source->v.obj.layout == NULL) == (dictionary == 1));
+    ScrDyn *target = scr_dyn_new_arr();
+    for (size_t i = 0; i < scr_dyn_obj_count(source); i++) scr_dyn_copy_prop_at(target, source, i);
+    assert(!scr_exc_pending());
+    assert(target->v.arr.len == 1);
+    assert(target->v.arr.items[0]->kind == SCR_DYN_NUM && target->v.arr.items[0]->v.num == 7);
+    const ScrDyn *named = target->v.arr.properties;
+    assert(named && scr_dyn_obj_count(named) == 1);
+    const ScrDyn *tag = scr_dyn_obj_get(named, "tag", 3);
+    assert(tag && tag->kind == SCR_DYN_NUM && tag->v.num == 3);
+    scr_dyn_release(target);
+    scr_dyn_release(source);
+  }
+}
+
+static ScrDyn *getter_seven(ScrClosure *closure, ScrDyn *const *args, size_t argc) {
+  (void)closure;
+  (void)args;
+  (void)argc;
+  return scr_dyn_new_num(7);
+}
+
+/* The read a record→record conversion uses for a field the source type does
+ * not declare: a data key answers the kept value (+1), a key the source
+ * lacks answers the undefined value, an accessor the kept source carries
+ * runs, and a record that keeps no source answers the undefined value too. */
+static void record_source_get(void) {
+  static const char *const names[] = {"label"};
+  static const size_t lens[] = {5};
+  size_t record[2] = {1, 0};
+  ScrDyn *source = scr_dyn_new_obj();
+  scr_dyn_obj_set(source, "label", 5, scr_dyn_new_num(1));
+  scr_dyn_obj_set(source, "count", 5, scr_dyn_new_num(2));
+  ScrDyn *descriptor = scr_dyn_new_obj();
+  scr_dyn_obj_set(descriptor, "get", 3,
+                  scr_dyn_new_func(scr_closure_new(NULL, 0), getter_seven, 0, "", ""));
+  scr_dyn_obj_set(descriptor, "enumerable", 10, scr_dyn_new_bool(true));
+  ScrStr *name = scr_str_new("computed", 8);
+  ScrDyn *name_value = scr_dyn_new_str(name);
+  scr_dyn_release(scr_dyn_define_property(source, name_value, descriptor));
+  scr_dyn_release(name_value);
+  scr_dyn_release(descriptor);
+  scr_str_release(name);
+
+  scr_record_source_note(record, source, names, lens, 1);
+  assert(!scr_exc_pending() && scr_record_source_has(record));
+  ScrDyn *count = scr_record_source_get(record, "count", 5);
+  assert(count && count->kind == SCR_DYN_NUM && count->v.num == 2);
+  scr_dyn_release(count);
+  ScrDyn *computed = scr_record_source_get(record, "computed", 8);
+  assert(computed && computed->kind == SCR_DYN_NUM && computed->v.num == 7);
+  scr_dyn_release(computed);
+  /* A declared key holds a placeholder: the record is its source of truth. */
+  ScrDyn *declared = scr_record_source_get(record, "label", 5);
+  assert(declared && declared->kind == SCR_DYN_UNDEF);
+  scr_dyn_release(declared);
+  ScrDyn *missing = scr_record_source_get(record, "absent", 6);
+  assert(missing && missing->kind == SCR_DYN_UNDEF);
+  scr_dyn_release(missing);
+
+  scr_weak_dispose(record);
+  assert(!scr_record_source_has(record));
+  ScrDyn *none = scr_record_source_get(record, "count", 5);
+  assert(none && none->kind == SCR_DYN_UNDEF);
+  scr_dyn_release(none);
+  scr_dyn_release(source);
+}
+
+/* A declared key the source held as a non-enumerable data property stays
+ * non-enumerable: the conversion keeps a view for that alone, the view's
+ * entry for the key carries the attribute, and a refresh of the view from
+ * the record's values keeps it. An enumerable source in declaration order
+ * still keeps nothing. */
+static void record_source_hidden_key(void) {
+  static const char *const names[] = {"kind", "type"};
+  static const size_t lens[] = {4, 4};
+  ScrStr *text = scr_str_new("t", 1);
+
+  ScrDyn *plain = scr_dyn_new_obj();
+  scr_dyn_obj_set(plain, "kind", 4, scr_dyn_new_str(text));
+  scr_dyn_obj_set(plain, "type", 4, scr_dyn_new_str(text));
+  size_t ordinary[2] = {1, 0};
+  scr_record_source_note(ordinary, plain, names, lens, 2);
+  assert(!scr_record_source_has(ordinary));
+
+  ScrDyn *source = scr_dyn_new_obj();
+  scr_dyn_obj_set(source, "kind", 4, scr_dyn_new_str(text));
+  scr_dyn_obj_set(source, "type", 4, scr_dyn_new_str(text));
+  scr_dyn_obj_set_attrs_at(source, scr_dyn_obj_index_of(source, "kind", 4), true, false, true);
+  size_t record[2] = {1, 0};
+  scr_record_source_note(record, source, names, lens, 2);
+  assert(!scr_exc_pending() && scr_record_source_has(record));
+  const ScrDyn *view = scr_record_source_view(record);
+  assert(view && view->kind == SCR_DYN_OBJ && view->v.obj.len == 2);
+  ScrDynProp kind = scr_dyn_obj_prop_at(view, scr_dyn_obj_index_of(view, "kind", 4));
+  assert(!kind.enumerable && kind.writable && kind.configurable && !kind.accessor);
+  ScrDynProp type = scr_dyn_obj_prop_at(view, scr_dyn_obj_index_of(view, "type", 4));
+  assert(type.enumerable && type.writable && type.configurable);
+
+  /* The record's snapshot lists every field as an ordinary property; the
+   * merge through the kept view hides the key again. */
+  ScrDyn *snapshot = scr_dyn_new_obj();
+  scr_dyn_obj_set(snapshot, "kind", 4, scr_dyn_new_str(text));
+  scr_dyn_obj_set(snapshot, "type", 4, scr_dyn_new_str(text));
+  ScrDyn *merged = scr_record_source_apply(snapshot, record);
+  assert(merged && merged->kind == SCR_DYN_OBJ && merged->v.obj.len == 2);
+  kind = scr_dyn_obj_prop_at(merged, scr_dyn_obj_index_of(merged, "kind", 4));
+  assert(!kind.enumerable && kind.writable && kind.configurable);
+  assert(kind.value && kind.value->kind == SCR_DYN_STR);
+  type = scr_dyn_obj_prop_at(merged, scr_dyn_obj_index_of(merged, "type", 4));
+  assert(type.enumerable);
+  scr_dyn_release(merged);
+
+  scr_weak_dispose(record);
+  assert(!scr_record_source_has(record));
+  scr_dyn_release(source);
+  scr_dyn_release(plain);
+  scr_str_release(text);
+}
+
 /* Freezing a record sets the frozen bit beside its count; an immortal
  * record keeps its word, which does not read as frozen. */
 static void record_frozen_bit(void) {
@@ -888,6 +1241,162 @@ static void record_frozen_bit(void) {
   size_t immortal[2] = {SIZE_MAX, 0};
   scr_record_freeze(immortal);
   assert(immortal[0] == SIZE_MAX && !scr_rc_frozen(immortal));
+}
+
+/* A stand-in for the stream unit (ScrStreamRefHooks): `ready` is a data
+ * property of the view, `write` a member of its prototype, `native` a name
+ * only the view can answer. It counts the views built and the questions
+ * the hook was asked. */
+typedef struct {
+  size_t rc;
+  int views, asked;
+} TestStream;
+static void *test_stream_retain(void *ptr) {
+  ((TestStream *)ptr)->rc++;
+  return ptr;
+}
+static void test_stream_release(void *ptr) {
+  TestStream *stream = ptr;
+  if (stream && !--stream->rc) free(stream);
+}
+static ScrDyn *test_stream_view(void *ptr) {
+  ((TestStream *)ptr)->views++;
+  ScrDyn *view = scr_dyn_new_obj();
+  ScrDyn *prototype = scr_dyn_new_obj();
+  scr_dyn_obj_set(view, "ready", 5, scr_dyn_new_bool(true));
+  scr_dyn_obj_set(prototype, "write", 5, scr_dyn_new_num(7));
+  scr_dyn_release(scr_dyn_set_prototype(view, prototype));
+  scr_dyn_release(prototype);
+  return view;
+}
+static ScrDyn *test_other_view(void *ptr) {
+  ((TestStream *)ptr)->views++;
+  return scr_dyn_new_obj();
+}
+static int test_stream_member(void *ptr, const char *key, size_t key_len, ScrDyn **value) {
+  ((TestStream *)ptr)->asked++;
+  if (key_len == 5 && memcmp(key, "ready", 5) == 0) {
+    if (value) *value = scr_dyn_new_bool(true);
+    return 1;
+  }
+  if (key_len == 5 && memcmp(key, "write", 5) == 0) return 2;
+  if (key_len == 6 && memcmp(key, "native", 6) == 0) return -1;
+  return 0;
+}
+static ScrDyn *test_stream_capsule(TestStream **stream, ScrDyn *(*view)(void *)) {
+  *stream = calloc(1, sizeof **stream);
+  assert(*stream);
+  (*stream)->rc = 1;
+  ScrDyn *capsule = scr_dyn_new_typed_ref(*stream, test_stream_retain, test_stream_release,
+                                          "TestStream", 10, view, NULL);
+  test_stream_release(*stream);
+  return capsule;
+}
+
+/* One question to a fresh capsule whose adapter is `view`: the read (NULL
+ * when it needs the view), `in` and Reflect.has, with the views each built
+ * and the questions the hook was asked in all. */
+typedef struct {
+  ScrDyn *read;
+  bool in, has;
+  int read_views, in_views, has_views, asked;
+} TestStreamAnswer;
+static TestStreamAnswer test_stream_ask(ScrDyn *(*view)(void *), const char *name) {
+  ScrStr *key = scr_str_new(name, strlen(name));
+  TestStreamAnswer answer = {0};
+  TestStream *stream;
+  ScrDyn *capsule = test_stream_capsule(&stream, view);
+  answer.read = scr_dyn_typed_ref_key_get(capsule, key);
+  answer.read_views = stream->views;
+  answer.asked = stream->asked;
+  scr_dyn_release(capsule);
+  capsule = test_stream_capsule(&stream, view);
+  answer.in = scr_dyn_in(capsule, key);
+  answer.in_views = stream->views;
+  answer.asked += stream->asked;
+  scr_dyn_release(capsule);
+  capsule = test_stream_capsule(&stream, view);
+  answer.has = scr_dyn_has_key(capsule, key);
+  answer.has_views = stream->views;
+  answer.asked += stream->asked;
+  scr_dyn_release(capsule);
+  scr_str_release(key);
+  assert(!scr_exc_pending());
+  return answer;
+}
+
+static void stream_ref_member_questions(void) {
+  /* Before the stream unit's first stream nothing answers but the view. */
+  assert(!scr_stream_ref_hooks.view && !scr_stream_ref_hooks.member);
+  assert(!scr_stream_ref_hooks.get && !scr_stream_ref_hooks.has);
+  TestStreamAnswer answer = test_stream_ask(test_stream_view, "flush");
+  assert(!answer.read && !answer.in && !answer.has && answer.asked == 0);
+  assert(answer.read_views == 0 && answer.in_views == 1 && answer.has_views == 1);
+  /* A capsule with no adapter is no stream while the record is empty: no
+   * question reaches the record's functions, which are not there yet. */
+  TestStream *stream;
+  ScrDyn *capsule = test_stream_capsule(&stream, NULL);
+  ScrStr *key = scr_str_new("flush", 5);
+  assert(!scr_dyn_typed_ref_key_get(capsule, key) && stream->asked == 0);
+  /* Nor while another thread is filling the record in: the questions are
+   * set and `view`, which goes in last, is not. */
+  scr_stream_ref_hooks.member = test_stream_member;
+  scr_stream_ref_hooks.get = scr_typed_ref_stream_get;
+  scr_stream_ref_hooks.has = scr_typed_ref_stream_has;
+  assert(!scr_dyn_typed_ref_key_get(capsule, key) && stream->asked == 0);
+  scr_dyn_release(capsule);
+
+  scr_stream_ref_hooks.view = test_stream_view;
+
+  /* A name the view holds nowhere: answered, and no view is built. */
+  answer = test_stream_ask(test_stream_view, "flush");
+  assert(answer.read == scr_dyn_undefined() && !answer.in && !answer.has);
+  assert(answer.read_views + answer.in_views + answer.has_views == 0 && answer.asked == 3);
+  scr_dyn_release(answer.read);
+  answer = test_stream_ask(test_stream_view, "");
+  assert(answer.read == scr_dyn_undefined() && !answer.in && !answer.has);
+  assert(answer.read_views + answer.in_views + answer.has_views == 0 && answer.asked == 3);
+  scr_dyn_release(answer.read);
+
+  /* A data property: its value, and no view. */
+  answer = test_stream_ask(test_stream_view, "ready");
+  assert(answer.read && answer.read->kind == SCR_DYN_BOOL && answer.read->v.b && answer.in && answer.has);
+  assert(answer.read_views + answer.in_views + answer.has_views == 0 && answer.asked == 3);
+  scr_dyn_release(answer.read);
+
+  /* A method: present without a view; its value is the view's to give. */
+  answer = test_stream_ask(test_stream_view, "write");
+  assert(!answer.read && answer.in && answer.has);
+  assert(answer.read_views + answer.in_views + answer.has_views == 0 && answer.asked == 3);
+
+  /* A name only the view can answer: every question builds it. */
+  answer = test_stream_ask(test_stream_view, "native");
+  assert(!answer.read && !answer.in && !answer.has);
+  assert(answer.read_views == 0 && answer.in_views == 1 && answer.has_views == 1 && answer.asked == 3);
+
+  /* A name of Object.prototype is never the hook's. */
+  answer = test_stream_ask(test_stream_view, "hasOwnProperty");
+  assert(!answer.read && answer.in && answer.asked == 0);
+  assert(answer.read_views == 0 && answer.in_views == 1 && answer.has_views == 1);
+
+  /* A capsule of another kind is never asked. */
+  answer = test_stream_ask(test_other_view, "flush");
+  assert(!answer.read && !answer.in && !answer.has && answer.asked == 0);
+  assert(answer.read_views == 0 && answer.in_views == 1 && answer.has_views == 1);
+
+  /* A capsule that has a view answers from it. */
+  capsule = test_stream_capsule(&stream, test_stream_view);
+  scr_dyn_release(scr_dyn_typed_ref_materialize(capsule));
+  assert(!scr_dyn_typed_ref_key_get(capsule, key) && !scr_dyn_in(capsule, key) && !scr_dyn_has_key(capsule, key));
+  assert(stream->asked == 0 && stream->views >= 1);
+  scr_str_release(key);
+  scr_dyn_release(capsule);
+
+  scr_stream_ref_hooks.view = NULL;
+  scr_stream_ref_hooks.get = NULL;
+  scr_stream_ref_hooks.has = NULL;
+  scr_stream_ref_hooks.member = NULL;
+  assert(!scr_exc_pending());
 }
 
 int main(void) {
@@ -905,6 +1414,10 @@ int main(void) {
   json_schema_special_names();
   json_schema_union_members();
   record_source_class_member();
+  copy_prop_modes();
+  record_source_get();
+  record_source_hidden_key();
+  stream_ref_member_questions();
   /* Native Set boxes may own headerless scalar/string maps. Collecting an
    * enclosing cycle must neither trace those leaves nor skip their release. */
   for (int i = 0; i < 2000; i++) {
@@ -1058,6 +1571,7 @@ int main(void) {
   scr_dyn_release(map);
   assert(key->rc == 1 && first->rc == 1);
   scr_dyn_release(key);
+  weak_entries_held_by_their_values(first);
   scr_dyn_release(first);
   assert(!scr_exc_pending());
   puts("checked storage and weak metadata lifetime checks passed");

@@ -450,6 +450,7 @@ void scr_lib_init(int argc, char **argv) {
 
 #ifdef SCR_LIB
 static void scr_process_allowed_env_flags_cleanup(void);
+static void scr_process_exec_argv_cleanup(void);
 /* Library builds never call scr_lib_init (a library artifact has no argv and registers no
  * atexit handlers); the interned process values above still intern lazily
  * on first read, so the library reset seam releases them here instead —
@@ -462,6 +463,7 @@ void scr_lib_session_cleanup(void) {
   scr_process_versions_node_cleanup();
   scr_process_versions_openssl_cleanup();
   scr_process_allowed_env_flags_cleanup();
+  scr_process_exec_argv_cleanup();
 }
 #endif
 
@@ -641,11 +643,27 @@ bool scr_lib_take_flag(const char *flag) {
   return true;
 }
 
+/* process.execArgv: +1 on ONE array per thread, like process.argv: Node's
+ * `process.execArgv === process.execArgv` is true and a push is seen by the
+ * next read. */
+static SCR_TL ScrArr *scr_exec_argv_arr = NULL;
+
+static void scr_process_exec_argv_cleanup(void) {
+  scr_arr_release(scr_exec_argv_arr);
+  scr_exec_argv_arr = NULL;
+}
+
 ScrArr *scr_process_exec_argv(void) {
-  ScrArr *arr = scr_arr_new(SCR_ELEM_STR, 1);
-  if (scr_lib_exec_flag)
-    scr_arr_push_ref(arr, scr_str_new(scr_lib_exec_flag, strlen(scr_lib_exec_flag)));
-  return arr;
+  if (!scr_exec_argv_arr) {
+    scr_exec_argv_arr = scr_arr_new(SCR_ELEM_STR, 1);
+    if (scr_lib_exec_flag)
+      scr_arr_push_ref(scr_exec_argv_arr,
+                       scr_str_new(scr_lib_exec_flag, strlen(scr_lib_exec_flag)));
+#ifndef SCR_LIB
+    scr_atexit(scr_process_exec_argv_cleanup);
+#endif
+  }
+  return scr_arr_retain(scr_exec_argv_arr);
 }
 
 /* process.allowedNodeEnvironmentFlags — the option names the
@@ -1155,6 +1173,69 @@ ScrStr *scr_process_exec_path(void) {
   return scr_str_retain(scr_exec_path_str);
 }
 
+/* A NUL-terminated copy of length bytes of text, +1 for the caller: the
+ * shape every process-environment read answers. */
+static char *scr_env_copy_text(const char *text, size_t length) {
+  char *copy = malloc(length + 1);
+  if (!copy) scr_trap("scriptc: out of memory\n");
+  memcpy(copy, text, length);
+  copy[length] = '\0';
+  return copy;
+}
+
+/* One read of the process environment, copied. A worker reads the process
+ * environment through scr_context_getenv, which lands here, so the Win32
+ * environment — what scr_env_set writes on Windows — has to be the source
+ * there too: the CRT's getenv answers the snapshot it took at startup and
+ * would miss either thread's writes. */
+char *scr_env_process_copy(const char *name) {
+#ifdef _WIN32
+  WCHAR *wname = scr_win_wide_utf8(name, strlen(name));
+  if (!wname) return NULL;
+  SetLastError(ERROR_SUCCESS); /* the query reports absence through the error */
+  DWORD need = GetEnvironmentVariableW(wname, NULL, 0);
+  if (need == 0) {
+    /* Only a failed query means the variable is absent. A present-but-empty
+     * value still needs room for its terminating NUL, so a zero size with no
+     * error is present too; Node reports it as '', not undefined. */
+    bool absent = GetLastError() == ERROR_ENVVAR_NOT_FOUND;
+    free(wname);
+    return absent ? NULL : scr_env_copy_text("", 0);
+  }
+  WCHAR *wvalue = malloc((size_t)need * sizeof *wvalue);
+  if (!wvalue) {
+    free(wname);
+    scr_trap("scriptc: out of memory\n");
+  }
+  SetLastError(ERROR_SUCCESS);
+  DWORD got = GetEnvironmentVariableW(wname, wvalue, need);
+  DWORD error = got == 0 ? GetLastError() : ERROR_SUCCESS;
+  free(wname);
+  if (got == 0) {
+    /* A successful read reports the characters it stored, which is 0 for a
+     * present-but-empty value: the NUL went into the buffer and Node keeps
+     * the entry as ''. Only a failed read means the variable vanished
+     * between the query and this call. */
+    free(wvalue);
+    return error == ERROR_SUCCESS ? scr_env_copy_text("", 0) : NULL;
+  }
+  if (got >= need) {
+    /* The value grew past the size the query reported: this read is stale. */
+    free(wvalue);
+    return NULL;
+  }
+  ScrStr *text = scr_fs_win_utf8(wvalue, got);
+  free(wvalue);
+  if (!text) return NULL;
+  char *copy = scr_env_copy_text(text->data, text->len);
+  scr_str_release(text);
+  return copy;
+#else
+  const char *value = getenv(name);
+  return value ? scr_env_copy_text(value, strlen(value)) : NULL;
+#endif
+}
+
 ScrStr *scr_env_get(const ScrStr *name) {
 #ifdef SCR_WORKERS
   if (!scr_context_is_main()) {
@@ -1175,43 +1256,11 @@ ScrStr *scr_env_get(const ScrStr *name) {
    * the entry. */
   char *owned;
   const char *k = scr_str_utf8(name, &owned);
-  WCHAR *wname = scr_win_wide_utf8(k, strlen(k));
+  char *copy = scr_env_process_copy(k);
   scr_str_utf8_end(owned);
-  if (!wname) return NULL;
-  SetLastError(ERROR_SUCCESS); /* the query reports absence through the error */
-  DWORD need = GetEnvironmentVariableW(wname, NULL, 0);
-  if (need == 0) {
-    /* Only a failed query means the variable is absent. A present-but-empty
-     * value still needs room for its terminating NUL, so a zero size with no
-     * error is present too; Node reports it as '', not undefined. */
-    bool absent = GetLastError() == ERROR_ENVVAR_NOT_FOUND;
-    free(wname);
-    return absent ? NULL : scr_str_new("", 0);
-  }
-  WCHAR *wvalue = malloc((size_t)need * sizeof *wvalue);
-  if (!wvalue) {
-    free(wname);
-    scr_trap("scriptc: out of memory\n");
-  }
-  SetLastError(ERROR_SUCCESS);
-  DWORD got = GetEnvironmentVariableW(wname, wvalue, need);
-  DWORD error = got == 0 ? GetLastError() : ERROR_SUCCESS;
-  free(wname);
-  if (got == 0) {
-    /* A successful read reports the characters it stored, which is 0 for a
-     * present-but-empty value: the NUL went into the buffer and Node keeps
-     * the entry as ''. Only a failed read means the variable vanished
-     * between the query and this call. */
-    free(wvalue);
-    return error == ERROR_SUCCESS ? scr_str_new("", 0) : NULL;
-  }
-  if (got >= need) {
-    /* The value grew past the size the query reported: this read is stale. */
-    free(wvalue);
-    return NULL;
-  }
-  ScrStr *s = scr_fs_win_utf8(wvalue, got);
-  free(wvalue);
+  if (!copy) return NULL;
+  ScrStr *s = scr_str_new(copy, strlen(copy));
+  free(copy);
   return s;
 #else
   const char *v = scr_getenv(name->data);
@@ -1279,6 +1328,7 @@ void scr_env_set(const ScrStr *name, const ScrStr *value) {
   const char *k = scr_str_utf8(name, &name_owned), *v = scr_str_utf8(value, &value_owned);
 #ifdef SCR_WORKERS
   if (scr_context_env_set(k, v)) goto done;
+  scr_context_env_process_lock();
 #endif
 #ifdef _WIN32
   /* The WIN32 environment (see scr_env_get): an empty value stays a
@@ -1292,6 +1342,9 @@ void scr_env_set(const ScrStr *name, const ScrStr *value) {
   free(wvalue);
 #else
   setenv(k, v, 1);
+#endif
+#ifdef SCR_WORKERS
+  scr_context_env_process_unlock();
 #endif
   scr_env_tz_changed(name);
 #ifdef SCR_WORKERS
@@ -1307,6 +1360,7 @@ void scr_env_unset(const ScrStr *name) {
   scr_node_debug_capture(name);
 #ifdef SCR_WORKERS
   if (scr_context_env_set(name->data, NULL)) return;
+  scr_context_env_process_lock();
 #endif
 #ifdef _WIN32
   char *owned;
@@ -1317,6 +1371,9 @@ void scr_env_unset(const ScrStr *name) {
   scr_str_utf8_end(owned);
 #else
   unsetenv(name->data);
+#endif
+#ifdef SCR_WORKERS
+  scr_context_env_process_unlock();
 #endif
   scr_env_tz_changed(name);
 }
@@ -1570,6 +1627,10 @@ ScrArr *scr_env_pairs(void) {
   if (local) return local;
 #endif
   ScrArr *out = scr_arr_new(SCR_ELEM_STR, 0);
+#ifdef SCR_WORKERS
+  /* The walk reads the environ array another thread's write can reallocate. */
+  scr_context_env_process_lock();
+#endif
 #ifdef _WIN32
   /* The WIN32 environment block (see scr_env_get): NUL-separated "K=V"
    * entries, double-NUL terminated, read as UTF-16 and converted to the
@@ -1600,6 +1661,9 @@ ScrArr *scr_env_pairs(void) {
     scr_arr_push_ref(out, scr_str_new(*e, (size_t)(eq - *e)));
     scr_arr_push_ref(out, scr_str_new(eq + 1, strlen(eq + 1)));
   }
+#endif
+#ifdef SCR_WORKERS
+  scr_context_env_process_unlock();
 #endif
   return out;
 }
@@ -2622,6 +2686,7 @@ void scr_os_ifaddrs_free(ScrIfaddrs *s) {
  * event-free binaries and in the standalone runtime C tests). */
 SCR_TL void (*scr_process_exit_hook)(double code) = NULL;
 SCR_TL void (*scr_warning_emit_hook)(const char *name, const char *code, ScrStr *message) = NULL;
+SCR_TL void (*scr_warning_leak_hook)(ScrDyn *type, double count, ScrDyn *emitter, ScrStr *message) = NULL;
 SCR_TL bool scr_warning_trace_hint_shown = false;
 SCR_TL void (*scr_stdin_destroy_hook)(void) = NULL;
 
@@ -2842,6 +2907,7 @@ static double scr_uptime_now_ms(void) { return (double)GetTickCount64(); }
 #include <sys/time.h>
 #ifdef __APPLE__
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #endif
 /* A load-time, process-wide anchor: the constructor runs on only the
  * initial thread, while thread-instanced archives are entered from worker
@@ -2879,6 +2945,18 @@ double scr_perf_now(void) {
   return scr_uptime_now_ms() - scr_uptime_t0_ms;
 }
 
+#ifdef __APPLE__
+/* libuv's uv__hrtime reads mach_continuous_time scaled by the machine's time
+ * base. Apple's clock_gettime(CLOCK_MONOTONIC) is the wall clock minus the
+ * boot time, so it follows wall-clock adjustments and a pair of readings
+ * around one can run backwards; Node's process.hrtime never does. The time
+ * base is a machine constant, so a load-time initializer fills it once. */
+static mach_timebase_info_data_t scr_hrtime_timebase;
+__attribute__((constructor)) static void scr_hrtime_timebase_init(void) {
+  mach_timebase_info(&scr_hrtime_timebase);
+}
+#endif
+
 uint64_t scr_hrtime_ns(void) {
 #ifdef _WIN32
   LARGE_INTEGER counter, frequency;
@@ -2887,6 +2965,22 @@ uint64_t scr_hrtime_ns(void) {
   uint64_t whole = (uint64_t)(counter.QuadPart / frequency.QuadPart);
   uint64_t remainder = (uint64_t)(counter.QuadPart % frequency.QuadPart);
   return whole * UINT64_C(1000000000) + remainder * UINT64_C(1000000000) / (uint64_t)frequency.QuadPart;
+#elif defined(__APPLE__)
+  uint64_t ticks = mach_continuous_time();
+  uint32_t numer = scr_hrtime_timebase.numer;
+  uint32_t denom = scr_hrtime_timebase.denom;
+  if (denom == 0) {
+    mach_timebase_info_data_t timebase;
+    if (mach_timebase_info(&timebase) == KERN_SUCCESS) {
+      numer = timebase.numer;
+      denom = timebase.denom;
+    }
+    if (denom == 0) {
+      numer = 1;
+      denom = 1;
+    }
+  }
+  return ticks * numer / denom;
 #else
   struct timespec time;
   clock_gettime(CLOCK_MONOTONIC, &time);
@@ -4040,7 +4134,7 @@ static ScrStr *scr_fs_read_file_core(ScrStr *path, bool env_file, size_t *ascii)
       ScrStr *message = scr_jb_finish(&b);
       scr_throw_error_msg_code(SCR_ERR_TYPE, message->data, message->len, "ERR_INVALID_ARG_TYPE");
       scr_str_release(message);
-    } else scr_fs_throw(error, "read", path);
+    } else scr_fs_throw(error, "read", NULL); /* the read fails on the descriptor: Node names no path */
     return NULL;
   }
   if (ascii) *ascii = out.ascii;
@@ -4054,7 +4148,7 @@ ScrBytes *scr_fs_read_file_bytes(ScrStr *path) {
   ScrFileRead out;
   int error = scr_file_read_all(f, -1, false, &out);
   fclose(f);
-  if (error) { scr_fs_throw(error, "read", path); return NULL; }
+  if (error) { scr_fs_throw(error, "read", NULL); return NULL; }
   /* Node answers a Buffer: the brand is observable (Buffer.isBuffer,
    * .constructor, instanceof, inspect), so the read's bytes carry it. */
   ScrBytes *bytes = scr_bytes_take_data(out.bytes, out.len);
@@ -4245,6 +4339,17 @@ bool scr_fs_exists(ScrStr *path) {
    * path with a null byte, ...) is simply false — never a throw. */
   if (memchr(path->data, 0, path->len)) return false;
   return access(path->data, F_OK) == 0;
+}
+
+bool scr_fs_exists_bytes(ScrBytes *bytes) {
+  /* A statically typed Buffer path: decode it to the string the probe runs
+   * on. The value form (scr_fs_exists_dyn.c) converts the same way, and a
+   * typed path reaches this entry point without boxing, so a program whose
+   * paths are all typed links no dynamic tier. */
+  ScrStr *path = scr_bytes_string(bytes, 0, bytes->len);
+  bool found = scr_fs_exists(path);
+  scr_str_release(path);
+  return found;
 }
 
 void scr_fs_mkdir(ScrStr *path) {
@@ -4861,8 +4966,13 @@ static ssize_t scr_fs_write_once(int fd, const void *data, size_t length,
 #endif
 }
 
-static double scr_fs_write_bytes(double fd, const void *data, size_t length,
-                                 double position) {
+/* One write(2) of `length` bytes at `position` (-1: the descriptor's
+ * current offset), validated and reported like the rest of the fd writes.
+ * The typed-array and Buffer forms go through scr_fs_write_sync; the
+ * writeFileSync(fd, data) form shares this entry for the byte windows it
+ * writes whole (scr_fs_bytes_write.c). */
+double scr_fs_write_mem(double fd, const void *data, size_t length,
+                        double position) {
   if (!scr_fs_write_fd_valid(fd)) return 0;
   /* fs.writeSync(1|2, ...) and writes to a duplicated stdout descriptor go
    * between the program's other output: publish buffered stdout first so
@@ -4945,7 +5055,7 @@ double scr_fs_write_sync(double fd, ScrBytes *buf, double offset, double length,
     scr_throw_error_msg_code(SCR_ERR_RANGE, msg, (size_t)len, "ERR_OUT_OF_RANGE");
     return 0;
   }
-  return scr_fs_write_bytes(fd, buf->data + off, (size_t)length, position);
+  return scr_fs_write_mem(fd, buf->data + off, (size_t)length, position);
 }
 
 double scr_fs_write_str_sync(double fd, ScrStr *data, double position,
@@ -4953,7 +5063,7 @@ double scr_fs_write_str_sync(double fd, ScrStr *data, double position,
   (void)encoding; /* frontend proves utf8; the argument still evaluates */
   char *owned;
   const char *bytes = scr_str_utf8(data, &owned);
-  double wrote = scr_fs_write_bytes(fd, bytes, data->len, position);
+  double wrote = scr_fs_write_mem(fd, bytes, data->len, position);
   scr_str_utf8_end(owned);
   return wrote;
 }
@@ -4968,7 +5078,7 @@ void scr_fs_write_file_fd(double fd, ScrStr *data) {
   const char *bytes = scr_str_utf8(data, &owned);
   size_t at = 0;
   while (at < data->len) {
-    double wrote = scr_fs_write_bytes(fd, bytes + at, data->len - at, -1);
+    double wrote = scr_fs_write_mem(fd, bytes + at, data->len - at, -1);
     /* A throw leaves 0 (or the short count a partial write reported);
      * a zero-length write on a nonempty slice would spin, so stop. */
     if (wrote <= 0) break;
@@ -7697,7 +7807,7 @@ static ScrDyn *scr_dir_dyn_invoke(void *h, ScrDyn *self, const char *method, Scr
     return scr_exc_pending() ? NULL : scr_dyn_retain(scr_dyn_undefined());
   }
   static const char msg[] = "Dir method calls through an 'unknown' value are not supported yet — narrow the value to Dir first";
-  scr_throw_error_msg(SCR_ERR_ERROR, msg, sizeof msg - 1);
+  scr_throw_error_msg_code(SCR_ERR_ERROR, msg, sizeof msg - 1, "SC2020");
   return NULL;
 }
 
@@ -7967,7 +8077,10 @@ void scr_dir_close_callback(ScrDir *d, ScrDyn *callback) {
 #endif
 
 /* ── node:crypto ─────────────────────────────────────────────────────
- * Randomness comes from arc4random_buf. Hash/Hmac/PBKDF2 follow below;
+ * Randomness comes from arc4random_buf, the system's secure source, on
+ * every call: never from the generator behind Math.random, which is fast
+ * and predictable (tests/harness/math-random-boundary.test.ts holds that
+ * line). Hash/Hmac/PBKDF2 follow below;
  * Buffer allocation itself lives in scr_bytes_io.c, while this unit owns
  * the shared digest implementation and utility validation ladders. */
 
@@ -7975,10 +8088,10 @@ void scr_dir_close_callback(ScrDir *d, ScrDyn *callback) {
  * Math.min/max at two arguments: the ECMA folds — C's fmin/fmax are NOT
  * these (they return the non-NaN operand where JS lets NaN poison, and
  * leave the ±0 order unspecified). Math.random(): a uniform double in
- * [0,1) at the spec's 53-bit granularity, drawn from arc4random_buf —
- * the same CSPRNG behind the crypto lowerings. Same distribution as
- * Node's, necessarily a different sequence (SEMANTICS.md 62); range and
- * granularity are pinned differentially by invariant, not by bytes. */
+ * [0,1) at the spec's 53-bit granularity, from a per-thread xorshift128+
+ * generator (scr_math_random below). Same distribution as Node's,
+ * necessarily a different sequence; range and granularity are pinned
+ * differentially by invariant, not by bytes. */
 
 double scr_math_min(double a, double b) {
   if (isnan(a) || isnan(b)) return (double)NAN;
@@ -8054,12 +8167,39 @@ double scr_math_imul(double a, double b) {
              : (double)bits;
 }
 
+/* Math.random's generator: xorshift128+ with the shifts V8 and
+ * JavaScriptCore use (23, 17, 26), one state per thread, seeded once per
+ * thread with 128 bits from the system's secure source. ECMA-262 asks only
+ * for an implementation-defined, approximately uniform distribution, and
+ * the engines' Math.random is not cryptographically secure either; a
+ * secure draw per number is a kernel call on glibc. The crypto functions
+ * (randomBytes, randomFill, randomInt, randomUUID, getRandomValues, key
+ * generation) never read this state: they call arc4random_buf themselves.
+ *
+ * The state is never zero once seeded: the step is an invertible linear map,
+ * so it takes nonzero states to nonzero states, and zero doubles as "not
+ * seeded yet". A worker thread has its own state (SCR_TL) and seeds it on
+ * its first call, so no two threads share a stream. */
+static SCR_TL uint64_t scr_math_random_state[2];
+
+static SCR_COLD void scr_math_random_seed(void) {
+  do arc4random_buf(scr_math_random_state, sizeof scr_math_random_state);
+  while ((scr_math_random_state[0] | scr_math_random_state[1]) == 0);
+}
+
 double scr_math_random(void) {
-  uint64_t r;
-  arc4random_buf(&r, sizeof r);
-  /* The top 53 bits scaled by 2^-53: every representable k/2^53 in [0,1)
-   * is equally likely — V8's own construction. */
-  return (double)(r >> 11) * 0x1.0p-53;
+  if ((scr_math_random_state[0] | scr_math_random_state[1]) == 0) scr_math_random_seed();
+  uint64_t s1 = scr_math_random_state[0];
+  uint64_t s0 = scr_math_random_state[1];
+  scr_math_random_state[0] = s0;
+  s1 ^= s1 << 23;
+  s1 ^= s1 >> 17;
+  s1 ^= s0 ^ (s0 >> 26);
+  scr_math_random_state[1] = s1;
+  /* The top 53 bits of the sum scaled by 2^-53: every representable k/2^53
+   * in [0,1) is equally likely. The sum's low bits are its weakest, and
+   * the shift drops them. */
+  return (double)((s0 + s1) >> 11) * 0x1.0p-53;
 }
 
 
